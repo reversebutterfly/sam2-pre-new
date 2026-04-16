@@ -714,13 +714,26 @@ def evaluate_official(
         predictor = build_sam2_video_predictor(config, checkpoint, device=device)
         with torch.inference_mode():
             state = predictor.init_state(video_path=tmpdir)
+            # SAM2Long compat: set defaults so SAM2Long code path works
+            # (num_pathway=1 makes it behave like standard SAM2)
+            state.setdefault("num_pathway", 1)
+            state.setdefault("iou_thre", 0.0)
+            state.setdefault("uncertainty", 0)
             coords, labels = get_interior_prompt(masks_uint8[0])
             predictor.add_new_points_or_box(
                 state, frame_idx=0, obj_id=1,
                 points=coords, labels=labels)
             preds = {}
-            for fi, _, masks_out in predictor.propagate_in_video(state):
-                preds[fi] = (masks_out[0] > 0.0).cpu().numpy().squeeze()
+            result = predictor.propagate_in_video(state)
+            if isinstance(result, tuple):
+                # SAM2Long returns (obj_ids, mask_list)
+                _, mask_list = result
+                for fi in range(len(mask_list)):
+                    preds[fi] = (mask_list[fi][0] > 0.0).cpu().numpy().squeeze()
+            else:
+                # Standard SAM2 yields (frame_idx, obj_ids, masks_out)
+                for fi, _, masks_out in result:
+                    preds[fi] = (masks_out[0] > 0.0).cpu().numpy().squeeze()
 
         j_scores, f_scores = [], []
         for mi in range(len(protected_frames)):
