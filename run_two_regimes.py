@@ -336,6 +336,8 @@ def _decoy_read(all_outs, masks_uint8, eval_mod, eval_orig, decoy_offset,
         alpha = max(0.55, 1.25 - rank * 0.08)
         w = max(0.5, 2.5 - rank * 0.3)
         mask = masks_uint8[min(oi, T - 1)]
+        if mask.sum() == 0:
+            continue  # Skip frames where object is genuinely absent
         d_mask = shift_mask(mask, dy, dx)
         suppress = ((mask > 0) & (d_mask == 0)).astype(np.float32)
         decoy_only = ((d_mask > 0) & (mask == 0)).astype(np.float32)
@@ -541,6 +543,37 @@ def optimize_unified(
         if step % 10 == 0 or step == n_steps - 1:
             print(f"    [{regime[:4]}|{stage}] step {step:3d}  "
                   f"Lw={lw.item():.4f}  Lr={lr.item():.4f}  SSIM={ssim_min:.4f}")
+
+    # ── Final eval of last-step deltas (may beat best from before step) ──
+    with torch.no_grad():
+        mod_frames_final = []
+        for oi in range(T):
+            if oi in orig_deltas:
+                f = fake_uint8_quantize((frames_t[oi] + orig_deltas[oi]).clamp(0, 1))
+            else:
+                f = frames_t[oi]
+            mod_frames_final.append(f)
+            if oi in insert_after:
+                for si in insert_after[oi]:
+                    adv = fake_uint8_quantize(
+                        (insert_bases_t[si] + insert_deltas[si]).clamp(0, 1))
+                    mod_frames_final.append(adv)
+        all_outs_final = surrogate.forward_video(mod_frames_final, masks_uint8[0])
+        if regime == "suppression":
+            lw_f = _supp_write(all_outs_final, masks_uint8, idx_map, perturb_set,
+                               schedule, device)
+            lr_f = _supp_read(all_outs_final, masks_uint8, eval_mod, eval_orig,
+                              device)
+        else:
+            lw_f = _decoy_write(all_outs_final, decoy_targets, idx_map, perturb_set,
+                                schedule, device)
+            lr_f = _decoy_read(all_outs_final, masks_uint8, eval_mod, eval_orig,
+                               decoy_offset, device)
+        loss_final = (lw_f + 1.3 * lr_f).item()
+        if loss_final < best_loss:
+            best_loss = loss_final
+            best_id = {si: d.detach().clone() for si, d in insert_deltas.items()}
+            best_od = {oi: d.detach().clone() for oi, d in orig_deltas.items()}
 
     # ── Export ───────────────────────────────────────────────────────────
     ins_u8 = {}
@@ -767,12 +800,12 @@ def extract_signatures(
         pred = (logits > 0).cpu().numpy().squeeze().astype(bool)
         pred_area = float(pred.sum())
 
-        # Collapse rate
-        if pred_area < 0.01 * max(gt_area, 1):
+        # Collapse rate (skip if GT is empty — object genuinely absent)
+        if gt_area > 0 and pred_area < 0.01 * gt_area:
             col += 1
 
-        # Decoy-specific metrics
-        if decoy_offset is not None:
+        # Decoy-specific metrics (only meaningful when GT is non-empty)
+        if decoy_offset is not None and gt_area > 0:
             dy, dx = decoy_offset
             decoy_gt = shift_mask(masks_uint8[oi], dy, dx).astype(bool)
             iou_true = float((pred & gt).sum()) / max(float((pred | gt).sum()), 1e-9)

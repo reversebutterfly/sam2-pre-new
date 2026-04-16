@@ -60,11 +60,12 @@ def build_role_targets(
     import cv2
 
     T = len(masks_uint8)
-    # Use first available mask with good area for decoy computation
-    ref_mask = masks_uint8[min(1, T - 1)]
-    if ref_mask.sum() < 100 and masks_uint8[0].sum() > 100:
-        ref_mask = masks_uint8[0]
-    ref_frame = frames_uint8[min(1, T - 1)]
+    # Use one reference index for BOTH mask and frame to avoid mismatch
+    ref_idx = min(1, T - 1)
+    if masks_uint8[ref_idx].sum() < 100 and masks_uint8[0].sum() > 100:
+        ref_idx = 0
+    ref_mask = masks_uint8[ref_idx]
+    ref_frame = frames_uint8[ref_idx]
 
     # Find ONE shared decoy direction
     _, offset = find_decoy_region(ref_mask, ref_frame, offset_ratio)
