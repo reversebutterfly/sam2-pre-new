@@ -23,7 +23,7 @@ from .scheduler import (
     merge_event_triggers,
 )
 from .analyzer import analyze_video
-from .generator import optimize_hybrid
+from .generator import optimize_cooperative
 from .surrogate import SAM2Surrogate
 
 
@@ -89,9 +89,9 @@ def protect_video(
         print(f"        after frame {s.after_original_idx:3d}  "
               f"[{s.frame_type:6s}]  ({s.reason})")
 
-    # ── Phase 3: Generate adversarial frames (hybrid: insert + perturb) ─────
-    print("[3/4] Optimizing hybrid attack via PGD...")
-    inserted_frames, perturbed_originals, gen_metrics = optimize_hybrid(
+    # ── Phase 3: Generate adversarial frames (cooperative decoy) ────────────
+    print("[3/4] Optimizing cooperative decoy attack via PGD...")
+    inserted_frames, perturbed_originals, gen_metrics = optimize_cooperative(
         surrogate, frames_uint8, masks_uint8, schedule, cfg,
     )
     best_loss = gen_metrics.get('best_loss')
