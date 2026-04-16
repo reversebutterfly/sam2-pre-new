@@ -164,24 +164,26 @@ def build_role_targets(
         elif is_post_insert:
             td, dm = make_target_dict(
                 mask,
-                core_w=0.05,
+                core_w=0.0,
                 bridge_w=0.20,
-                decoy_w=0.45,
-                suppress_w=0.70,
-                rank_w=0.70,
-                score_w=0.25,
+                decoy_w=0.50,
+                suppress_w=1.00,
+                rank_w=1.00,
+                score_w=0.30,
+                suppress_margin=0.7,
+                rank_margin=0.9,
             )
         elif is_post_insert2:
             td, dm = make_target_dict(
                 mask,
-                core_w=0.05,
+                core_w=0.0,
                 bridge_w=0.10,
-                decoy_w=0.30,
-                suppress_w=0.55,
-                rank_w=0.55,
-                score_w=0.20,
-                decoy_margin=0.75,
-                rank_margin=0.6,
+                decoy_w=0.35,
+                suppress_w=0.80,
+                rank_w=0.80,
+                score_w=0.25,
+                suppress_margin=0.6,
+                rank_margin=0.75,
             )
         else:
             td, dm = make_target_dict(
@@ -213,25 +215,25 @@ def build_role_targets(
                 core_w=0.0,
                 bridge_w=0.30,
                 decoy_w=1.10,
-                suppress_w=1.00,
-                rank_w=1.00,
+                suppress_w=1.30,
+                rank_w=1.40,
                 score_w=0.50,
-                decoy_margin=1.0,
-                suppress_margin=0.6,
-                rank_margin=0.85,
+                decoy_margin=1.1,
+                suppress_margin=1.0,
+                rank_margin=1.25,
             )
         else:
             td, dm = make_target_dict(
                 mask_after,
                 core_w=0.0,
                 bridge_w=0.20,
-                decoy_w=0.95,
-                suppress_w=0.80,
-                rank_w=0.80,
+                decoy_w=1.00,
+                suppress_w=1.00,
+                rank_w=1.10,
                 score_w=0.45,
-                decoy_margin=0.9,
-                suppress_margin=0.5,
-                rank_margin=0.75,
+                decoy_margin=1.0,
+                suppress_margin=0.8,
+                rank_margin=1.0,
             )
 
         # Fix C1: pass shared offset to base frame constructor
@@ -309,7 +311,7 @@ def optimize_cooperative(
     future_targets = {}
     dy, dx = role_data["decoy_offset"]
     for rank, oi in enumerate(eval_orig_indices):
-        alpha = max(0.35, 0.85 - rank * 0.06)
+        alpha = max(0.55, 1.25 - rank * 0.08)
         mask = masks_uint8[min(oi, T - 1)]
         d_mask = shift_mask(mask, dy, dx)
         suppress = ((mask > 0) & (d_mask == 0)).astype(np.float32)
@@ -322,15 +324,15 @@ def optimize_cooperative(
             "core_w": 0.0,
             "bridge_w": 0.0,
             "decoy_w": alpha,
-            "suppress_w": min(1.1, alpha + 0.25),
-            "rank_w": min(1.0, alpha + 0.15),
-            "score_w": 0.15,
-            "score_margin": 0.35,
+            "suppress_w": min(1.6, alpha + 0.40),
+            "rank_w": min(1.3, alpha + 0.20),
+            "score_w": 0.30,
+            "score_margin": 0.5,
             "support_margin": 0.0,
             "bridge_margin": 0.0,
-            "decoy_margin": 0.8,
-            "suppress_margin": 0.4,
-            "rank_margin": 0.6,
+            "decoy_margin": 0.9,
+            "suppress_margin": 0.6,
+            "rank_margin": 0.8,
         }
 
     # ── PGD setup ────────────────────────────────────────────────────────
@@ -512,7 +514,7 @@ def optimize_cooperative(
             loss_quality = loss_quality / n_qual
 
         # ── Total loss ───────────────────────────────────────────────
-        loss_total = loss_write + 0.7 * loss_read + cfg.lambda_quality * loss_quality
+        loss_total = loss_write + 1.3 * loss_read + cfg.lambda_quality * loss_quality
 
         if loss_total.item() < best_loss:
             best_loss = loss_total.item()
