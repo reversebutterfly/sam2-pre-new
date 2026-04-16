@@ -34,8 +34,12 @@
   - multi-experiment parallelism
 - Recommend max_parallel_runs explicitly after profiling
 
-## Git Workflow
+## Git & GitHub
 
+- Remote: `git@github.com:reversebutterfly/sam2-pre-new.git`
+- GitHub SSH key 在**远程服务器**上: `~/.ssh/github_ed25519`
+  - 本地 Windows 没有此密钥，push 操作需要通过远程服务器中转
+  - 或配置本地 SSH agent forwarding / 本地添加同一密钥
 - **每次编写新代码前，必须先将当前代码同步到 git 仓库**（git add + git commit）
 - Commit message 用英文，简要描述当前状态
 - 确保工作区干净后再开始新的代码修改
