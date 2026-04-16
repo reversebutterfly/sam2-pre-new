@@ -119,9 +119,21 @@ def evaluate_sam2long(
             predictor.add_new_points_or_box(
                 state, frame_idx=0, obj_id=1,
                 points=coords, labels=labels)
+
+            # SAM2Long's propagate_in_video returns (obj_ids, mask_list)
+            # where mask_list[i] is the mask for frame i.
+            # Standard SAM2 yields (frame_idx, obj_ids, masks_out) per frame.
+            result = predictor.propagate_in_video(state)
             preds = {}
-            for fi, _, masks_out in predictor.propagate_in_video(state):
-                preds[fi] = (masks_out[0] > 0.0).cpu().numpy().squeeze()
+            if isinstance(result, tuple) and len(result) == 2:
+                # SAM2Long format: (obj_ids, mask_list)
+                _, mask_list = result
+                for fi in range(len(mask_list)):
+                    preds[fi] = (mask_list[fi][0] > 0.0).cpu().numpy().squeeze()
+            else:
+                # Standard SAM2 generator format
+                for fi, _, masks_out in result:
+                    preds[fi] = (masks_out[0] > 0.0).cpu().numpy().squeeze()
 
         # Compute J/F/J&F on eval window
         j_scores, f_scores = [], []
