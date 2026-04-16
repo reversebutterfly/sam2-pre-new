@@ -244,7 +244,11 @@ def optimize_cooperative(
     stage2_end = int(n_steps * 0.8)
     # stage3: rest
 
-    alpha_ins = max(cfg.epsilon_strong / max(n_steps // 3, 1), 1.0 / 255)
+    # Per-slot step sizes
+    alpha_ins = {}
+    for si in insert_deltas:
+        eps = insert_eps[si]
+        alpha_ins[si] = max(eps / max(n_steps // 3, 1), 1.0 / 255)
     alpha_orig = max(4.0 / 255 / max(n_steps // 3, 1), 0.5 / 255)
 
     best_loss = float("inf")
@@ -379,7 +383,9 @@ def optimize_cooperative(
             adv = (insert_bases_t[si] + insert_deltas[si]).clamp(0.0, 1.0)
             sv = differentiable_ssim(insert_bases_t[si], adv)
             ssim_vals.append(sv.item())
-            loss_quality = loss_quality + F.relu(cfg.ssim_threshold_strong - sv)
+            ssim_thresh = (cfg.ssim_threshold_strong if schedule[si].frame_type == "strong"
+                           else cfg.ssim_threshold_weak)
+            loss_quality = loss_quality + F.relu(ssim_thresh - sv)
             n_qual += 1
         for oi in orig_deltas:
             adv = (frames_t[oi] + orig_deltas[oi]).clamp(0.0, 1.0)
@@ -404,7 +410,7 @@ def optimize_cooperative(
         with torch.no_grad():
             for si in active_insert:
                 if insert_deltas[si].grad is not None:
-                    insert_deltas[si].data -= alpha_ins * insert_deltas[si].grad.sign()
+                    insert_deltas[si].data -= alpha_ins[si] * insert_deltas[si].grad.sign()
                     insert_deltas[si].data.clamp_(-insert_eps[si], insert_eps[si])
             for oi in active_orig:
                 if orig_deltas[oi].grad is not None:

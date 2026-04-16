@@ -100,10 +100,30 @@ def find_decoy_region(
             best_score = score
             best_offset = (dy, dx)
 
-    # Fallback: if no valid direction found, try smaller shift
+    # Fallback: if no valid direction found, retry at reduced shifts
     if best_score < 0:
-        half_shift = max(shift_px // 2, 5)
-        best_offset = (0, half_shift)
+        for fallback_frac in [0.5, 0.3, 0.2]:
+            fb_shift = max(int(max(obj_h, obj_w) * fallback_frac), 5)
+            for dy_dir, dx_dir in directions:
+                dy_fb = int(dy_dir * fb_shift)
+                dx_fb = int(dx_dir * fb_shift)
+                shifted_fb = np.zeros_like(mask)
+                s0 = max(0, -dy_fb); s1 = min(H, H - dy_fb)
+                s2 = max(0, -dx_fb); s3 = min(W, W - dx_fb)
+                d0 = max(0, dy_fb); d1 = min(H, H + dy_fb)
+                d2 = max(0, dx_fb); d3 = min(W, W + dx_fb)
+                hl_fb = min(s1 - s0, d1 - d0)
+                wl_fb = min(s3 - s2, d3 - d2)
+                if hl_fb > 0 and wl_fb > 0:
+                    shifted_fb[d0:d0+hl_fb, d2:d2+wl_fb] = mask[s0:s0+hl_fb, s2:s2+wl_fb]
+                retained_fb = shifted_fb.sum() / max(mask.sum(), 1)
+                if retained_fb >= 0.3:
+                    best_offset = (dy_fb, dx_fb)
+                    break
+            if best_score >= 0 or best_offset != (0, shift_px):
+                break
+        else:
+            best_offset = (0, 0)  # Last resort: no shift
 
     # Create decoy mask with best offset
     dy, dx = best_offset

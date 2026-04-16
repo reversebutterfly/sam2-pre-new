@@ -102,14 +102,19 @@ def decoy_target_loss(
     target[decoy > 0.5] = 1.0
 
     # Build per-pixel weight map
-    weight = torch.ones_like(pred_logits)
+    # Background gets LOW weight (0.1) so it doesn't dominate
+    # Important regions get HIGH weight relative to background
+    bg_w = 0.1
+    weight = torch.full_like(pred_logits, bg_w)
     weight[core > 0.5] = core_w
     weight[bridge > 0.5] = bridge_w
     weight[decoy > 0.5] = decoy_w
 
-    loss = F.binary_cross_entropy_with_logits(
-        pred_logits, target, weight=weight, reduction="mean",
+    # Unreduced BCE, then weight-normalized mean
+    bce = F.binary_cross_entropy_with_logits(
+        pred_logits, target, reduction="none",
     )
+    loss = (bce * weight).sum() / (weight.sum() + 1e-6)
     return loss
 
 
