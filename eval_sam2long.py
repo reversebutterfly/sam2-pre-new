@@ -9,19 +9,20 @@ Core prediction: RetentionRatio_Decoy > RetentionRatio_Suppression
 (Decoy retains more attack effect under confidence-gated tree memory.)
 
 Prerequisites:
-  - SAM2Long installed: pip install -e . from github.com/Mark12Ding/SAM2Long
+  - SAM2Long cloned: github.com/Mark12Ding/SAM2Long
   - Protected videos saved from M1 (--save_videos flag)
   - M1 results JSON for SAM2 baselines
 
+IMPORTANT: This script must be run with SAM2Long on PYTHONPATH so that
+`import sam2` resolves to SAM2Long's version (not standard SAM2):
+  PYTHONPATH=/path/to/SAM2Long:$PYTHONPATH python eval_sam2long.py ...
+
 Usage:
-  # Evaluate all saved videos
-  python eval_sam2long.py --device cuda:0
+  # Evaluate all saved videos (SAM2Long via PYTHONPATH)
+  PYTHONPATH=/path/to/SAM2Long python eval_sam2long.py --device cuda:0
 
   # Specific videos
-  python eval_sam2long.py --videos bear,dog --device cuda:0
-
-  # Custom SAM2Long parameters
-  python eval_sam2long.py --num_pathway 3 --iou_thre 0.1 --device cuda:0
+  PYTHONPATH=/path/to/SAM2Long python eval_sam2long.py --videos bear,dog --device cuda:0
 """
 import argparse
 import json
