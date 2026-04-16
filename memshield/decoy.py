@@ -211,33 +211,45 @@ def create_decoy_base_frame(
         base_frame: [H, W, 3] uint8.
     """
     H, W = frame_after.shape[:2]
-    base = frame_after.copy()
-
-    mask_ref = mask_after
+    mask_ref = (mask_after > 0).astype(np.uint8)
     dy, dx = decoy_offset
     decoy_mask = shift_mask(mask_ref, dy, dx)
 
-    # Weaken real object: blend toward local background
     obj_region = mask_ref > 0
-    if obj_region.any():
-        # Dilate mask to get surrounding background
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
-        dilated = cv2.dilate(mask_ref, kernel, iterations=2)
-        bg_ring = (dilated > 0) & (~obj_region)
+    if not obj_region.any():
+        return frame_after.copy()
 
-        if bg_ring.any():
-            bg_color = frame_after[bg_ring].mean(axis=0).astype(np.uint8)
-            # Blend object region 70% toward background color
-            base[obj_region] = (0.3 * base[obj_region].astype(float) +
-                                0.7 * bg_color.astype(float)).clip(0, 255).astype(np.uint8)
+    # Remove the real object as strongly as possible so later memory writes do
+    # not keep re-anchoring on the true appearance.
+    inpaint_mask = (mask_ref * 255).astype(np.uint8)
+    frame_bgr = cv2.cvtColor(frame_after, cv2.COLOR_RGB2BGR)
+    inpainted = cv2.inpaint(frame_bgr, inpaint_mask, 5, cv2.INPAINT_TELEA)
+    base = cv2.cvtColor(inpainted, cv2.COLOR_BGR2RGB).astype(np.float32)
 
-    # Strengthen decoy: copy object texture to decoy location
-    decoy_region = decoy_mask > 0
-    if decoy_region.any() and obj_region.any():
-        obj_pixels = frame_after[obj_region]
-        if len(obj_pixels) > 0:
-            obj_mean = obj_pixels.mean(axis=0).astype(np.uint8)
-            base[decoy_region] = (0.6 * base[decoy_region].astype(float) +
-                                  0.4 * obj_mean.astype(float)).clip(0, 255).astype(np.uint8)
+    # Build a soft alpha copy of the object and paste it at the decoy location.
+    obj_alpha = cv2.GaussianBlur(mask_ref.astype(np.float32), (0, 0), sigmaX=3.0, sigmaY=3.0)
+    obj_alpha = np.clip(obj_alpha, 0.0, 1.0)
+    obj_layer = frame_after.astype(np.float32) * obj_alpha[..., None]
 
-    return base
+    affine = np.float32([[1, 0, dx], [0, 1, dy]])
+    shifted_alpha = cv2.warpAffine(
+        obj_alpha, affine, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+    )
+    shifted_layer = cv2.warpAffine(
+        obj_layer, affine, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+    )
+
+    paste_alpha = 0.85 * shifted_alpha[..., None]
+    base = base * (1.0 - paste_alpha) + shifted_layer * 0.85
+
+    # Add a visible soft bridge so the optimizer is not asked to create a
+    # whole connecting structure from tiny epsilon noise alone.
+    bridge_full = create_bridge_mask(mask_ref, decoy_mask, bridge_width=13)
+    bridge_only = ((bridge_full > 0) & (mask_ref == 0) & (decoy_mask == 0)).astype(np.float32)
+    if bridge_only.any():
+        bridge_alpha = cv2.GaussianBlur(bridge_only, (0, 0), sigmaX=5.0, sigmaY=5.0)
+        obj_mean = frame_after[obj_region].mean(axis=0).astype(np.float32)
+        bridge_strength = 0.30 * bridge_alpha[..., None]
+        base = base * (1.0 - bridge_strength) + obj_mean[None, None, :] * bridge_strength
+
+    return np.clip(base, 0, 255).astype(np.uint8)

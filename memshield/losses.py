@@ -12,6 +12,40 @@ import torch
 import torch.nn.functional as F
 
 
+def _masked_mean(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Mean of x over a binary mask."""
+    area = mask.sum()
+    if area.item() <= 0:
+        return torch.zeros((), device=x.device, dtype=x.dtype)
+    return (x * mask).sum() / (area + 1e-6)
+
+
+def _masked_softplus_pos(
+    logits: torch.Tensor,
+    mask: torch.Tensor,
+    margin: float,
+) -> torch.Tensor:
+    """Encourage logits in the mask to exceed +margin."""
+    area = mask.sum()
+    if area.item() <= 0:
+        return torch.zeros((), device=logits.device, dtype=logits.dtype)
+    loss = F.softplus(margin - logits)
+    return (loss * mask).sum() / (area + 1e-6)
+
+
+def _masked_softplus_neg(
+    logits: torch.Tensor,
+    mask: torch.Tensor,
+    margin: float,
+) -> torch.Tensor:
+    """Encourage logits in the mask to stay below -margin."""
+    area = mask.sum()
+    if area.item() <= 0:
+        return torch.zeros((), device=logits.device, dtype=logits.dtype)
+    loss = F.softplus(logits + margin)
+    return (loss * mask).sum() / (area + 1e-6)
+
+
 def mean_logit_loss(pred_logits: torch.Tensor, gt_masks: torch.Tensor) -> torch.Tensor:
     """Mean logit in GT region. Minimize → suppress object."""
     gt = gt_masks.float()
@@ -30,6 +64,14 @@ def object_score_margin_loss(
     """
     # softplus(score + margin) → 0 when score << -margin, → (score+margin) when score >> -margin
     return F.softplus(score_logits + margin).mean()
+
+
+def object_score_positive_loss(
+    score_logits: torch.Tensor,
+    margin: float = 0.5,
+) -> torch.Tensor:
+    """Push object_score_logits robustly above +margin."""
+    return F.softplus(margin - score_logits).mean()
 
 
 def fake_uint8_quantize(x: torch.Tensor) -> torch.Tensor:
@@ -75,47 +117,62 @@ def decoy_target_loss(
     pred_logits: torch.Tensor,
     target_dict: dict,
 ) -> torch.Tensor:
-    """Push SAM2 to predict the decoy pseudo-target.
+    """Transfer-oriented relocation loss.
 
-    Uses 3 non-overlapping binary masks with role-specific weights:
-      - core: keep predicting object here (BCE target=1, weight=core_w)
-      - bridge: extend prediction toward decoy (BCE target=1, weight=bridge_w)
-      - decoy: predict object at wrong location (BCE target=1, weight=decoy_w)
-      - background: everything else (BCE target=0, weight=1.0)
-
-    Args:
-        pred_logits: [1, 1, H, W] mask logits from SAM2.
-        target_dict: dict with keys 'core', 'bridge', 'decoy' (each [1,1,H,W] binary)
-                     and 'core_w', 'bridge_w', 'decoy_w' (float weights).
+    Union-mask BCE makes it too easy to keep the true object active while adding
+    a weak secondary blob at the decoy. For relocation, the decoy must beat the
+    true location. This objective therefore combines:
+      - positive pressure on support / bridge / decoy regions
+      - negative pressure on the true location
+      - a ranking term that enforces decoy logits > true logits
     """
-    core = target_dict["core"]
+    support = target_dict["core"]
     bridge = target_dict["bridge"]
     decoy = target_dict["decoy"]
-    core_w = target_dict["core_w"]
-    bridge_w = target_dict["bridge_w"]
-    decoy_w = target_dict["decoy_w"]
+    suppress = target_dict.get("suppress", torch.zeros_like(pred_logits))
 
-    # Build binary target: 1 where we want SAM2 to predict "object"
-    target = torch.zeros_like(pred_logits)
-    target[core > 0.5] = 1.0
-    target[bridge > 0.5] = 1.0
-    target[decoy > 0.5] = 1.0
+    support_w = float(target_dict.get("core_w", 0.0))
+    bridge_w = float(target_dict.get("bridge_w", 0.0))
+    decoy_w = float(target_dict.get("decoy_w", 0.0))
+    suppress_w = float(target_dict.get("suppress_w", 0.0))
+    rank_w = float(target_dict.get("rank_w", 0.0))
+    bg_w = float(target_dict.get("bg_w", 0.0))
 
-    # Build per-pixel weight map
-    # Background gets LOW weight (0.1) so it doesn't dominate
-    # Important regions get HIGH weight relative to background
-    bg_w = 0.1
-    weight = torch.full_like(pred_logits, bg_w)
-    weight[core > 0.5] = core_w
-    weight[bridge > 0.5] = bridge_w
-    weight[decoy > 0.5] = decoy_w
+    support_margin = float(target_dict.get("support_margin", 0.0))
+    bridge_margin = float(target_dict.get("bridge_margin", 0.25))
+    decoy_margin = float(target_dict.get("decoy_margin", 0.75))
+    suppress_margin = float(target_dict.get("suppress_margin", 0.5))
+    rank_margin = float(target_dict.get("rank_margin", 0.75))
 
-    # Unreduced BCE, then weight-normalized mean
-    bce = F.binary_cross_entropy_with_logits(
-        pred_logits, target, reduction="none",
-    )
-    loss = (bce * weight).sum() / (weight.sum() + 1e-6)
-    return loss
+    loss = torch.zeros((), device=pred_logits.device, dtype=pred_logits.dtype)
+    denom = 0.0
+
+    if support_w > 0.0:
+        loss = loss + support_w * _masked_softplus_pos(pred_logits, support, support_margin)
+        denom += support_w
+    if bridge_w > 0.0:
+        loss = loss + bridge_w * _masked_softplus_pos(pred_logits, bridge, bridge_margin)
+        denom += bridge_w
+    if decoy_w > 0.0:
+        loss = loss + decoy_w * _masked_softplus_pos(pred_logits, decoy, decoy_margin)
+        denom += decoy_w
+    if suppress_w > 0.0:
+        loss = loss + suppress_w * _masked_softplus_neg(pred_logits, suppress, suppress_margin)
+        denom += suppress_w
+    if rank_w > 0.0 and decoy.sum().item() > 0 and suppress.sum().item() > 0:
+        true_mean = _masked_mean(pred_logits, suppress)
+        decoy_mean = _masked_mean(pred_logits, decoy)
+        loss = loss + rank_w * F.softplus(true_mean - decoy_mean + rank_margin)
+        denom += rank_w
+    if bg_w > 0.0:
+        occupied = ((support + bridge + decoy + suppress) > 0.5).float()
+        bg = 1.0 - occupied
+        loss = loss + bg_w * _masked_softplus_neg(pred_logits, bg, 0.0)
+        denom += bg_w
+
+    if denom <= 0.0:
+        return torch.zeros((), device=pred_logits.device, dtype=pred_logits.dtype)
+    return loss / denom
 
 
 def memory_drift_loss(
