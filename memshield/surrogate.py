@@ -166,16 +166,9 @@ class SAM2Surrogate:
                         prev_sam_mask_logits=None,
                     )
                     # Store as non-conditioning frame
-                    if not needs_grad:
-                        # Detach memory for non-adversarial frames to save GPU memory
-                        if current_out.get("maskmem_features") is not None:
-                            current_out["maskmem_features"] = current_out["maskmem_features"].detach()
-                        if current_out.get("maskmem_pos_enc") is not None:
-                            current_out["maskmem_pos_enc"] = [
-                                x.detach() for x in current_out["maskmem_pos_enc"]
-                            ]
-                        if current_out.get("obj_ptr") is not None:
-                            current_out["obj_ptr"] = current_out["obj_ptr"].detach()
+                    # NOTE: Do NOT detach memory features — gradients must flow
+                    # through intermediate clean frames for long-range read loss.
+                    # Memory will be higher but gradient chain stays intact.
                     output_dict["non_cond_frame_outputs"][i] = current_out
 
             # Extract rich outputs for loss computation

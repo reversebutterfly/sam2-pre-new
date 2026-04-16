@@ -73,22 +73,44 @@ def differentiable_ssim(
 
 def decoy_target_loss(
     pred_logits: torch.Tensor,
-    pseudo_target: torch.Tensor,
+    target_dict: dict,
 ) -> torch.Tensor:
-    """Push SAM2 to predict the DECOY pseudo-target instead of the real mask.
+    """Push SAM2 to predict the decoy pseudo-target.
 
-    Unlike suppression losses (push logits to 0), this loss makes SAM2
-    CONFIDENTLY predict the wrong region. This creates a stronger, more
-    persistent memory entry.
+    Uses 3 non-overlapping binary masks with role-specific weights:
+      - core: keep predicting object here (BCE target=1, weight=core_w)
+      - bridge: extend prediction toward decoy (BCE target=1, weight=bridge_w)
+      - decoy: predict object at wrong location (BCE target=1, weight=decoy_w)
+      - background: everything else (BCE target=0, weight=1.0)
 
     Args:
         pred_logits: [1, 1, H, W] mask logits from SAM2.
-        pseudo_target: [1, 1, H, W] float binary mask of decoy region.
+        target_dict: dict with keys 'core', 'bridge', 'decoy' (each [1,1,H,W] binary)
+                     and 'core_w', 'bridge_w', 'decoy_w' (float weights).
     """
-    # BCE to match the pseudo-target (object at decoy, no object at real location)
-    return F.binary_cross_entropy_with_logits(
-        pred_logits, pseudo_target, reduction="mean",
+    core = target_dict["core"]
+    bridge = target_dict["bridge"]
+    decoy = target_dict["decoy"]
+    core_w = target_dict["core_w"]
+    bridge_w = target_dict["bridge_w"]
+    decoy_w = target_dict["decoy_w"]
+
+    # Build binary target: 1 where we want SAM2 to predict "object"
+    target = torch.zeros_like(pred_logits)
+    target[core > 0.5] = 1.0
+    target[bridge > 0.5] = 1.0
+    target[decoy > 0.5] = 1.0
+
+    # Build per-pixel weight map
+    weight = torch.ones_like(pred_logits)
+    weight[core > 0.5] = core_w
+    weight[bridge > 0.5] = bridge_w
+    weight[decoy > 0.5] = decoy_w
+
+    loss = F.binary_cross_entropy_with_logits(
+        pred_logits, target, weight=weight, reduction="mean",
     )
+    return loss
 
 
 def memory_drift_loss(

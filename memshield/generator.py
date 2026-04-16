@@ -15,10 +15,10 @@ import torch
 import torch.nn.functional as F
 
 from .config import MemShieldConfig
-from .decoy import find_decoy_region, create_bridge_mask, create_decoy_base_frame
+from .decoy import find_decoy_region, create_bridge_mask, create_decoy_base_frame, shift_mask
 from .losses import (
-    decoy_target_loss, memory_drift_loss, fake_uint8_quantize,
-    differentiable_ssim, compute_attack_loss,
+    decoy_target_loss, fake_uint8_quantize,
+    differentiable_ssim,
 )
 from .scheduler import InsertionSlot, build_modified_index_map
 from .surrogate import SAM2Surrogate
@@ -75,44 +75,45 @@ def build_role_targets(
     decoy_masks_np = {}
     insert_bases = {}
 
-    def shift_mask(mask, dy, dx):
-        """Shift a mask by (dy, dx)."""
-        shifted = np.zeros_like(mask)
-        h, w = mask.shape
-        sy0, sy1 = max(0, -dy), min(h, h - dy)
-        sx0, sx1 = max(0, -dx), min(w, w - dx)
-        dy0, dy1 = max(0, dy), min(h, h + dy)
-        dx0, dx1 = max(0, dx), min(w, w + dx)
-        hl = min(sy1 - sy0, dy1 - dy0)
-        wl = min(sx1 - sx0, dx1 - dx0)
-        if hl > 0 and wl > 0:
-            shifted[dy0:dy0+hl, dx0:dx0+wl] = mask[sy0:sy0+hl, sx0:sx0+wl]
-        return shifted
-
     def erode_mask(mask, iters=2):
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
         eroded = cv2.erode(mask, kernel, iterations=iters)
         return eroded if eroded.sum() > 50 else mask
 
-    def make_target(mask, core_w, bridge_w, decoy_w):
-        """Build pseudo-target: core_w*Core + bridge_w*Bridge + decoy_w*Decoy."""
+    def make_target_dict(mask, core_w, bridge_w, decoy_w):
+        """Build 3 NON-OVERLAPPING binary masks + weights for weighted BCE.
+
+        Returns dict for decoy_target_loss with keys:
+          core, bridge, decoy (each [1,1,H,W] float tensor)
+          core_w, bridge_w, decoy_w (float weights)
+        """
         core = erode_mask(mask)
         d_mask = shift_mask(mask, dy, dx)
-        bridge = create_bridge_mask(mask, d_mask, bridge_width=12)
-        # Weighted combination
-        t = np.zeros((H, W), dtype=np.float32)
-        t[core > 0] = np.maximum(t[core > 0], core_w)
-        t[bridge > 0] = np.maximum(t[bridge > 0], bridge_w)
-        t[d_mask > 0] = np.maximum(t[d_mask > 0], decoy_w)
-        return t, d_mask
+        bridge_full = create_bridge_mask(mask, d_mask, bridge_width=12)
+
+        # Make non-overlapping: priority decoy > bridge > core
+        core_only = (core > 0).astype(np.float32)
+        decoy_only = (d_mask > 0).astype(np.float32)
+        bridge_only = ((bridge_full > 0) & (core == 0) & (d_mask == 0)).astype(np.float32)
+        # Remove overlap: decoy wins over core where they overlap
+        core_only[(d_mask > 0)] = 0.0
+
+        return {
+            "core": torch.from_numpy(core_only).unsqueeze(0).unsqueeze(0).to(device),
+            "bridge": torch.from_numpy(bridge_only).unsqueeze(0).unsqueeze(0).to(device),
+            "decoy": torch.from_numpy(decoy_only).unsqueeze(0).unsqueeze(0).to(device),
+            "core_w": core_w,
+            "bridge_w": bridge_w,
+            "decoy_w": decoy_w,
+        }, d_mask
 
     # Build insertion-position lookup
     insert_positions = {s.after_original_idx: s for s in schedule}
 
     # ── Frame 0: loosen conditioning memory ──────────────────────────────
     if 0 in perturb_set:
-        t, dm = make_target(masks_uint8[0], core_w=1.0, bridge_w=0.05, decoy_w=0.0)
-        targets[("orig", 0)] = torch.from_numpy(t).unsqueeze(0).unsqueeze(0).to(device)
+        td, dm = make_target_dict(masks_uint8[0], core_w=1.0, bridge_w=0.05, decoy_w=0.0)
+        targets[("orig", 0)] = td
 
     # ── Per-frame targets based on role ──────────────────────────────────
     for orig_idx in sorted(perturb_set):
@@ -120,46 +121,38 @@ def build_role_targets(
             continue
         mask = masks_uint8[min(orig_idx, T - 1)]
 
-        # Determine role
         is_pre_insert = any(orig_idx == s.after_original_idx for s in schedule)
         is_post_insert = any(orig_idx == s.after_original_idx + 1 for s in schedule)
         is_post_insert2 = any(orig_idx == s.after_original_idx + 2 for s in schedule)
 
         if is_pre_insert:
-            # Open the door toward decoy
-            t, dm = make_target(mask, core_w=1.0, bridge_w=0.15, decoy_w=0.10)
+            td, dm = make_target_dict(mask, core_w=1.0, bridge_w=0.15, decoy_w=0.10)
         elif is_post_insert:
-            # Prevent snap-back, reinforce decoy
-            t, dm = make_target(mask, core_w=1.0, bridge_w=0.25, decoy_w=0.25)
+            td, dm = make_target_dict(mask, core_w=1.0, bridge_w=0.25, decoy_w=0.25)
         elif is_post_insert2:
-            t, dm = make_target(mask, core_w=1.0, bridge_w=0.15, decoy_w=0.15)
+            td, dm = make_target_dict(mask, core_w=1.0, bridge_w=0.15, decoy_w=0.15)
         else:
-            t, dm = make_target(mask, core_w=1.0, bridge_w=0.05, decoy_w=0.05)
+            td, dm = make_target_dict(mask, core_w=1.0, bridge_w=0.05, decoy_w=0.05)
 
-        targets[("orig", orig_idx)] = torch.from_numpy(t).unsqueeze(0).unsqueeze(0).to(device)
+        targets[("orig", orig_idx)] = td
         decoy_masks_np[orig_idx] = dm
 
-    # ── Insert targets ───────────────────────────────────────────────────
+    # ── Insert targets (use shared offset, consistent mask_after) ────────
     for slot_i, slot in enumerate(schedule):
         pos = slot.after_original_idx
-        mask = masks_uint8[min(pos, T - 1)]
-        frame_before = frames_uint8[min(pos, T - 1)]
+        # Fix M2: use mask_after consistently (matches frame_after base)
         frame_after = frames_uint8[min(pos + 1, T - 1)]
-        mask_before = masks_uint8[min(pos, T - 1)]
         mask_after = masks_uint8[min(pos + 1, T - 1)]
 
         if slot.frame_type == "strong":
-            # Strong insert: confident wrong memory
-            t, dm = make_target(mask, core_w=0.30, bridge_w=0.70, decoy_w=1.00)
-            base, _ = create_decoy_base_frame(frame_before, frame_after,
-                                              mask_before, mask_after, offset_ratio)
+            td, dm = make_target_dict(mask_after, core_w=0.30, bridge_w=0.70, decoy_w=1.00)
         else:
-            # Weak insert: refresh wrong memory
-            t, dm = make_target(mask, core_w=0.25, bridge_w=0.60, decoy_w=0.85)
-            base, _ = create_decoy_base_frame(frame_before, frame_after,
-                                              mask_before, mask_after, offset_ratio)
+            td, dm = make_target_dict(mask_after, core_w=0.25, bridge_w=0.60, decoy_w=0.85)
 
-        targets[("insert", slot_i)] = torch.from_numpy(t).unsqueeze(0).unsqueeze(0).to(device)
+        # Fix C1: pass shared offset to base frame constructor
+        base = create_decoy_base_frame(frame_after, mask_after, offset)
+
+        targets[("insert", slot_i)] = td
         insert_bases[slot_i] = base
         decoy_masks_np[f"insert_{slot_i}"] = dm
 
@@ -212,7 +205,7 @@ def optimize_cooperative(
         base_t = torch.from_numpy(base_np).float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
         insert_bases_t[slot_i] = base_t.detach()
         insert_deltas[slot_i] = torch.zeros(1, 3, H, W, device=device, requires_grad=True)
-        insert_eps[slot_i] = cfg.epsilon_strong
+        insert_eps[slot_i] = cfg.epsilon_strong if slot.frame_type == "strong" else cfg.epsilon_weak
 
     orig_deltas = {}
     orig_eps = {}
@@ -227,26 +220,23 @@ def optimize_cooperative(
     eval_orig_indices = list(range(eval_orig_start, eval_orig_end))
     eval_mod_indices = [idx_map["orig_to_mod"][j] for j in eval_orig_indices]
 
-    # Build future targets (decoy-aware, decaying alpha)
+    # Build future targets (decoy-aware, decaying weight)
     future_targets = {}
+    dy, dx = role_data["decoy_offset"]
     for rank, oi in enumerate(eval_orig_indices):
-        alpha = max(0.05, 0.25 - rank * 0.02)  # Decay with distance
+        alpha = max(0.05, 0.25 - rank * 0.02)
         mask = masks_uint8[min(oi, T - 1)]
-        dm = np.zeros_like(mask)
-        dy, dx = role_data["decoy_offset"]
-        shifted = np.zeros_like(mask)
-        h, w = mask.shape
-        sy0, sy1 = max(0, -dy), min(h, h - dy)
-        sx0, sx1 = max(0, -dx), min(w, w - dx)
-        dy0, dy1 = max(0, dy), min(h, h + dy)
-        dx0, dx1 = max(0, dx), min(w, w + dx)
-        hl = min(sy1 - sy0, dy1 - dy0)
-        wl = min(sx1 - sx0, dx1 - dx0)
-        if hl > 0 and wl > 0:
-            shifted[dy0:dy0+hl, dx0:dx0+wl] = mask[sy0:sy0+hl, sx0:sx0+wl]
-        t = mask.astype(np.float32)
-        t[shifted > 0] = np.maximum(t[shifted > 0], alpha)
-        future_targets[oi] = torch.from_numpy(t).unsqueeze(0).unsqueeze(0).to(device)
+        d_mask = shift_mask(mask, dy, dx)
+        core = mask.astype(np.float32)
+        decoy_only = ((d_mask > 0) & (mask == 0)).astype(np.float32)
+        future_targets[oi] = {
+            "core": torch.from_numpy(core).unsqueeze(0).unsqueeze(0).to(device),
+            "bridge": torch.zeros(1, 1, H, W, device=device),
+            "decoy": torch.from_numpy(decoy_only).unsqueeze(0).unsqueeze(0).to(device),
+            "core_w": 1.0,
+            "bridge_w": 0.0,
+            "decoy_w": alpha,
+        }
 
     # ── PGD setup ────────────────────────────────────────────────────────
     n_steps = cfg.n_steps_strong
@@ -318,6 +308,14 @@ def optimize_cooperative(
         loss_write = torch.tensor(0.0, device=device)
         n_write = 0
 
+        def _resize_target_dict(td, target_size):
+            """Resize all masks in a target_dict to match logits spatial size."""
+            resized = dict(td)
+            for k in ("core", "bridge", "decoy"):
+                if resized[k].shape[-2:] != target_size:
+                    resized[k] = F.interpolate(resized[k], size=target_size, mode="nearest")
+            return resized
+
         # Loss on perturbed originals
         for oi in perturb_set:
             key = ("orig", oi)
@@ -327,24 +325,17 @@ def optimize_cooperative(
                     out = all_outs[mod_idx]
                     logits = out.get("logits_orig_hw") if isinstance(out, dict) else out
                     if logits is not None:
-                        tgt = targets[key]
-                        if tgt.shape[-2:] != logits.shape[-2:]:
-                            tgt = F.interpolate(tgt, size=logits.shape[-2:], mode="nearest")
-                        loss_write = loss_write + decoy_target_loss(logits, tgt)
+                        td = _resize_target_dict(targets[key], logits.shape[-2:])
+                        loss_write = loss_write + decoy_target_loss(logits, td)
                         n_write += 1
 
         # Loss on inserted frames
         for si in insert_deltas:
             key = ("insert", si)
             if key in targets:
-                # Find the modified index for this insert
-                slot = schedule[si]
-                pos = slot.after_original_idx
-                # Insert mod_idx = orig_to_mod[pos] + 1 + offset within that position
                 insert_indices = idx_map["insert_mod_indices"]
-                # Simple: iterate to find
                 cursor = 0
-                for check_si, check_slot in enumerate(schedule):
+                for check_si in range(len(schedule)):
                     if check_si == si:
                         break
                     cursor += 1
@@ -354,11 +345,8 @@ def optimize_cooperative(
                         out = all_outs[mod_idx]
                         logits = out.get("logits_orig_hw") if isinstance(out, dict) else out
                         if logits is not None:
-                            tgt = targets[key]
-                            if tgt.shape[-2:] != logits.shape[-2:]:
-                                tgt = F.interpolate(tgt, size=logits.shape[-2:], mode="nearest")
-                            # Strong weight for inserts
-                            loss_write = loss_write + 1.5 * decoy_target_loss(logits, tgt)
+                            td = _resize_target_dict(targets[key], logits.shape[-2:])
+                            loss_write = loss_write + 1.5 * decoy_target_loss(logits, td)
                             n_write += 1
 
         if n_write > 0:
@@ -377,10 +365,8 @@ def optimize_cooperative(
             # Front-loaded weighting
             w = max(0.5, 2.5 - rank * 0.3)
             if oi in future_targets:
-                tgt = future_targets[oi]
-                if tgt.shape[-2:] != logits.shape[-2:]:
-                    tgt = F.interpolate(tgt, size=logits.shape[-2:], mode="nearest")
-                loss_read = loss_read + w * decoy_target_loss(logits, tgt)
+                td = _resize_target_dict(future_targets[oi], logits.shape[-2:])
+                loss_read = loss_read + w * decoy_target_loss(logits, td)
             n_read += 1
         if n_read > 0:
             loss_read = loss_read / n_read

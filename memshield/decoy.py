@@ -90,10 +90,20 @@ def find_decoy_region(
         else:
             color_sim = 0.0
 
+        # Reject candidates with too little retained area
+        retained = shifted.sum() / max(mask.sum(), 1)
+        if retained < 0.3:
+            continue
+
         score = 0.7 * bg_fraction + 0.3 * color_sim
         if score > best_score:
             best_score = score
             best_offset = (dy, dx)
+
+    # Fallback: if no valid direction found, try smaller shift
+    if best_score < 0:
+        half_shift = max(shift_px // 2, 5)
+        best_offset = (0, half_shift)
 
     # Create decoy mask with best offset
     dy, dx = best_offset
@@ -150,31 +160,42 @@ def create_bridge_mask(
     return pseudo_target
 
 
-def create_decoy_base_frame(
-    frame_before: np.ndarray,
-    frame_after: np.ndarray,
-    mask_before: np.ndarray,
-    mask_after: np.ndarray,
-    offset_ratio: float = 0.5,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Create a sharp base frame with decoy relocation.
+def shift_mask(mask: np.ndarray, dy: int, dx: int) -> np.ndarray:
+    """Shift a binary mask by (dy, dx) pixels, clipping to image bounds."""
+    H, W = mask.shape
+    shifted = np.zeros_like(mask)
+    sy0, sy1 = max(0, -dy), min(H, H - dy)
+    sx0, sx1 = max(0, -dx), min(W, W - dx)
+    dy0, dy1 = max(0, dy), min(H, H + dy)
+    dx0, dx1 = max(0, dx), min(W, W + dx)
+    hl = min(sy1 - sy0, dy1 - dy0)
+    wl = min(sx1 - sx0, dx1 - dx0)
+    if hl > 0 and wl > 0:
+        shifted[dy0:dy0+hl, dx0:dx0+wl] = mask[sy0:sy0+hl, sx0:sx0+wl]
+    return shifted
 
-    Instead of 50/50 blend, creates a composite that:
-    1. Uses frame_after as the base (sharp, not blurry)
-    2. Weakens the real object region (blends toward background)
-    3. Copies object-like texture into the decoy region
+
+def create_decoy_base_frame(
+    frame_after: np.ndarray,
+    mask_after: np.ndarray,
+    decoy_offset: Tuple[int, int],
+) -> np.ndarray:
+    """Create a sharp base frame with decoy relocation using a SHARED offset.
+
+    Args:
+        frame_after: [H, W, 3] uint8 — sharp base (not blurry blend).
+        mask_after: [H, W] uint8 — GT mask for frame_after.
+        decoy_offset: (dy, dx) — the shared decoy direction from build_role_targets.
 
     Returns:
-        (base_frame, pseudo_target_mask): both [H, W, 3] uint8 / [H, W] uint8
+        base_frame: [H, W, 3] uint8.
     """
     H, W = frame_after.shape[:2]
-
-    # Use frame_after as sharp base (not blurry blend)
     base = frame_after.copy()
 
-    # Find decoy region
-    mask_ref = mask_before if mask_before.sum() > mask_after.sum() else mask_after
-    decoy_mask, offset = find_decoy_region(mask_ref, frame_after, offset_ratio)
+    mask_ref = mask_after
+    dy, dx = decoy_offset
+    decoy_mask = shift_mask(mask_ref, dy, dx)
 
     # Weaken real object: blend toward local background
     obj_region = mask_ref > 0
@@ -193,15 +214,10 @@ def create_decoy_base_frame(
     # Strengthen decoy: copy object texture to decoy location
     decoy_region = decoy_mask > 0
     if decoy_region.any() and obj_region.any():
-        # Get object texture from frame_before
-        obj_pixels = frame_before[mask_before > 0] if mask_before.sum() > 0 else frame_after[obj_region]
+        obj_pixels = frame_after[obj_region]
         if len(obj_pixels) > 0:
             obj_mean = obj_pixels.mean(axis=0).astype(np.uint8)
-            # Blend decoy region toward object color (subtle, 40% blend)
             base[decoy_region] = (0.6 * base[decoy_region].astype(float) +
                                   0.4 * obj_mean.astype(float)).clip(0, 255).astype(np.uint8)
 
-    # Create pseudo-target mask (what we want SAM2 to predict on this frame)
-    pseudo_target = create_bridge_mask(mask_ref, decoy_mask)
-
-    return base, pseudo_target
+    return base
