@@ -244,11 +244,11 @@ def optimize_cooperative(
     stage2_end = int(n_steps * 0.8)
     # stage3: rest
 
-    # Per-slot step sizes
+    # Per-slot step sizes (floor proportional to epsilon, not absolute)
     alpha_ins = {}
     for si in insert_deltas:
         eps = insert_eps[si]
-        alpha_ins[si] = max(eps / max(n_steps // 3, 1), 1.0 / 255)
+        alpha_ins[si] = max(eps / max(n_steps // 3, 1), eps * 0.1)
     alpha_orig = max(4.0 / 255 / max(n_steps // 3, 1), 0.5 / 255)
 
     best_loss = float("inf")
