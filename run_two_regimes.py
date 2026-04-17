@@ -494,6 +494,7 @@ def optimize_unified(
     cfg: MemShieldConfig,
     regime: str,
     no_teacher: bool = False,
+    ablation: str = "combined",
 ) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], Dict]:
     """Unified PGD for both regimes. Only loss + insert bases differ.
 
@@ -598,6 +599,12 @@ def optimize_unified(
                 # Stage 3 (suppression): freeze first insert + f0
                 a_ins = {si for si in insert_deltas if si > 0}
                 a_orig = {oi for oi in orig_deltas if oi > 0}
+
+        # Ablation override: force one component off
+        if ablation == "perturb_only":
+            a_ins = set()
+        elif ablation == "insert_only":
+            a_orig = set()
 
         for si in a_ins:
             if insert_deltas[si].grad is not None:
@@ -1141,6 +1148,9 @@ def main():
                         help="Save protected videos for SAM2Long reuse")
     parser.add_argument("--no_teacher", action="store_true",
                         help="Disable teacher cooperation (output-only decoy baseline)")
+    parser.add_argument("--ablation", choices=["combined", "perturb_only", "insert_only"],
+                        default="combined",
+                        help="Ablation mode: combined (default), perturb_only, insert_only")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -1261,7 +1271,7 @@ def main():
                 # PGD on attack prefix only
                 ins_u8, orig_u8, opt_met = optimize_unified(
                     surrogate, frames[:ap], masks[:ap], schedule, cfg, regime,
-                    no_teacher=args.no_teacher)
+                    no_teacher=args.no_teacher, ablation=args.ablation)
                 opt_time = time.time() - t0
 
                 # Build full video: attacked prefix + clean tail
