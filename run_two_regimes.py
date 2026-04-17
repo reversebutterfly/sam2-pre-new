@@ -1084,11 +1084,29 @@ def main():
                   else args.attack_prefix_supp)
             ap = min(ap, T_full)  # Don't exceed video length
 
-            # Decoy uses cover_prefix mode for persistent FIFO poisoning
-            use_cover = (regime == "decoy")
-            schedule = compute_resonance_schedule(
-                ap, cfg.fifo_window, cfg.max_insertion_ratio,
-                cover_prefix=use_cover)
+            # Decoy: probe distractor mode to select schedule
+            if regime == "decoy":
+                from memshield.decoy import find_decoy_region
+                ref_idx = min(1, ap - 1)
+                if masks[ref_idx].sum() < 100 and masks[0].sum() > 100:
+                    ref_idx = 0
+                _, _, is_distractor = find_decoy_region(
+                    masks[ref_idx], frames[ref_idx])
+                if is_distractor:
+                    # Natural distractor: use conservative schedule (like old)
+                    schedule = compute_resonance_schedule(
+                        min(15, ap), cfg.fifo_window, cfg.max_insertion_ratio)
+                    decoy_mode = "distractor"
+                else:
+                    # Background decoy: use cover_prefix for persistence
+                    schedule = compute_resonance_schedule(
+                        ap, cfg.fifo_window, cfg.max_insertion_ratio,
+                        cover_prefix=True)
+                    decoy_mode = "background"
+            else:
+                schedule = compute_resonance_schedule(
+                    ap, cfg.fifo_window, cfg.max_insertion_ratio)
+                decoy_mode = "n/a"
             perturb_set = select_perturb_originals(schedule, ap)
 
             # Fixed seed for reproducibility
@@ -1098,8 +1116,9 @@ def main():
                 torch.cuda.manual_seed_all(args.seed)
 
             n_ins = len(schedule)
+            mode_str = f" mode={decoy_mode}" if regime == "decoy" else ""
             print(f"  [{regime}] optimizing ({args.n_steps} steps on f0-f{ap-1}, "
-                  f"{n_ins} inserts)...")
+                  f"{n_ins} inserts{mode_str})...")
             try:
                 t0 = time.time()
                 # PGD on attack prefix only

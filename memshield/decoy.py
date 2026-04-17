@@ -21,21 +21,25 @@ def find_decoy_region(
     mask: np.ndarray,
     frame: np.ndarray,
     offset_ratio: float = 0.5,
-) -> Tuple[np.ndarray, Tuple[int, int]]:
+) -> Tuple[np.ndarray, Tuple[int, int], bool]:
     """Find a nearby background region to use as decoy.
 
     Strategy: shift the object mask by 0.3-1.0x object width into background.
     Choose the direction with best color similarity to the object.
+
+    Returns:
+        (decoy_mask, (dy, dx), is_natural_distractor)
+        is_natural_distractor: True if color_sim > 0.15 (shifted region
+        looks like the object — e.g. another instance of the same class).
 
     Args:
         mask: [H, W] binary uint8 mask of the target object.
         frame: [H, W, 3] uint8 RGB frame.
         offset_ratio: shift distance as fraction of object width.
 
-    Returns:
-        (decoy_mask, (dy, dx)): shifted mask and the offset used.
     """
     H, W = mask.shape
+    best_color_sim = 0.0
     ys, xs = np.where(mask > 0)
     if len(ys) == 0:
         return mask.copy(), (0, 0)
@@ -99,6 +103,7 @@ def find_decoy_region(
         if score > best_score:
             best_score = score
             best_offset = (dy, dx)
+            best_color_sim = color_sim
 
     # Fallback: if no valid direction found, retry at reduced shifts
     if best_score < 0:
@@ -142,7 +147,8 @@ def find_decoy_region(
         decoy_mask[dst_y0:dst_y0+h_len, dst_x0:dst_x0+w_len] = \
             mask[src_y0:src_y0+h_len, src_x0:src_x0+w_len]
 
-    return decoy_mask, best_offset
+    is_natural_distractor = best_color_sim > 0.15
+    return decoy_mask, best_offset, is_natural_distractor
 
 
 def create_bridge_mask(

@@ -67,8 +67,9 @@ def build_role_targets(
     ref_mask = masks_uint8[ref_idx]
     ref_frame = frames_uint8[ref_idx]
 
-    # Find ONE shared decoy direction
-    _, offset = find_decoy_region(ref_mask, ref_frame, offset_ratio)
+    # Find ONE shared decoy direction + detect if it's a natural distractor
+    _, offset, is_natural_distractor = find_decoy_region(
+        ref_mask, ref_frame, offset_ratio)
     dy, dx = offset
 
     targets = {}
@@ -125,23 +126,27 @@ def build_role_targets(
             "rank_margin": rank_margin,
         }, d_mask
 
-    # ── Frame 0: attack conditioning memory with weak decoy bias ─────────
-    # Frame 0 is stored as privileged conditioning memory in SAM2. Leaving
-    # it decoy-free gives the tracker a recovery anchor. Add weak decoy
-    # pressure to reduce the anchor's strength (eps is still only 2/255).
+    # ── Frame 0: conditioning memory treatment ───────────────────────────
+    # Frame 0 is privileged conditioning memory. For natural distractor
+    # videos (e.g. cows), leave f0 clean so the correct anchor doesn't
+    # interfere. For synthetic background decoys, add weak decoy pressure
+    # to weaken the recovery anchor.
     if 0 in perturb_set:
-        td, dm = make_target_dict(
-            masks_uint8[0],
-            core_w=0.5,
-            bridge_w=0.10,
-            decoy_w=0.15,
-            suppress_w=0.10,
-            rank_w=0.10,
-            score_w=0.0,
-            decoy_margin=0.3,
-            suppress_margin=0.15,
-            rank_margin=0.2,
-        )
+        if is_natural_distractor:
+            # Distractor mode: only loosen, don't add decoy term to f0
+            td, dm = make_target_dict(
+                masks_uint8[0],
+                core_w=1.0, bridge_w=0.0, decoy_w=0.0,
+                suppress_w=0.0, rank_w=0.0, score_w=0.0,
+            )
+        else:
+            # Background mode: weak decoy on f0 to weaken recovery anchor
+            td, dm = make_target_dict(
+                masks_uint8[0],
+                core_w=0.5, bridge_w=0.10, decoy_w=0.15,
+                suppress_w=0.10, rank_w=0.10, score_w=0.0,
+                decoy_margin=0.3, suppress_margin=0.15, rank_margin=0.2,
+            )
         targets[("orig", 0)] = td
         decoy_masks_np[0] = dm
 
@@ -252,6 +257,7 @@ def build_role_targets(
 
     return {
         "decoy_offset": offset,
+        "is_natural_distractor": is_natural_distractor,
         "targets": targets,
         "decoy_masks": decoy_masks_np,
         "insert_bases": insert_bases,
