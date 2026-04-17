@@ -84,6 +84,14 @@ ISOLATION_8 = [
     "car-turn", "color-run", "cows", "crossing",
 ]
 
+# All 14 eligible clips from M1 (clean J&F >= 0.60)
+ELIGIBLE_14 = [
+    "bear", "bike-packing", "blackswan", "boat",
+    "car-roundabout", "car-shadow", "car-turn", "cat-girl",
+    "classic-car", "color-run", "cows", "crossing",
+    "dance-jump", "dog",
+]
+
 ALL_VARIANTS = [
     "benign", "perturb_only", "insert_only",
     "hybrid", "hybrid_reset", "clean_reset",
@@ -499,11 +507,20 @@ def main():
                         default="configs/sam2.1/sam2.1_hiera_t.yaml")
     parser.add_argument("--output_dir",
                         default=os.path.join(ROOT, "results_isolation"))
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducible PGD")
+    parser.add_argument("--full", action="store_true",
+                        help="Use all 14 eligible videos instead of 8")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    videos = args.videos.split(",") if args.videos else ISOLATION_8
+    if args.videos:
+        videos = args.videos.split(",")
+    elif args.full:
+        videos = ELIGIBLE_14
+    else:
+        videos = ISOLATION_8
     variants = ALL_VARIANTS if "all" in args.variant else args.variant
     regimes = (["suppression", "decoy"] if args.regime == "both"
                else [args.regime])
@@ -519,6 +536,7 @@ def main():
     print("=" * 70)
     print(f"  Videos:   {len(videos)}")
     print(f"  Variants: {variants}")
+    print(f"  Seed:     {args.seed}")
     print(f"  Regimes:  {regimes}")
     print(f"  Steps:    {args.n_steps}")
     print("=" * 70)
@@ -570,6 +588,12 @@ def main():
                 print(f"  [{key}] running...")
 
                 try:
+                    # Fixed seed for reproducible PGD
+                    torch.manual_seed(args.seed)
+                    np.random.seed(args.seed)
+                    if torch.cuda.is_available():
+                        torch.cuda.manual_seed_all(args.seed)
+
                     t0 = time.time()
 
                     if variant == "benign":
