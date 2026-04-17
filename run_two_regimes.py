@@ -751,11 +751,15 @@ def compute_horizon_metrics(
     for name, frame_range in horizons.items():
         js = [per_frame[i][0] for i in frame_range if i in per_frame]
         fs = [per_frame[i][1] for i in frame_range if i in per_frame]
-        mj = float(np.mean(js)) if js else 0.0
-        mf = float(np.mean(fs)) if fs else 0.0
+        if js:
+            mj = float(np.mean(js))
+            mf = float(np.mean(fs))
+            mjf = 0.5 * (mj + mf)
+        else:
+            mj = mf = mjf = float("nan")  # No frames in this horizon
         results[name] = {
             "mean_j": mj, "mean_f": mf,
-            "mean_jf": 0.5 * (mj + mf),
+            "mean_jf": mjf,
             "n_frames": len(js),
         }
     return results
@@ -1008,6 +1012,12 @@ def main():
     else:
         videos = DAVIS_PILOT
 
+    if args.attack_prefix < EVAL_START + 5:
+        raise ValueError(
+            f"--attack_prefix ({args.attack_prefix}) must be >= "
+            f"EVAL_START+5 ({EVAL_START + 5}) so short eval window is "
+            f"within the prefix for signature extraction.")
+
     regimes = (["suppression", "decoy"] if args.regime == "both"
                else [args.regime])
     cfg = MemShieldConfig(
@@ -1111,12 +1121,15 @@ def main():
                 ssim_atk = compute_ssim_attacked(
                     frames[:ap], prefix_protected, prefix_map, perturb_set)
 
-                # Compute drops for each horizon
+                # Compute drops for each horizon (NaN if no frames)
                 drops = {}
                 for h in ["short", "mid", "long", "all_future"]:
                     c = clean_horizons[h]["mean_jf"]
                     a = atk_horizons[h]["mean_jf"]
-                    drops[h] = c - a
+                    if math.isnan(c) or math.isnan(a):
+                        drops[h] = float("nan")
+                    else:
+                        drops[h] = c - a
 
                 vid_results[regime] = {
                     **ev,
