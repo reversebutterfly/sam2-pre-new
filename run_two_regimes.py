@@ -320,14 +320,16 @@ def _supp_read(all_outs, masks_uint8, eval_mod, eval_orig, device,
 #   Rollout:   L = ReLU(m + q(T) - q(D)) + β*ReLU(τ_pos - z)
 
 def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device,
-                 masks_uint8=None, teacher_features=None, clean_features=None):
+                 masks_uint8=None, insert_strength=1.0,
+                 teacher_features=None, clean_features=None):
     """Decoy write-path: suppress originals + redirect inserts.
 
     Originals: softened suppression (reduce true-region logits, band object_score
     near zero — weak enough for decoy to dominate, not so strong as to kill object).
 
-    Inserts: decoy activation (push logits up at decoy region, push down at true
-    region, keep object_score firmly positive — confident wrong answer).
+    Inserts: decoy activation with configurable strength.
+      insert_strength=1.0: v4 baseline (margin=0.9, gentle)
+      insert_strength=2.0: v4.1 aggressive (margin=2.0, may collapse)
     """
     loss_orig = torch.tensor(0.0, device=device)
     loss_ins = torch.tensor(0.0, device=device)
@@ -375,8 +377,19 @@ def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device,
         n_orig += 1
 
     # === DECOY ACTIVATION on inserted frames ===
-    # Inserts must be independently effective: they carry the "redirect" role.
-    # Stronger margins and weights than originals to write dominant memories.
+    # insert_strength interpolates between v4 (1.0) and v4.1 (2.0):
+    #   s=1.0: decoy_margin=0.9, suppress_offset=0, rank_margin=0.8, score_margin=1.0
+    #   s=2.0: decoy_margin=2.0, suppress_offset=1.0, rank_margin=2.0, score_margin=2.0
+    s = insert_strength
+    decoy_m = 0.9 + (s - 1.0) * 1.1     # 0.9 → 2.0
+    supp_off = max(0.0, (s - 1.0) * 1.0) # 0.0 → 1.0
+    rank_m = 0.8 + (s - 1.0) * 1.2       # 0.8 → 2.0
+    score_m = 1.0 + (s - 1.0) * 1.0      # 1.0 → 2.0
+    w_decoy = 1.0 + (s - 1.0) * 0.5      # 1.0 → 1.5
+    w_supp = 0.5 + (s - 1.0) * 0.5       # 0.5 → 1.0
+    w_rank = 1.0 + (s - 1.0) * 0.5       # 1.0 → 1.5
+    w_score = 0.5 + (s - 1.0) * 0.3      # 0.5 → 0.8
+
     ins_indices = idx_map["insert_mod_indices"]
     for cursor in range(len(schedule)):
         key = ("insert", cursor)
@@ -395,25 +408,25 @@ def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device,
         suppress_mask = td.get("suppress")
         fl = torch.tensor(0.0, device=device)
 
-        # STRONG push UP at decoy region (higher margin = more confident memory)
+        # Push UP at decoy region
         if decoy_mask is not None and decoy_mask.sum() > 0:
-            fl = fl + 1.5 * F.softplus(2.0 - logits * decoy_mask).sum() / (decoy_mask.sum() + 1e-6)
+            fl = fl + w_decoy * F.softplus(decoy_m - logits * decoy_mask).sum() / (decoy_mask.sum() + 1e-6)
 
-        # STRONG push DOWN at true region (must erase true object completely)
+        # Push DOWN at true region
         if suppress_mask is not None and suppress_mask.sum() > 0:
-            fl = fl + 1.0 * F.softplus(logits * suppress_mask + 1.0).sum() / (suppress_mask.sum() + 1e-6)
+            fl = fl + w_supp * F.softplus(logits * suppress_mask + supp_off).sum() / (suppress_mask.sum() + 1e-6)
 
-        # Large rank margin: decoy must DOMINATE true (not just slightly beat it)
+        # Rank: decoy must beat true by margin
         if (decoy_mask is not None and suppress_mask is not None
                 and decoy_mask.sum() > 0 and suppress_mask.sum() > 0):
             true_mean = (logits * suppress_mask).sum() / (suppress_mask.sum() + 1e-6)
             decoy_mean = (logits * decoy_mask).sum() / (decoy_mask.sum() + 1e-6)
-            fl = fl + 1.5 * F.softplus(true_mean - decoy_mean + 2.0)
+            fl = fl + w_rank * F.softplus(true_mean - decoy_mean + rank_m)
 
-        # Object score: VERY FIRMLY POSITIVE (write high-confidence memory)
+        # Object score: positive (confident wrong, not absent)
         sc = out.get("object_score_logits")
         if sc is not None:
-            fl = fl + 0.8 * object_score_positive_loss(sc, margin=2.0)
+            fl = fl + w_score * object_score_positive_loss(sc, margin=score_m)
 
         loss_ins = loss_ins + fl
         n_ins += 1
@@ -497,6 +510,7 @@ def optimize_unified(
     regime: str,
     no_teacher: bool = False,
     ablation: str = "combined",
+    insert_strength: float = 1.0,
 ) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], Dict]:
     """Unified PGD for both regimes. Only loss + insert bases differ.
 
@@ -643,7 +657,8 @@ def optimize_unified(
             lr = _supp_read(all_outs, masks_uint8, eval_mod, eval_orig, device)
         else:
             lw = _decoy_write(all_outs, decoy_targets, idx_map, perturb_set,
-                              schedule, device, masks_uint8=masks_uint8)
+                              schedule, device, masks_uint8=masks_uint8,
+                              insert_strength=insert_strength)
             lr = _decoy_read(all_outs, masks_uint8, eval_mod, eval_orig,
                              decoy_offset, device)
 
@@ -722,7 +737,8 @@ def optimize_unified(
                               device)
         else:
             lw_f = _decoy_write(all_outs_final, decoy_targets, idx_map, perturb_set,
-                                schedule, device, masks_uint8=masks_uint8)
+                                schedule, device, masks_uint8=masks_uint8,
+                                insert_strength=insert_strength)
             lr_f = _decoy_read(all_outs_final, masks_uint8, eval_mod, eval_orig,
                                decoy_offset, device)
         loss_final = (lw_f + 1.3 * lr_f).item()
@@ -1153,6 +1169,8 @@ def main():
     parser.add_argument("--ablation", choices=["combined", "perturb_only", "insert_only"],
                         default="combined",
                         help="Ablation mode: combined (default), perturb_only, insert_only")
+    parser.add_argument("--insert_strength", type=float, default=1.0,
+                        help="Insert loss strength: 1.0=v4 gentle, 2.0=v4.1 aggressive")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -1273,7 +1291,8 @@ def main():
                 # PGD on attack prefix only
                 ins_u8, orig_u8, opt_met = optimize_unified(
                     surrogate, frames[:ap], masks[:ap], schedule, cfg, regime,
-                    no_teacher=args.no_teacher, ablation=args.ablation)
+                    no_teacher=args.no_teacher, ablation=args.ablation,
+                    insert_strength=args.insert_strength)
                 opt_time = time.time() - t0
 
                 # Build full video: attacked prefix + clean tail
