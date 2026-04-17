@@ -57,8 +57,7 @@ from memshield.scheduler import (
 from memshield.surrogate import SAM2Surrogate, get_interior_prompt
 
 from run_two_regimes import (
-    DAVIS_20,
-    DAVIS_PILOT,
+    DAVIS_VAL,
     EVAL_START,
     EVAL_END,
     load_video,
@@ -78,18 +77,9 @@ from run_two_regimes import (
     optimize_unified,
 )
 
-# 8 eligible clips for mechanism isolation (pre-registered from M1 results)
-ISOLATION_8 = [
-    "bear", "boat", "car-roundabout", "car-shadow",
-    "car-turn", "color-run", "cows", "crossing",
-]
-
-# All 14 eligible clips from M1 (clean J&F >= 0.60)
-ELIGIBLE_14 = [
-    "bear", "bike-packing", "blackswan", "boat",
-    "car-roundabout", "car-shadow", "car-turn", "cat-girl",
-    "classic-car", "color-run", "cows", "crossing",
-    "dance-jump", "dog",
+# Pilot subset for quick tests
+ISOLATION_PILOT = [
+    "blackswan", "car-roundabout", "car-shadow", "cows", "dog",
 ]
 
 ALL_VARIANTS = [
@@ -518,9 +508,9 @@ def main():
     if args.videos:
         videos = args.videos.split(",")
     elif args.full:
-        videos = ELIGIBLE_14
+        videos = DAVIS_VAL
     else:
-        videos = ISOLATION_8
+        videos = ISOLATION_PILOT
     variants = ALL_VARIANTS if "all" in args.variant else args.variant
     regimes = (["suppression", "decoy"] if args.regime == "both"
                else [args.regime])

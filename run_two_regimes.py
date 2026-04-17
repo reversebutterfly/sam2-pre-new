@@ -73,14 +73,21 @@ from memshield.surrogate import SAM2Surrogate, get_interior_prompt
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-DAVIS_20 = [
-    "bear", "bike-packing", "blackswan", "bmx-bumps", "bmx-trees",
-    "boat", "breakdance", "breakdance-flare", "bus", "car-roundabout",
-    "car-shadow", "car-turn", "cat-girl", "classic-car", "color-run",
-    "cows", "crossing", "dance-jump", "dance-twirl", "dog",
+# Official DAVIS 2017 validation set (30 videos)
+DAVIS_VAL = [
+    "bike-packing", "blackswan", "bmx-trees", "breakdance", "camel",
+    "car-roundabout", "car-shadow", "cows", "dance-twirl", "dog",
+    "dogs-jump", "drift-chicane", "drift-straight", "goat", "gold-fish",
+    "horsejump-high", "india", "judo", "kite-surf", "lab-coat",
+    "libby", "loading", "mbike-trick", "motocross-jump",
+    "paragliding-launch", "parkour", "pigs", "scooter-black",
+    "shooting", "soapbox",
 ]
 
-DAVIS_PILOT = ["bear", "car-shadow", "dance-jump", "dog", "cows"]
+# Legacy alias (kept for backwards compat with existing results)
+DAVIS_20 = DAVIS_VAL
+
+DAVIS_PILOT = ["blackswan", "car-shadow", "dog", "cows", "gold-fish"]
 
 EVAL_START = 10  # Disjoint eval window start (inclusive)
 EVAL_END = 15    # Exclusive
