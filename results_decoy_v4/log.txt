@@ -1,0 +1,232 @@
+============================================================
+  MemoryShield — Adversarial Frame Insertion
+============================================================
+  Videos: ['bear', 'breakdance', 'car-shadow', 'dance-jump', 'dog']
+  FIFO window: 7
+  Max insertion ratio: 15%
+  Epsilon: 8.0/255
+  PGD steps: 50
+  Device: cuda:1
+  Baseline: none
+============================================================
+
+Loading SAM2 surrogate...
+  FIFO bank size: 7
+
+############################################################
+  Processing: bear
+############################################################
+
+============================================================
+  MemoryShield: bear  (15 frames)
+============================================================
+[1/4] Analyzing video content...
+      Occlusion events: []
+      Topology events:  []
+      Scene changes:    []
+[2/4] Computing FIFO resonance schedule...
+      Scheduled: 2 insertions (1 strong, 1 weak)
+        after frame   1  [strong]  (resonance_anchor)
+        after frame   7  [weak  ]  (resonance_sustain)
+[3/4] Optimizing cooperative decoy attack via PGD...
+  [S1] step   0  L_write=8.0543  L_read=13.9813  SSIM=0.9999
+  [S2] step  10  L_write=11.0835  L_read=15.4902  SSIM=0.9734
+  [S2] step  20  L_write=0.6780  L_read=0.9249  SSIM=0.9530
+  [S2] step  30  L_write=0.4292  L_read=0.7527  SSIM=0.9387
+  [S3] step  40  L_write=0.1300  L_read=0.0742  SSIM=0.9298
+  [S3] step  49  L_write=0.1314  L_read=0.0386  SSIM=0.9298
+      Best loss: 0.1567
+      Final SSIM min: N/A
+      Perturbed originals: 7 frames
+[4/4] Building protected video...
+
+  Done: 15 → 17 frames (+2, ratio=13.3%)  [162.6s]
+
+  Evaluating with official SAM2 predictor...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 11.08it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 12.52it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 11.92it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 12.29it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 12.39it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 13.15it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 12.94it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 13.54it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 12.83it/s]
+/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/sam2_video_predictor.py:786: UserWarning: cannot import name '_C' from 'sam2' (/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/__init__.py)
+
+Skipping the post-processing step due to the error above. You can still use SAM 2 and it's OK to ignore the error above, although some post-processing functionality may be limited (which doesn't affect the results in most cases; see https://github.com/facebookresearch/sam2/blob/main/INSTALL.md).
+  pred_masks_gpu = fill_holes_in_mask_scores(
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 15.73it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:01, 11.64it/s]propagate in video:  41%|████      | 7/17 [00:00<00:01,  9.66it/s]propagate in video:  47%|████▋     | 8/17 [00:00<00:01,  8.86it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.15it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  7.77it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  7.50it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.32it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.20it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.11it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.05it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.00it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  6.98it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.00it/s]
+  Mean J (protected): 0.8706
+  Evaluating clean baseline...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 14.24it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:01, 10.32it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 11.97it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 11.94it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 13.22it/s]frame loading (JPEG):  87%|████████▋ | 13/15 [00:00<00:00, 15.31it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 15.29it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 13.82it/s]
+/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/sam2_video_predictor.py:786: UserWarning: cannot import name '_C' from 'sam2' (/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/__init__.py)
+
+Skipping the post-processing step due to the error above. You can still use SAM 2 and it's OK to ignore the error above, although some post-processing functionality may be limited (which doesn't affect the results in most cases; see https://github.com/facebookresearch/sam2/blob/main/INSTALL.md).
+  pred_masks_gpu = fill_holes_in_mask_scores(
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 16.73it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 11.96it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00,  9.76it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.48it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.10it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  7.78it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.54it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.37it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.24it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.14it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.27it/s]
+  Mean J (clean):     0.9661
+  ** J drop: 0.0955 **
+
+############################################################
+  Processing: breakdance
+############################################################
+
+============================================================
+  MemoryShield: breakdance  (15 frames)
+============================================================
+[1/4] Analyzing video content...
+      Occlusion events: [13, 14]
+      Topology events:  []
+      Scene changes:    []
+[2/4] Computing FIFO resonance schedule...
+      Scheduled: 2 insertions (1 strong, 1 weak)
+        after frame   1  [strong]  (resonance_anchor)
+        after frame   7  [weak  ]  (resonance_sustain)
+[3/4] Optimizing cooperative decoy attack via PGD...
+  [S1] step   0  L_write=9.5606  L_read=12.3009  SSIM=0.9998
+  [S2] step  10  L_write=6.7693  L_read=9.5250  SSIM=0.9684
+  [S2] step  20  L_write=1.8568  L_read=4.9613  SSIM=0.9410
+  [S2] step  30  L_write=0.2084  L_read=0.1511  SSIM=0.9318
+  [S3] step  40  L_write=0.1433  L_read=0.0935  SSIM=0.9315
+  [S3] step  49  L_write=0.1288  L_read=0.0726  SSIM=0.9315
+      Best loss: 0.1796
+      Final SSIM min: N/A
+      Perturbed originals: 7 frames
+[4/4] Building protected video...
+
+  Done: 15 → 17 frames (+2, ratio=13.3%)  [160.7s]
+
+  Evaluating with official SAM2 predictor...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:00, 15.97it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 12.60it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 14.73it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 14.02it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 13.38it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 14.39it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:00<00:00, 14.71it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.40it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.23it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 16.40it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:01, 11.91it/s]propagate in video:  41%|████      | 7/17 [00:00<00:01,  9.76it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.42it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.07it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  7.77it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.52it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.36it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.22it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.14it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.09it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.05it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.07it/s]
+  Mean J (protected): 0.3344
+  Evaluating clean baseline...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:01, 12.54it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 11.20it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 12.71it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 13.29it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 14.07it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 13.57it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 12.64it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 12.89it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 16.89it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 12.01it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00,  9.81it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.50it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.11it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  7.79it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.56it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.37it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.24it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.15it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.29it/s]
+  Mean J (clean):     0.3048
+  ** J drop: -0.0297 **
+
+############################################################
+  Processing: car-shadow
+############################################################
+
+============================================================
+  MemoryShield: car-shadow  (15 frames)
+============================================================
+[1/4] Analyzing video content...
+      Occlusion events: []
+      Topology events:  []
+      Scene changes:    []
+[2/4] Computing FIFO resonance schedule...
+      Scheduled: 2 insertions (1 strong, 1 weak)
+        after frame   1  [strong]  (resonance_anchor)
+        after frame   7  [weak  ]  (resonance_sustain)
+[3/4] Optimizing cooperative decoy attack via PGD...
+  [S1] step   0  L_write=11.6460  L_read=21.0463  SSIM=1.0000
+  [S2] step  10  L_write=9.9746  L_read=18.4984  SSIM=0.9490
+  [S2] step  20  L_write=0.8572  L_read=3.4515  SSIM=0.9163
+  [S2] step  30  L_write=0.2862  L_read=0.5097  SSIM=0.9076
+  [S3] step  40  L_write=0.1718  L_read=0.0643  SSIM=0.9272
+  [S3] step  49  L_write=0.1566  L_read=0.0453  SSIM=0.9272
+      Best loss: 0.1899
+      Final SSIM min: N/A
+      Perturbed originals: 7 frames
+[4/4] Building protected video...
+
+  Done: 15 → 17 frames (+2, ratio=13.3%)  [157.1s]
+
+  Evaluating with official SAM2 predictor...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 14.82it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 11.57it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 12.59it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 13.99it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 15.00it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 13.13it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 13.95it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 13.95it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 13.83it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 16.10it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:01, 11.78it/s]propagate in video:  41%|████      | 7/17 [00:00<00:01,  9.72it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.45it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.06it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  7.75it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.52it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.35it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.22it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.15it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.10it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.06it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.07it/s]
+  Mean J (protected): 0.0873
+  Evaluating clean baseline...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 15.31it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 15.13it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 15.16it/s]frame loading (JPEG):  60%|██████    | 9/15 [00:00<00:00, 17.24it/s]frame loading (JPEG):  73%|███████▎  | 11/15 [00:00<00:00, 13.56it/s]frame loading (JPEG):  87%|████████▋ | 13/15 [00:00<00:00, 13.17it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 13.37it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 14.07it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 16.91it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 12.06it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00,  9.83it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.53it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.13it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  7.79it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.54it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.37it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.19it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.13it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.28it/s]
+  Mean J (clean):     0.9813
+  ** J drop: 0.8940 **
+
+############################################################
+  Processing: dance-jump
+############################################################
+
+============================================================
+  MemoryShield: dance-jump  (15 frames)
+============================================================
+[1/4] Analyzing video content...
+      Occlusion events: []
+      Topology events:  []
+      Scene changes:    []
+[2/4] Computing FIFO resonance schedule...
+      Scheduled: 2 insertions (1 strong, 1 weak)
+        after frame   1  [strong]  (resonance_anchor)
+        after frame   7  [weak  ]  (resonance_sustain)
+[3/4] Optimizing cooperative decoy attack via PGD...
+  [S1] step   0  L_write=9.6957  L_read=17.5473  SSIM=0.9998
+  [S2] step  10  L_write=4.7259  L_read=7.6649  SSIM=0.9573
+  [S2] step  20  L_write=0.1955  L_read=0.1390  SSIM=0.9275
+  [S2] step  30  L_write=0.1324  L_read=0.0977  SSIM=0.9328
+  [S3] step  40  L_write=0.1474  L_read=0.0448  SSIM=0.9397
+  [S3] step  49  L_write=0.1145  L_read=0.0550  SSIM=0.9397
+      Best loss: 0.1530
+      Final SSIM min: N/A
+      Perturbed originals: 7 frames
+[4/4] Building protected video...
+
+  Done: 15 → 17 frames (+2, ratio=13.3%)  [151.5s]
+
+  Evaluating with official SAM2 predictor...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 13.45it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 15.45it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 16.34it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 15.01it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 14.49it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 15.36it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:00<00:00, 15.23it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 14.50it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.90it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 15.95it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:01, 11.76it/s]propagate in video:  41%|████      | 7/17 [00:00<00:01,  9.73it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.47it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.08it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  7.77it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.53it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.36it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.23it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.16it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.10it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.07it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.07it/s]
+  Mean J (protected): 0.8707
+  Evaluating clean baseline...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:01, 11.71it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 14.75it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 14.43it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 14.07it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 13.30it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 13.54it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 13.09it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 13.74it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 16.97it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 12.06it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00,  9.82it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.50it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.12it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  7.83it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.58it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.39it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.24it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.15it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.30it/s]
+  Mean J (clean):     0.9043
+  ** J drop: 0.0336 **
+
+############################################################
+  Processing: dog
+############################################################
+
+============================================================
+  MemoryShield: dog  (15 frames)
+============================================================
+[1/4] Analyzing video content...
+      Occlusion events: [2, 11, 12]
+      Topology events:  []
+      Scene changes:    []
+[2/4] Computing FIFO resonance schedule...
+      Scheduled: 2 insertions (1 strong, 1 weak)
+        after frame   1  [strong]  (resonance_anchor)
+        after frame   7  [weak  ]  (resonance_sustain)
+[3/4] Optimizing cooperative decoy attack via PGD...
+  [S1] step   0  L_write=9.4375  L_read=16.9560  SSIM=1.0000
+  [S2] step  10  L_write=6.4396  L_read=11.6267  SSIM=0.9614
+  [S2] step  20  L_write=0.5064  L_read=19.2054  SSIM=0.9296
+  [S2] step  30  L_write=0.1445  L_read=0.0684  SSIM=0.9320
+  [S3] step  40  L_write=0.1409  L_read=0.0396  SSIM=0.9450
+  [S3] step  49  L_write=0.1200  L_read=0.0512  SSIM=0.9450
+      Best loss: 0.1558
+      Final SSIM min: N/A
+      Perturbed originals: 7 frames
+[4/4] Building protected video...
+
+  Done: 15 → 17 frames (+2, ratio=13.3%)  [153.4s]
+
+  Evaluating with official SAM2 predictor...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 13.45it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 16.14it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 14.53it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 15.32it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 11.83it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 11.37it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 12.05it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.01it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 13.39it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 15.32it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:01, 11.55it/s]propagate in video:  41%|████      | 7/17 [00:00<00:01,  9.63it/s]propagate in video:  47%|████▋     | 8/17 [00:00<00:01,  8.85it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.28it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  7.84it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  7.56it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.36it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.23it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.12it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.05it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  6.92it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  6.92it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.99it/s]
+  Mean J (protected): 0.1248
+  Evaluating clean baseline...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 16.93it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 15.10it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 13.90it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 14.13it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 14.60it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 14.71it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:00<00:00, 13.99it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 14.33it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 16.62it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 11.98it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00,  9.80it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.51it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.12it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  7.80it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.57it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.40it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.25it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.15it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.29it/s]
+  Mean J (clean):     0.9535
+  ** J drop: 0.8288 **
+
+============================================================
+  SUMMARY
+============================================================
+  Video                Frames  Ins%  J_clean   J_prot   J_drop
+------------------------------------------------------------
+  bear                     15 13.3%   0.9661   0.8706   0.0955
+  breakdance               15 13.3%   0.3048   0.3344  -0.0297
+  car-shadow               15 13.3%   0.9813   0.0873   0.8940
+  dance-jump               15 13.3%   0.9043   0.8707   0.0336
+  dog                      15 13.3%   0.9535   0.1248   0.8288
+------------------------------------------------------------
+  MEAN                                                  0.3644
+
+Results saved to: results_decoy_v4/results.json

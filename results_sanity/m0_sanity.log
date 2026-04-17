@@ -1,0 +1,49 @@
+======================================================================
+  Two Memory-Poisoning Regimes - Unified Runner
+======================================================================
+  Videos:      1
+  Regimes:     ['suppression']
+  Eval window: f10-f14
+  PGD steps:   5
+  Budget:      f0=2/255  orig=4/255  ins_s=8/255  ins_w=2/255
+======================================================================
+
+############################################################
+  bear
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 15.16it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 12.82it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 15.13it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 13.37it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 13.13it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 13.06it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 12.82it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 13.37it/s]
+/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/sam2_video_predictor.py:786: UserWarning: cannot import name '_C' from 'sam2' (/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/__init__.py)
+
+Skipping the post-processing step due to the error above. You can still use SAM 2 and it's OK to ignore the error above, although some post-processing functionality may be limited (which doesn't affect the results in most cases; see https://github.com/facebookresearch/sam2/blob/main/INSTALL.md).
+  pred_masks_gpu = fill_holes_in_mask_scores(
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  13%|█▎        | 2/15 [00:00<00:01, 10.10it/s]propagate in video:  27%|██▋       | 4/15 [00:00<00:01, 10.20it/s]propagate in video:  40%|████      | 6/15 [00:00<00:00,  9.03it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00,  8.70it/s]propagate in video:  53%|█████▎    | 8/15 [00:00<00:00,  8.21it/s]propagate in video:  60%|██████    | 9/15 [00:01<00:00,  7.58it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  7.50it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  7.21it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  6.87it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  5.21it/s]propagate in video:  93%|█████████▎| 14/15 [00:02<00:00,  4.54it/s]propagate in video: 100%|██████████| 15/15 [00:02<00:00,  4.16it/s]propagate in video: 100%|██████████| 15/15 [00:02<00:00,  6.24it/s]
+  [clean] J=0.9672  F=0.9854  J&F=0.9763
+  [suppression] optimizing (5 steps)...
+    [supp|S1] step   0  Lw=25.1289  Lr=41.6765  SSIM=0.9999
+    [supp|S3] step   4  Lw=-334.2752  Lr=17.1360  SSIM=0.8694
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 11.97it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 12.37it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 12.18it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 12.92it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 12.48it/s]frame loading (JPEG):  76%|███████▋  | 13/17 [00:00<00:00, 14.47it/s]frame loading (JPEG):  88%|████████▊ | 15/17 [00:01<00:00, 14.58it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.45it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 13.67it/s]
+/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/sam2_video_predictor.py:786: UserWarning: cannot import name '_C' from 'sam2' (/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/__init__.py)
+
+Skipping the post-processing step due to the error above. You can still use SAM 2 and it's OK to ignore the error above, although some post-processing functionality may be limited (which doesn't affect the results in most cases; see https://github.com/facebookresearch/sam2/blob/main/INSTALL.md).
+  pred_masks_gpu = fill_holes_in_mask_scores(
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 16.91it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.21it/s]propagate in video:  41%|████      | 7/17 [00:00<00:01,  8.96it/s]propagate in video:  47%|████▋     | 8/17 [00:00<00:01,  6.64it/s]propagate in video:  53%|█████▎    | 9/17 [00:01<00:01,  5.17it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:01,  4.47it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:01,  4.22it/s]propagate in video:  71%|███████   | 12/17 [00:02<00:01,  4.07it/s]propagate in video:  76%|███████▋  | 13/17 [00:02<00:01,  3.91it/s]propagate in video:  82%|████████▏ | 14/17 [00:02<00:00,  3.67it/s]propagate in video:  88%|████████▊ | 15/17 [00:03<00:00,  3.70it/s]propagate in video:  94%|█████████▍| 16/17 [00:03<00:00,  3.67it/s]propagate in video: 100%|██████████| 17/17 [00:03<00:00,  3.65it/s]propagate in video: 100%|██████████| 17/17 [00:03<00:00,  4.76it/s]
+  [suppression] J=0.8756  F=0.8929  J&F=0.8842  drop(J&F)=0.0921  SSIM=0.9701
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5}
+
+======================================================================
+  RESULTS (eval on f10-f14)
+======================================================================
+  Video                J&F_c  dJF_suppression  dJ_suppression
+----------------------------------------------------------------------
+  bear                0.9763         0.0921       0.0916 *
+
+  Eligible (J&F >= 0.60): 1/1
+  suppression eligible: mean dJF=0.0921  median=0.0921  n=1
+
+  Signature Comparison (eligible):
+  suppression: NegScore=0.00  PosScore=1.00  Collapse=0.00
+
+Results: results_sanity/regimes_results.json
+EXIT_CODE=0

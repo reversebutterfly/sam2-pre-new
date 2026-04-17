@@ -1,0 +1,694 @@
+======================================================================
+  Two Memory-Poisoning Regimes - Unified Runner
+======================================================================
+  Videos:      20
+  Regimes:     ['suppression', 'decoy']
+  Eval window: f10-f14
+  PGD steps:   50
+  Budget:      f0=2/255  orig=4/255  ins_s=8/255  ins_w=2/255
+======================================================================
+
+############################################################
+  bear
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 15.16it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 12.86it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 13.07it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 14.35it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 15.09it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 14.93it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:00<00:00, 14.79it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 14.52it/s]
+/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/sam2_video_predictor.py:786: UserWarning: cannot import name '_C' from 'sam2' (/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/__init__.py)
+
+Skipping the post-processing step due to the error above. You can still use SAM 2 and it's OK to ignore the error above, although some post-processing functionality may be limited (which doesn't affect the results in most cases; see https://github.com/facebookresearch/sam2/blob/main/INSTALL.md).
+  pred_masks_gpu = fill_holes_in_mask_scores(
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  13%|█▎        | 2/15 [00:00<00:00, 19.41it/s]propagate in video:  27%|██▋       | 4/15 [00:00<00:00, 11.20it/s]propagate in video:  40%|████      | 6/15 [00:00<00:00,  9.03it/s]propagate in video:  53%|█████▎    | 8/15 [00:00<00:00,  7.61it/s]propagate in video:  60%|██████    | 9/15 [00:01<00:00,  7.25it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  6.88it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  6.47it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  6.31it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  6.16it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  6.13it/s]propagate in video: 100%|██████████| 15/15 [00:02<00:00,  6.03it/s]propagate in video: 100%|██████████| 15/15 [00:02<00:00,  7.06it/s]
+  [clean] J=0.9672  F=0.9854  J&F=0.9763
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=25.1289  Lr=41.6765  SSIM=0.9999
+    [supp|S2] step  10  Lw=-319.3225  Lr=45.9583  SSIM=0.9725
+    [supp|S2] step  20  Lw=-1252.1207  Lr=-1945.5634  SSIM=0.9513
+    [supp|S2] step  30  Lw=-1254.0013  Lr=-1945.5266  SSIM=0.9453
+    [supp|S3] step  40  Lw=-1255.0381  Lr=-1945.5848  SSIM=0.9385
+    [supp|S3] step  49  Lw=-1255.0397  Lr=-1945.5887  SSIM=0.9385
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):   6%|▌         | 1/17 [00:01<00:30,  1.91s/it]frame loading (JPEG):  12%|█▏        | 2/17 [00:16<02:20,  9.39s/it]frame loading (JPEG):  24%|██▎       | 4/17 [00:16<00:46,  3.55s/it]frame loading (JPEG):  35%|███▌      | 6/17 [00:16<00:20,  1.90s/it]frame loading (JPEG):  47%|████▋     | 8/17 [00:16<00:10,  1.16s/it]frame loading (JPEG):  59%|█████▉    | 10/17 [00:17<00:05,  1.31it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:17<00:02,  1.92it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:17<00:01,  2.70it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:17<00:00,  3.65it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:17<00:00,  1.03s/it]
+/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/sam2_video_predictor.py:786: UserWarning: cannot import name '_C' from 'sam2' (/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/__init__.py)
+
+Skipping the post-processing step due to the error above. You can still use SAM 2 and it's OK to ignore the error above, although some post-processing functionality may be limited (which doesn't affect the results in most cases; see https://github.com/facebookresearch/sam2/blob/main/INSTALL.md).
+  pred_masks_gpu = fill_holes_in_mask_scores(
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  12%|█▏        | 2/17 [00:00<00:01, 11.87it/s]propagate in video:  24%|██▎       | 4/17 [00:00<00:01,  6.84it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:02,  5.84it/s]propagate in video:  35%|███▌      | 6/17 [00:01<00:02,  5.03it/s]propagate in video:  41%|████      | 7/17 [00:01<00:02,  4.52it/s]propagate in video:  47%|████▋     | 8/17 [00:01<00:02,  4.12it/s]propagate in video:  53%|█████▎    | 9/17 [00:01<00:02,  3.88it/s]propagate in video:  59%|█████▉    | 10/17 [00:02<00:01,  3.69it/s]propagate in video:  65%|██████▍   | 11/17 [00:02<00:01,  3.59it/s]propagate in video:  71%|███████   | 12/17 [00:02<00:01,  3.47it/s]propagate in video:  76%|███████▋  | 13/17 [00:03<00:01,  3.43it/s]propagate in video:  82%|████████▏ | 14/17 [00:03<00:00,  3.44it/s]propagate in video:  88%|████████▊ | 15/17 [00:03<00:00,  3.42it/s]propagate in video:  94%|█████████▍| 16/17 [00:03<00:00,  3.62it/s]propagate in video: 100%|██████████| 17/17 [00:04<00:00,  4.21it/s]propagate in video: 100%|██████████| 17/17 [00:04<00:00,  4.16it/s]
+  [suppression] J=0.0000  F=0.0000  J&F=0.0000  drop(J&F)=0.9763  SSIM=0.9848
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=8.2436  Lr=31.3560  SSIM=0.9999
+    [deco|S2] step  10  Lw=9.2576  Lr=36.0275  SSIM=0.9740
+    [deco|S2] step  20  Lw=0.5669  Lr=0.1546  SSIM=0.9523
+    [deco|S2] step  30  Lw=0.1608  Lr=0.0057  SSIM=0.9386
+    [deco|S3] step  40  Lw=0.1037  Lr=0.0377  SSIM=0.9297
+    [deco|S3] step  49  Lw=0.0713  Lr=0.0029  SSIM=0.9297
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 13.75it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 14.38it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 12.83it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 12.75it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 11.69it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 13.03it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 13.46it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 13.53it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 13.22it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  12%|█▏        | 2/17 [00:00<00:01, 11.98it/s]propagate in video:  24%|██▎       | 4/17 [00:00<00:01,  6.65it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:02,  5.92it/s]propagate in video:  35%|███▌      | 6/17 [00:01<00:02,  5.25it/s]propagate in video:  41%|████      | 7/17 [00:01<00:02,  4.73it/s]propagate in video:  47%|████▋     | 8/17 [00:01<00:02,  4.24it/s]propagate in video:  53%|█████▎    | 9/17 [00:01<00:02,  3.95it/s]propagate in video:  59%|█████▉    | 10/17 [00:02<00:01,  3.88it/s]propagate in video:  65%|██████▍   | 11/17 [00:02<00:01,  3.65it/s]propagate in video:  71%|███████   | 12/17 [00:02<00:01,  3.67it/s]propagate in video:  76%|███████▋  | 13/17 [00:03<00:01,  3.61it/s]propagate in video:  82%|████████▏ | 14/17 [00:03<00:00,  3.53it/s]propagate in video:  88%|████████▊ | 15/17 [00:03<00:00,  3.50it/s]propagate in video:  94%|█████████▍| 16/17 [00:03<00:00,  3.39it/s]propagate in video: 100%|██████████| 17/17 [00:04<00:00,  4.03it/s]propagate in video: 100%|██████████| 17/17 [00:04<00:00,  4.20it/s]
+  [decoy] J=0.0000  F=0.1492  J&F=0.0746  drop(J&F)=0.9017  SSIM=0.9825
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 0.6118303539440478}
+
+############################################################
+  bike-packing
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 15.71it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 13.38it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 13.35it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 14.01it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 12.39it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 12.95it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 13.14it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 13.49it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  13%|█▎        | 2/15 [00:00<00:00, 19.54it/s]propagate in video:  27%|██▋       | 4/15 [00:00<00:00, 12.07it/s]propagate in video:  40%|████      | 6/15 [00:00<00:00,  9.34it/s]propagate in video:  53%|█████▎    | 8/15 [00:00<00:00,  7.76it/s]propagate in video:  60%|██████    | 9/15 [00:01<00:00,  7.18it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  6.95it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  6.76it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  6.39it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  6.26it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  6.08it/s]propagate in video: 100%|██████████| 15/15 [00:02<00:00,  6.11it/s]propagate in video: 100%|██████████| 15/15 [00:02<00:00,  7.18it/s]
+  [clean] J=0.6288  F=0.6144  J&F=0.6216
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=10.5718  Lr=15.3330  SSIM=0.9997
+    [supp|S2] step  10  Lw=-333.6949  Lr=12.6114  SSIM=0.9529
+    [supp|S2] step  20  Lw=-1251.9547  Lr=-1945.0228  SSIM=0.9253
+    [supp|S2] step  30  Lw=-1253.7418  Lr=-1945.5663  SSIM=0.9414
+    [supp|S3] step  40  Lw=-1254.1664  Lr=-1945.5771  SSIM=0.9372
+    [supp|S3] step  49  Lw=-1254.1669  Lr=-1945.5834  SSIM=0.9372
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 12.11it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 11.77it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 11.95it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 12.08it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 13.44it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 12.17it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 11.29it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 11.35it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 11.58it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 16.40it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:01, 11.52it/s]propagate in video:  41%|████      | 7/17 [00:00<00:01,  9.18it/s]propagate in video:  47%|████▋     | 8/17 [00:00<00:01,  8.54it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:01,  7.87it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  7.38it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  7.01it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  6.80it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  6.73it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  6.52it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  6.57it/s]propagate in video:  94%|█████████▍| 16/17 [00:02<00:00,  6.40it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  6.37it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.50it/s]
+  [suppression] J=0.0000  F=0.0000  J&F=0.0000  drop(J&F)=0.6216  SSIM=0.9757
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=7.9043  Lr=20.3599  SSIM=0.9997
+    [deco|S2] step  10  Lw=1.7037  Lr=4.3662  SSIM=0.9590
+    [deco|S2] step  20  Lw=2.1969  Lr=8.5527  SSIM=0.9273
+    [deco|S2] step  30  Lw=0.1339  Lr=0.0735  SSIM=0.9273
+    [deco|S3] step  40  Lw=0.0795  Lr=0.0249  SSIM=0.9339
+    [deco|S3] step  49  Lw=0.0718  Lr=0.0226  SSIM=0.9339
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):   6%|▌         | 1/17 [00:00<00:01,  9.52it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01,  9.15it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 10.72it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 11.37it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 11.52it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 11.75it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:01<00:00, 11.32it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 10.49it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 10.85it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.52it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.60it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.71it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.39it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.65it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  7.74it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  7.62it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.38it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.35it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.34it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.32it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.32it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.33it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.23it/s]
+  [decoy] J=0.3025  F=0.6624  J&F=0.4824  drop(J&F)=0.1391  SSIM=0.9759
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 0.8423760932813208}
+
+############################################################
+  blackswan
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 13.56it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 13.92it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 15.16it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 13.88it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 14.02it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 12.77it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 12.64it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 13.15it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.78it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 12.87it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.33it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.97it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.55it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.23it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.97it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.78it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.63it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.53it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.76it/s]
+  [clean] J=0.9435  F=0.9278  J&F=0.9357
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=15.5715  Lr=21.9463  SSIM=0.9999
+    [supp|S2] step  10  Lw=-331.6667  Lr=17.9668  SSIM=0.9532
+    [supp|S2] step  20  Lw=-1252.3772  Lr=-1945.5892  SSIM=0.9319
+    [supp|S2] step  30  Lw=-1252.8484  Lr=-1945.5917  SSIM=0.9506
+    [supp|S3] step  40  Lw=-1253.0472  Lr=-1945.5911  SSIM=0.9458
+    [supp|S3] step  49  Lw=-1253.0471  Lr=-1945.5918  SSIM=0.9458
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 13.01it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 11.59it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:01, 10.41it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 11.67it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 12.40it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 13.25it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 13.51it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 13.97it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 12.95it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.78it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.81it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.44it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.99it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.60it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.25it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.87it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.71it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.58it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.47it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.43it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.39it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.53it/s]
+  [suppression] J=0.0000  F=0.0000  J&F=0.0000  drop(J&F)=0.9357  SSIM=0.9866
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=9.4611  Lr=28.1821  SSIM=0.9999
+    [deco|S2] step  10  Lw=7.6196  Lr=24.6104  SSIM=0.9602
+    [deco|S2] step  20  Lw=3.7505  Lr=3.2471  SSIM=0.9273
+    [deco|S2] step  30  Lw=0.3468  Lr=0.0700  SSIM=0.9341
+    [deco|S3] step  40  Lw=0.1112  Lr=0.0067  SSIM=0.9300
+    [deco|S3] step  49  Lw=0.0754  Lr=0.0029  SSIM=0.9300
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):   6%|▌         | 1/17 [00:11<03:09, 11.83s/it]frame loading (JPEG):  18%|█▊        | 3/17 [00:12<00:43,  3.13s/it]frame loading (JPEG):  29%|██▉       | 5/17 [00:12<00:18,  1.56s/it]frame loading (JPEG):  41%|████      | 7/17 [00:12<00:09,  1.07it/s]frame loading (JPEG):  53%|█████▎    | 9/17 [00:12<00:04,  1.62it/s]frame loading (JPEG):  65%|██████▍   | 11/17 [00:12<00:02,  2.31it/s]frame loading (JPEG):  76%|███████▋  | 13/17 [00:12<00:01,  3.17it/s]frame loading (JPEG):  88%|████████▊ | 15/17 [00:12<00:00,  4.20it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:13<00:00,  5.43it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:13<00:00,  1.29it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 16.03it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.22it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.19it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.89it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.49it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.19it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.95it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.76it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.60it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.51it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.44it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.40it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.46it/s]
+  [decoy] J=0.9447  F=0.9490  J&F=0.9468  drop(J&F)=-0.0112  SSIM=0.9766
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 0.8957573921341224}
+
+############################################################
+  bmx-bumps
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 17.28it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 17.55it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 12.64it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 12.64it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 12.78it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 11.80it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 12.40it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 12.80it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.81it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 12.23it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.12it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.87it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.48it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.18it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.94it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.76it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.65it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.54it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.70it/s]
+  [clean] J=0.0173  F=0.0954  J&F=0.0564
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=-7.7053  Lr=-11.8012  SSIM=1.0000
+    [supp|S2] step  10  Lw=-180.6565  Lr=-18.0160  SSIM=0.9397
+    [supp|S2] step  20  Lw=-979.0071  Lr=-1943.5243  SSIM=0.9277
+    [supp|S2] step  30  Lw=-984.4079  Lr=-1945.5243  SSIM=0.9292
+    [supp|S3] step  40  Lw=-1147.8035  Lr=-1945.5869  SSIM=0.9336
+    [supp|S3] step  49  Lw=-1150.1824  Lr=-1945.5936  SSIM=0.9336
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 12.46it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 12.50it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 13.27it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 14.11it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 14.87it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 14.97it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:00<00:00, 14.33it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 14.00it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.06it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.80it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:01, 11.84it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.03it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.82it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.46it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.16it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.92it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.74it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.61it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.51it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.45it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.42it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.45it/s]
+  [suppression] J=0.0015  F=0.0129  J&F=0.0072  drop(J&F)=0.0492  SSIM=0.9697
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=10.7848  Lr=16.4559  SSIM=1.0000
+    [deco|S2] step  10  Lw=9.0473  Lr=14.4738  SSIM=0.9457
+    [deco|S2] step  20  Lw=6.1062  Lr=10.5200  SSIM=0.9149
+    [deco|S2] step  30  Lw=1.2758  Lr=3.1358  SSIM=0.8985
+    [deco|S3] step  40  Lw=1.0997  Lr=1.0445  SSIM=0.9044
+    [deco|S3] step  49  Lw=0.8586  Lr=0.4769  SSIM=0.9044
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 13.21it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 13.25it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 13.69it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 13.87it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 14.82it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 16.25it/s]frame loading (JPEG):  88%|████████▊ | 15/17 [00:00<00:00, 17.43it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 17.26it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 15.79it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.84it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.82it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.46it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  9.01it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.59it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.27it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.99it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.80it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.65it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.55it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.49it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.44it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.58it/s]
+  [decoy] J=0.2686  F=0.5574  J&F=0.4130  drop(J&F)=-0.3566  SSIM=0.9699
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 0.9391220827979005}
+
+############################################################
+  bmx-trees
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 14.49it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 14.03it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 14.65it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 15.33it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 15.80it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 14.38it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:00<00:00, 14.05it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 14.40it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.81it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 13.14it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.56it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  9.07it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.64it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.30it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  8.02it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.83it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.66it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.54it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.83it/s]
+  [clean] J=0.3598  F=0.8338  J&F=0.5968
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=14.8754  Lr=23.1402  SSIM=0.9958
+    [supp|S2] step  10  Lw=-332.6210  Lr=14.2142  SSIM=0.9392
+    [supp|S2] step  20  Lw=-1135.8877  Lr=-1945.3485  SSIM=0.9252
+    [supp|S2] step  30  Lw=-1251.8250  Lr=-1945.5898  SSIM=0.9317
+    [supp|S3] step  40  Lw=-1252.5374  Lr=-1945.5892  SSIM=0.9468
+    [supp|S3] step  49  Lw=-1252.5377  Lr=-1945.5907  SSIM=0.9468
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 13.45it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 12.78it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 13.15it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 14.65it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 12.56it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 11.68it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 11.86it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 13.11it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 12.79it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 15.18it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.02it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.11it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.84it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.48it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.07it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.87it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.71it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.59it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.49it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.43it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.41it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.41it/s]
+  [suppression] J=0.0510  F=0.2197  J&F=0.1354  drop(J&F)=0.4615  SSIM=0.9741
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=7.6802  Lr=20.7653  SSIM=0.9958
+    [deco|S2] step  10  Lw=6.4481  Lr=22.5077  SSIM=0.9517
+    [deco|S2] step  20  Lw=1.0720  Lr=14.2726  SSIM=0.9166
+    [deco|S2] step  30  Lw=0.6407  Lr=0.6709  SSIM=0.9060
+    [deco|S3] step  40  Lw=0.2097  Lr=0.2013  SSIM=0.9242
+    [deco|S3] step  49  Lw=0.1330  Lr=0.0300  SSIM=0.9242
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 14.16it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 12.99it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 12.08it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 12.57it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 13.22it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 14.48it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:00<00:00, 15.64it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 16.37it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.14it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 18.57it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 13.06it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.51it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  9.05it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.63it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.28it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.99it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.80it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.47it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.43it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.42it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.38it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.56it/s]
+  [decoy] J=0.3572  F=0.8360  J&F=0.5966  drop(J&F)=0.0002  SSIM=0.9711
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 1.1364124725273033}
+
+############################################################
+  boat
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 16.43it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 14.55it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 14.00it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 14.08it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 13.95it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 13.20it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:00<00:00, 14.18it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 13.96it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.29it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 12.91it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.49it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.86it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.48it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.18it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.94it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.76it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.63it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.53it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.74it/s]
+  [clean] J=0.7902  F=0.8889  J&F=0.8396
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=16.5835  Lr=24.1493  SSIM=1.0000
+    [supp|S2] step  10  Lw=-330.9698  Lr=19.2572  SSIM=0.9453
+    [supp|S2] step  20  Lw=-1137.4303  Lr=-1945.5244  SSIM=0.9449
+    [supp|S2] step  30  Lw=-1139.2363  Lr=-1945.5547  SSIM=0.9449
+    [supp|S3] step  40  Lw=-1140.5461  Lr=-1945.5780  SSIM=0.9304
+    [supp|S3] step  49  Lw=-1141.6041  Lr=-1945.5660  SSIM=0.9304
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:00, 15.86it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 15.30it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 15.13it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 14.30it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 14.59it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 13.90it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:00<00:00, 13.87it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 14.26it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.11it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.62it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.73it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.24it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.92it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.51it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.20it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.95it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.78it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.64it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.52it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.45it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.43it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.52it/s]
+  [suppression] J=0.1341  F=0.1306  J&F=0.1324  drop(J&F)=0.7072  SSIM=0.9714
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=7.1459  Lr=22.3379  SSIM=1.0000
+    [deco|S2] step  10  Lw=4.2985  Lr=14.3537  SSIM=0.9563
+    [deco|S2] step  20  Lw=1.4029  Lr=1.8241  SSIM=0.9272
+    [deco|S2] step  30  Lw=0.6684  Lr=0.4490  SSIM=0.9263
+    [deco|S3] step  40  Lw=0.0861  Lr=0.0681  SSIM=0.9376
+    [deco|S3] step  49  Lw=0.0684  Lr=0.0359  SSIM=0.9376
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 14.25it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 14.16it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 13.36it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 13.37it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 12.47it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 13.39it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 13.96it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 13.83it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 13.56it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.53it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.69it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.38it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.97it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.57it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.25it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.99it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.79it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.51it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.44it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.39it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.38it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.51it/s]
+  [decoy] J=0.0004  F=0.1193  J&F=0.0598  drop(J&F)=0.7797  SSIM=0.9751
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 1.053257070920234}
+
+############################################################
+  breakdance
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 13.35it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 12.68it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 12.00it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 12.74it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 13.04it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 11.71it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 12.87it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 12.51it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.80it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 12.36it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.25it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.90it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.52it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.19it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.94it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.75it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.64it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.54it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.72it/s]
+  [clean] J=0.1785  F=0.3905  J&F=0.2845
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=10.3645  Lr=5.9370  SSIM=0.9998
+    [supp|S2] step  10  Lw=-336.9877  Lr=-2.7144  SSIM=0.9615
+    [supp|S2] step  20  Lw=-1136.9817  Lr=-1945.5166  SSIM=0.9328
+    [supp|S2] step  30  Lw=-1251.1787  Lr=-1945.5790  SSIM=0.9383
+    [supp|S3] step  40  Lw=-1251.3630  Lr=-1945.5848  SSIM=0.9312
+    [supp|S3] step  49  Lw=-1251.3635  Lr=-1945.5875  SSIM=0.9312
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 13.60it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 11.66it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:01,  9.58it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 10.64it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 11.47it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:01<00:00, 10.82it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 11.85it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 11.78it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 11.63it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.64it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.74it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.39it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.82it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.45it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.15it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.91it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.74it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.61it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.50it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.14it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.20it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.42it/s]
+  [suppression] J=0.2432  F=0.4108  J&F=0.3270  drop(J&F)=-0.0425  SSIM=0.9763
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=9.4856  Lr=20.9922  SSIM=0.9998
+    [deco|S2] step  10  Lw=7.4868  Lr=17.2000  SSIM=0.9689
+    [deco|S2] step  20  Lw=2.2707  Lr=5.9338  SSIM=0.9423
+    [deco|S2] step  30  Lw=1.9169  Lr=8.1056  SSIM=0.9295
+    [deco|S3] step  40  Lw=1.5165  Lr=5.1827  SSIM=0.9282
+    [deco|S3] step  49  Lw=0.6985  Lr=1.1590  SSIM=0.9282
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:00, 18.53it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 15.18it/s]frame loading (JPEG):  41%|████      | 7/17 [00:00<00:00, 15.99it/s]frame loading (JPEG):  53%|█████▎    | 9/17 [00:00<00:00, 14.49it/s]frame loading (JPEG):  65%|██████▍   | 11/17 [00:00<00:00, 14.64it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:00<00:00, 17.15it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:00<00:00, 17.20it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 16.36it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.56it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.67it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.37it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.97it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.54it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.21it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.95it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.77it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.64it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.55it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.47it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.43it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.54it/s]
+  [decoy] J=0.1738  F=0.4491  J&F=0.3115  drop(J&F)=-0.0270  SSIM=0.9741
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 0.8582828296327836}
+
+############################################################
+  breakdance-flare
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 15.04it/s]frame loading (JPEG):  33%|███▎      | 5/15 [00:00<00:00, 16.78it/s]frame loading (JPEG):  47%|████▋     | 7/15 [00:00<00:00, 16.37it/s]frame loading (JPEG):  60%|██████    | 9/15 [00:00<00:00, 15.51it/s]frame loading (JPEG):  73%|███████▎  | 11/15 [00:00<00:00, 13.59it/s]frame loading (JPEG):  87%|████████▋ | 13/15 [00:00<00:00, 13.81it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 13.36it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 14.24it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.72it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 13.09it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.53it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  9.05it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.60it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.26it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  8.02it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.79it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.63it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.52it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.80it/s]
+  [clean] J=0.0377  F=0.2216  J&F=0.1297
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=-9.8647  Lr=-9.9004  SSIM=0.9999
+    [supp|S2] step  10  Lw=-463.4576  Lr=-14.3499  SSIM=0.9660
+    [supp|S2] step  20  Lw=-1141.5309  Lr=-1945.5531  SSIM=0.9452
+    [supp|S2] step  30  Lw=-1252.1261  Lr=-1945.5928  SSIM=0.9385
+    [supp|S3] step  40  Lw=-1252.5468  Lr=-1945.5966  SSIM=0.9373
+    [supp|S3] step  49  Lw=-1252.5468  Lr=-1945.5963  SSIM=0.9373
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:00, 16.41it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 18.01it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 17.38it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 17.93it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 17.24it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 15.11it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:00<00:00, 13.62it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 14.20it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 15.32it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 18.13it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.92it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.46it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  9.03it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.61it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.27it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  8.00it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.80it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.64it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.54it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.46it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.43it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.58it/s]
+  [suppression] J=0.0000  F=0.0000  J&F=0.0000  drop(J&F)=0.1297  SSIM=0.9848
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=11.6970  Lr=18.3488  SSIM=0.9999
+    [deco|S2] step  10  Lw=10.9728  Lr=17.9770  SSIM=0.9693
+    [deco|S2] step  20  Lw=6.5833  Lr=10.5696  SSIM=0.9466
+    [deco|S2] step  30  Lw=3.8133  Lr=8.8931  SSIM=0.9314
+    [deco|S3] step  40  Lw=60.7713  Lr=560.4451  SSIM=0.9279
+    [deco|S3] step  49  Lw=5.1332  Lr=8.2872  SSIM=0.9279
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):   6%|▌         | 1/17 [00:00<00:01,  9.84it/s]frame loading (JPEG):  18%|█▊        | 3/17 [00:00<00:01,  9.32it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01,  8.67it/s]frame loading (JPEG):  29%|██▉       | 5/17 [00:00<00:01,  8.44it/s]frame loading (JPEG):  41%|████      | 7/17 [00:00<00:00, 10.25it/s]frame loading (JPEG):  53%|█████▎    | 9/17 [00:00<00:00, 10.46it/s]frame loading (JPEG):  65%|██████▍   | 11/17 [00:01<00:00, 11.60it/s]frame loading (JPEG):  76%|███████▋  | 13/17 [00:01<00:00, 12.03it/s]frame loading (JPEG):  88%|████████▊ | 15/17 [00:01<00:00, 11.86it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 11.39it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.82it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.59it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.70it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.40it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  9.01it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.60it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.12it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.89it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.70it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.34it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.33it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.33it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.33it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.45it/s]
+  [decoy] J=0.0944  F=0.2978  J&F=0.1961  drop(J&F)=-0.0664  SSIM=0.9799
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 0.0, 'centroid_shift': 0.08883025332312419}
+
+############################################################
+  bus
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 14.58it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 13.67it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 11.43it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 11.55it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 11.10it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:01<00:00, 11.76it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 11.87it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 11.95it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.64it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 11.88it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.07it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.84it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.45it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.13it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.81it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.66it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.53it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.47it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.61it/s]
+  [clean] J=0.0156  F=0.0000  J&F=0.0078
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=-347.7126  Lr=-12.4335  SSIM=0.9981
+    [supp|S2] step  10  Lw=-348.9206  Lr=-16.8095  SSIM=0.9314
+    [supp|S2] step  20  Lw=-1251.8088  Lr=-1945.5790  SSIM=0.9499
+    [supp|S2] step  30  Lw=-1253.1724  Lr=-1945.5895  SSIM=0.9440
+    [supp|S3] step  40  Lw=-1253.3163  Lr=-1945.5914  SSIM=0.9402
+    [supp|S3] step  49  Lw=-1253.3167  Lr=-1945.5912  SSIM=0.9402
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:00, 17.27it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 16.86it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 17.93it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 17.00it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 15.60it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 16.69it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:00<00:00, 16.72it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:00<00:00, 16.50it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 16.38it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.39it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.69it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.40it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  9.01it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.59it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.25it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.98it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.79it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.65it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.54it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.49it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.44it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.56it/s]
+  [suppression] J=0.0000  F=0.0000  J&F=0.0000  drop(J&F)=0.0078  SSIM=0.9756
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=7.8999  Lr=14.7623  SSIM=0.9981
+    [deco|S2] step  10  Lw=6.6136  Lr=13.2776  SSIM=0.9482
+    [deco|S2] step  20  Lw=3.1089  Lr=3.3618  SSIM=0.9173
+    [deco|S2] step  30  Lw=0.5365  Lr=4.9087  SSIM=0.9100
+    [deco|S3] step  40  Lw=0.7175  Lr=1.0015  SSIM=0.9136
+    [deco|S3] step  49  Lw=0.4553  Lr=0.1978  SSIM=0.9136
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 12.58it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 11.56it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 11.54it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 12.53it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 12.68it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 13.14it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 13.61it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 12.41it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 12.46it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 18.16it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.89it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.45it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  9.02it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.60it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.26it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  8.01it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.82it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.66it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.54it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.47it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.44it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.59it/s]
+  [decoy] J=0.9845  F=0.9984  J&F=0.9915  drop(J&F)=-0.9837  SSIM=0.9691
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 0.9847461487239959}
+
+############################################################
+  car-roundabout
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 13.07it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 13.47it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 13.88it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 14.42it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 12.96it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 13.68it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:00<00:00, 14.65it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 14.08it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.82it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 13.18it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.58it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  9.10it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.65it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.29it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  8.03it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.83it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.68it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.56it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.84it/s]
+  [clean] J=0.9833  F=0.9604  J&F=0.9718
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=16.3023  Lr=25.5167  SSIM=0.9999
+    [supp|S2] step  10  Lw=-325.7701  Lr=31.1583  SSIM=0.9492
+    [supp|S2] step  20  Lw=-1138.3055  Lr=-1945.2922  SSIM=0.9336
+    [supp|S2] step  30  Lw=-1139.6329  Lr=-1945.5941  SSIM=0.9450
+    [supp|S3] step  40  Lw=-1140.8698  Lr=-1945.5898  SSIM=0.9428
+    [supp|S3] step  49  Lw=-1141.6251  Lr=-1945.5934  SSIM=0.9428
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 12.09it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 12.30it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 11.53it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 11.84it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 12.63it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 13.07it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 13.64it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 14.59it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 13.33it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.55it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.24it/s]propagate in video:  41%|████      | 7/17 [00:00<00:01,  9.93it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.77it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.40it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.13it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.91it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.72it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.62it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.53it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.48it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.38it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.44it/s]
+  [suppression] J=0.1672  F=0.0000  J&F=0.0836  drop(J&F)=0.8882  SSIM=0.9735
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=7.6335  Lr=28.1176  SSIM=0.9999
+    [deco|S2] step  10  Lw=7.5993  Lr=19.5057  SSIM=0.9569
+    [deco|S2] step  20  Lw=201.0442  Lr=560.5259  SSIM=0.9253
+    [deco|S2] step  30  Lw=1.1227  Lr=6.8126  SSIM=0.9237
+    [deco|S3] step  40  Lw=0.6508  Lr=1.2964  SSIM=0.9282
+    [deco|S3] step  49  Lw=0.5724  Lr=1.8028  SSIM=0.9282
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):   6%|▌         | 1/17 [00:00<00:01,  8.60it/s]frame loading (JPEG):  18%|█▊        | 3/17 [00:00<00:01, 11.18it/s]frame loading (JPEG):  29%|██▉       | 5/17 [00:00<00:00, 13.02it/s]frame loading (JPEG):  41%|████      | 7/17 [00:00<00:00, 10.82it/s]frame loading (JPEG):  53%|█████▎    | 9/17 [00:00<00:00, 10.49it/s]frame loading (JPEG):  65%|██████▍   | 11/17 [00:01<00:00,  9.46it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:01<00:00,  9.25it/s]frame loading (JPEG):  76%|███████▋  | 13/17 [00:01<00:00,  8.61it/s]frame loading (JPEG):  88%|████████▊ | 15/17 [00:01<00:00,  9.15it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.99it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.25it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  12%|█▏        | 2/17 [00:00<00:01, 13.23it/s]propagate in video:  24%|██▎       | 4/17 [00:00<00:01, 10.88it/s]propagate in video:  35%|███▌      | 6/17 [00:00<00:01,  9.95it/s]propagate in video:  47%|████▋     | 8/17 [00:00<00:01,  8.88it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.41it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.08it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  7.86it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.39it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.34it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.31it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.32it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.31it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.28it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.07it/s]
+  [decoy] J=0.0000  F=0.0637  J&F=0.0318  drop(J&F)=0.9400  SSIM=0.9708
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 1.233689421881214}
+
+############################################################
+  car-shadow
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:01, 10.18it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:01,  9.87it/s]frame loading (JPEG):  33%|███▎      | 5/15 [00:00<00:01,  9.82it/s]frame loading (JPEG):  47%|████▋     | 7/15 [00:00<00:00, 11.14it/s]frame loading (JPEG):  60%|██████    | 9/15 [00:00<00:00, 11.78it/s]frame loading (JPEG):  73%|███████▎  | 11/15 [00:00<00:00, 11.52it/s]frame loading (JPEG):  87%|████████▋ | 13/15 [00:01<00:00, 11.64it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 11.96it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 11.37it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.68it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 13.08it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.53it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.92it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.53it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.20it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.95it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.77it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.63it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.53it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.77it/s]
+  [clean] J=0.9817  F=0.9985  J&F=0.9901
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=22.1046  Lr=31.1207  SSIM=1.0000
+    [supp|S2] step  10  Lw=-326.8745  Lr=27.5298  SSIM=0.9425
+    [supp|S2] step  20  Lw=-1138.4403  Lr=-1945.5596  SSIM=0.9459
+    [supp|S2] step  30  Lw=-1140.9615  Lr=-1944.9758  SSIM=0.9456
+    [supp|S3] step  40  Lw=-1143.0153  Lr=-1945.5934  SSIM=0.9409
+    [supp|S3] step  49  Lw=-1251.3777  Lr=-1945.5852  SSIM=0.9409
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 11.68it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 12.05it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 12.88it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 10.61it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 11.33it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:01<00:00,  9.88it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 10.34it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 10.05it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.50it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 18.64it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 13.06it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.42it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.56it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.26it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  7.92it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.68it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.37it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.35it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.33it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.32it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.32it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.30it/s]
+  [suppression] J=0.1014  F=0.0129  J&F=0.0571  drop(J&F)=0.9330  SSIM=0.9723
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=12.0606  Lr=37.9797  SSIM=1.0000
+    [deco|S2] step  10  Lw=11.0773  Lr=34.6718  SSIM=0.9504
+    [deco|S2] step  20  Lw=0.8182  Lr=291.2547  SSIM=0.9131
+    [deco|S2] step  30  Lw=0.1701  Lr=0.1323  SSIM=0.9166
+    [deco|S3] step  40  Lw=0.3702  Lr=0.0132  SSIM=0.9279
+    [deco|S3] step  49  Lw=0.3191  Lr=0.0046  SSIM=0.9279
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 11.61it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 10.30it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 11.64it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 12.07it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 13.08it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 13.71it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 13.61it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 13.23it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 12.83it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.72it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.77it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.43it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.07it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  7.90it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  7.77it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.65it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.55it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.49it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.44it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.40it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.37it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.29it/s]
+  [decoy] J=0.9760  F=0.9959  J&F=0.9860  drop(J&F)=0.0042  SSIM=0.9695
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 0.68374311194051}
+
+############################################################
+  car-turn
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 14.45it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 13.46it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 13.80it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 12.31it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 12.81it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 13.76it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 13.06it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 13.28it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:01, 11.44it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 10.27it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00,  9.10it/s]propagate in video:  53%|█████▎    | 8/15 [00:00<00:00,  8.61it/s]propagate in video:  60%|██████    | 9/15 [00:01<00:00,  8.26it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  7.99it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  7.79it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.65it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.18it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.21it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.22it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.09it/s]
+  [clean] J=0.9523  F=0.9908  J&F=0.9716
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=20.9107  Lr=30.8802  SSIM=1.0000
+    [supp|S2] step  10  Lw=-326.2609  Lr=27.2154  SSIM=0.9529
+    [supp|S2] step  20  Lw=-1141.9181  Lr=-1943.8265  SSIM=0.9291
+    [supp|S2] step  30  Lw=-1145.7424  Lr=-1945.5780  SSIM=0.9356
+    [supp|S3] step  40  Lw=-1148.7762  Lr=-1945.5862  SSIM=0.9301
+    [supp|S3] step  49  Lw=-1149.3726  Lr=-1945.5931  SSIM=0.9301
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):   6%|▌         | 1/17 [00:00<00:02,  6.58it/s]frame loading (JPEG):  18%|█▊        | 3/17 [00:00<00:01,  9.18it/s]frame loading (JPEG):  29%|██▉       | 5/17 [00:00<00:01, 11.08it/s]frame loading (JPEG):  41%|████      | 7/17 [00:00<00:01,  9.45it/s]frame loading (JPEG):  53%|█████▎    | 9/17 [00:00<00:00, 10.15it/s]frame loading (JPEG):  65%|██████▍   | 11/17 [00:01<00:00, 10.28it/s]frame loading (JPEG):  76%|███████▋  | 13/17 [00:01<00:00, 10.89it/s]frame loading (JPEG):  88%|████████▊ | 15/17 [00:01<00:00,  9.92it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 11.07it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.37it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 18.11it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.07it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.01it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.80it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.41it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.13it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.90it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.74it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.60it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.33it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.32it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.30it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.40it/s]
+  [suppression] J=0.0073  F=0.0000  J&F=0.0036  drop(J&F)=0.9679  SSIM=0.9740
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=10.1602  Lr=35.6714  SSIM=1.0000
+    [deco|S2] step  10  Lw=9.9236  Lr=33.0939  SSIM=0.9640
+    [deco|S2] step  20  Lw=1.1063  Lr=14.9674  SSIM=0.9322
+    [deco|S2] step  30  Lw=0.5988  Lr=0.2009  SSIM=0.9216
+    [deco|S3] step  40  Lw=0.1637  Lr=0.0577  SSIM=0.9330
+    [deco|S3] step  49  Lw=0.0987  Lr=0.0415  SSIM=0.9330
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):   6%|▌         | 1/17 [00:00<00:02,  7.37it/s]frame loading (JPEG):  18%|█▊        | 3/17 [00:00<00:01, 10.41it/s]frame loading (JPEG):  29%|██▉       | 5/17 [00:00<00:01, 10.49it/s]frame loading (JPEG):  41%|████      | 7/17 [00:00<00:01,  8.36it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:01,  8.66it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:01<00:00,  9.72it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:01<00:00, 10.74it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 11.48it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 10.28it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.19it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.68it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.01it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.08it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.84it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.47it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.14it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.86it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.72it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.59it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.46it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.43it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.13it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.37it/s]
+  [decoy] J=0.0000  F=0.0000  J&F=0.0000  drop(J&F)=0.9716  SSIM=0.9747
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': -0.3840255497547289}
+
+############################################################
+  cat-girl
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:01, 12.49it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 11.76it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 12.01it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 11.43it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00,  9.70it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:01<00:00,  9.37it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 10.15it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 10.29it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 16.65it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 12.53it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.34it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.83it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.45it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.15it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.92it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.37it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.35it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.27it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.52it/s]
+  [clean] J=0.8940  F=0.8259  J&F=0.8600
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=13.0518  Lr=17.0170  SSIM=0.9996
+    [supp|S2] step  10  Lw=-161.1751  Lr=15.7943  SSIM=0.9456
+    [supp|S2] step  20  Lw=-1255.4573  Lr=-1945.5817  SSIM=0.9411
+    [supp|S2] step  30  Lw=-1256.4308  Lr=-1945.5823  SSIM=0.9344
+    [supp|S3] step  40  Lw=-1256.9662  Lr=-1945.5881  SSIM=0.9488
+    [supp|S3] step  49  Lw=-1256.9667  Lr=-1945.5892  SSIM=0.9488
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 12.41it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 13.27it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 14.32it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 13.95it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 11.26it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 11.47it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 11.62it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 11.81it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 12.15it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.62it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.00it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.11it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.85it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.48it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.17it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.92it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.71it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.59it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.51it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.45it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.32it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.44it/s]
+  [suppression] J=0.0000  F=0.0000  J&F=0.0000  drop(J&F)=0.8600  SSIM=0.9794
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=4.0249  Lr=16.2945  SSIM=0.9996
+    [deco|S2] step  10  Lw=4.1754  Lr=13.8902  SSIM=0.9497
+    [deco|S2] step  20  Lw=1.4577  Lr=1.0281  SSIM=0.9128
+    [deco|S2] step  30  Lw=0.2707  Lr=0.1480  SSIM=0.9251
+    [deco|S3] step  40  Lw=0.1115  Lr=0.0149  SSIM=0.9473
+    [deco|S3] step  49  Lw=0.0868  Lr=0.0108  SSIM=0.9473
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 10.84it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 11.67it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:01, 10.94it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 12.23it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00,  9.25it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:01<00:00,  9.52it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00,  9.88it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 10.88it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.54it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.83it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.35it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.22it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.72it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.39it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.11it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.77it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.61it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.47it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.42it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.37it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.36it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.40it/s]
+  [decoy] J=0.9735  F=0.9648  J&F=0.9691  drop(J&F)=-0.1092  SSIM=0.9751
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 0.9574333588621897}
+
+############################################################
+  classic-car
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:01, 12.61it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 12.45it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 13.23it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 11.99it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 11.93it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 12.14it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 12.68it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 12.37it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 16.57it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 12.24it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.22it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.84it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.48it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.16it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.93it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.73it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.45it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.40it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.60it/s]
+  [clean] J=0.7413  F=0.8356  J&F=0.7884
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=14.6949  Lr=23.7682  SSIM=0.9997
+    [supp|S2] step  10  Lw=-162.6711  Lr=14.4315  SSIM=0.9537
+    [supp|S2] step  20  Lw=-1250.9036  Lr=-1945.4170  SSIM=0.9256
+    [supp|S2] step  30  Lw=-1252.2604  Lr=-1945.5795  SSIM=0.9327
+    [supp|S3] step  40  Lw=-1252.5182  Lr=-1945.5819  SSIM=0.9302
+    [supp|S3] step  49  Lw=-1252.5192  Lr=-1945.5840  SSIM=0.9302
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 10.60it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 10.92it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:01,  8.68it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00,  9.65it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 10.56it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:01<00:00, 11.55it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 11.42it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 11.49it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.92it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 16.71it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.49it/s]propagate in video:  41%|████      | 7/17 [00:00<00:01,  9.88it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.75it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.33it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.06it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.85it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.69it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.57it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.49it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.44it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.41it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.41it/s]
+  [suppression] J=0.2838  F=0.4668  J&F=0.3753  drop(J&F)=0.4131  SSIM=0.9756
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=7.4528  Lr=23.0493  SSIM=0.9997
+    [deco|S2] step  10  Lw=6.0172  Lr=19.4311  SSIM=0.9645
+    [deco|S2] step  20  Lw=3.1411  Lr=13.0975  SSIM=0.9336
+    [deco|S2] step  30  Lw=3.3578  Lr=10.8451  SSIM=0.9232
+    [deco|S3] step  40  Lw=0.9621  Lr=2.0682  SSIM=0.9256
+    [deco|S3] step  49  Lw=0.5357  Lr=1.0684  SSIM=0.9256
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):   6%|▌         | 1/17 [00:00<00:01,  8.10it/s]frame loading (JPEG):  18%|█▊        | 3/17 [00:00<00:01, 11.08it/s]frame loading (JPEG):  29%|██▉       | 5/17 [00:00<00:01, 11.83it/s]frame loading (JPEG):  41%|████      | 7/17 [00:00<00:00, 12.09it/s]frame loading (JPEG):  53%|█████▎    | 9/17 [00:00<00:00, 12.43it/s]frame loading (JPEG):  65%|██████▍   | 11/17 [00:01<00:00,  9.89it/s]frame loading (JPEG):  76%|███████▋  | 13/17 [00:01<00:00,  9.48it/s]frame loading (JPEG):  88%|████████▊ | 15/17 [00:01<00:00,  9.78it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.55it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.57it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  12%|█▏        | 2/17 [00:00<00:00, 18.13it/s]propagate in video:  24%|██▎       | 4/17 [00:00<00:01, 12.75it/s]propagate in video:  35%|███▌      | 6/17 [00:00<00:01, 10.53it/s]propagate in video:  47%|████▋     | 8/17 [00:00<00:00,  9.13it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.65it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.29it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  7.97it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.59it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.38it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.36it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.33it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.17it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.07it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.22it/s]
+  [decoy] J=0.8195  F=0.8973  J&F=0.8584  drop(J&F)=-0.0700  SSIM=0.9724
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 1.3157891909387813}
+
+############################################################
+  color-run
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 16.31it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 15.33it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 14.06it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 11.17it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 11.67it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 12.09it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 11.53it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 12.42it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.30it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 12.43it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.02it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.76it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.40it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.13it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.90it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.74it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.61it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.54it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.66it/s]
+  [clean] J=0.9592  F=0.9915  J&F=0.9754
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=17.7385  Lr=31.7595  SSIM=0.9989
+    [supp|S2] step  10  Lw=-323.6067  Lr=34.0138  SSIM=0.9379
+    [supp|S2] step  20  Lw=-1251.3082  Lr=-1945.2499  SSIM=0.9141
+    [supp|S2] step  30  Lw=-1252.5457  Lr=-1945.5797  SSIM=0.9360
+    [supp|S3] step  40  Lw=-1252.6721  Lr=-1945.5895  SSIM=0.9357
+    [supp|S3] step  49  Lw=-1252.6729  Lr=-1945.5914  SSIM=0.9357
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 12.86it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 12.38it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 11.79it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 12.15it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 11.93it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:01<00:00, 11.36it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 10.98it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 11.97it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 11.79it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.78it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.75it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.39it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.99it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.58it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.24it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.98it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.79it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.63it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.53it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.47it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.41it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.55it/s]
+  [suppression] J=0.0000  F=0.0000  J&F=0.0000  drop(J&F)=0.9754  SSIM=0.9744
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=8.5870  Lr=24.3746  SSIM=0.9989
+    [deco|S2] step  10  Lw=7.7428  Lr=23.3386  SSIM=0.9367
+    [deco|S2] step  20  Lw=1.4286  Lr=0.6617  SSIM=0.9030
+    [deco|S2] step  30  Lw=0.1548  Lr=0.7208  SSIM=0.9252
+    [deco|S3] step  40  Lw=0.1093  Lr=0.0397  SSIM=0.9263
+    [deco|S3] step  49  Lw=0.0833  Lr=0.0233  SSIM=0.9263
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 12.46it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 10.92it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:01, 10.41it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 11.09it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 10.70it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:01<00:00, 10.42it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00,  8.82it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00,  9.45it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.00it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.77it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.79it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.44it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.82it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.41it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.11it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.89it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.74it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.56it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.49it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.44it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.41it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.49it/s]
+  [decoy] J=0.0004  F=0.3202  J&F=0.1603  drop(J&F)=0.8151  SSIM=0.9726
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 0.7641917473631329}
+
+############################################################
+  cows
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:01, 12.14it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 12.50it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00,  9.68it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 10.10it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 11.34it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:01<00:00, 11.19it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 11.33it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 10.82it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.77it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 13.12it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.52it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  9.04it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.61it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.27it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.89it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.67it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.56it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.43it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.74it/s]
+  [clean] J=0.9760  F=0.9900  J&F=0.9830
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=24.1054  Lr=38.1703  SSIM=1.0000
+    [supp|S2] step  10  Lw=-329.0814  Lr=22.4451  SSIM=0.9738
+    [supp|S2] step  20  Lw=-1253.6042  Lr=-1945.5670  SSIM=0.9557
+    [supp|S2] step  30  Lw=-1254.8899  Lr=-1945.5879  SSIM=0.9494
+    [supp|S3] step  40  Lw=-1255.7047  Lr=-1945.5820  SSIM=0.9455
+    [supp|S3] step  49  Lw=-1255.7058  Lr=-1945.5858  SSIM=0.9455
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01,  9.73it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 11.70it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 12.19it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 12.49it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 11.96it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 12.21it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 11.58it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 12.00it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 11.93it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.52it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.70it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.35it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.83it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.45it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.15it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.94it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.77it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.64it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.45it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.40it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.38it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.49it/s]
+  [suppression] J=0.0000  F=0.0000  J&F=0.0000  drop(J&F)=0.9830  SSIM=0.9879
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=9.4296  Lr=34.1463  SSIM=1.0000
+    [deco|S2] step  10  Lw=1.9205  Lr=4.8563  SSIM=0.9749
+    [deco|S2] step  20  Lw=0.2579  Lr=0.1696  SSIM=0.9571
+    [deco|S2] step  30  Lw=0.1062  Lr=0.0586  SSIM=0.9439
+    [deco|S3] step  40  Lw=0.0729  Lr=0.0284  SSIM=0.9369
+    [deco|S3] step  49  Lw=0.0665  Lr=0.0220  SSIM=0.9369
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):   6%|▌         | 1/17 [00:00<00:01,  9.77it/s]frame loading (JPEG):  18%|█▊        | 3/17 [00:00<00:01, 11.42it/s]frame loading (JPEG):  29%|██▉       | 5/17 [00:00<00:00, 12.56it/s]frame loading (JPEG):  41%|████      | 7/17 [00:00<00:00, 11.85it/s]frame loading (JPEG):  53%|█████▎    | 9/17 [00:00<00:00, 11.75it/s]frame loading (JPEG):  65%|██████▍   | 11/17 [00:00<00:00, 11.67it/s]frame loading (JPEG):  76%|███████▋  | 13/17 [00:01<00:00, 12.16it/s]frame loading (JPEG):  88%|████████▊ | 15/17 [00:01<00:00, 12.03it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 11.03it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 11.51it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.42it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.64it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.38it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  9.01it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.58it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.24it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.97it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.78it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.64it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.54it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.47it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.42it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.55it/s]
+  [decoy] J=0.0001  F=0.1356  J&F=0.0679  drop(J&F)=0.9151  SSIM=0.9862
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 1.0173718891214414}
+
+############################################################
+  crossing
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):   7%|▋         | 1/15 [00:00<00:01,  9.93it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:01,  9.18it/s]frame loading (JPEG):  20%|██        | 3/15 [00:00<00:01,  9.34it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:01,  8.25it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00,  9.78it/s]frame loading (JPEG):  47%|████▋     | 7/15 [00:00<00:00,  9.69it/s]frame loading (JPEG):  60%|██████    | 9/15 [00:00<00:00, 10.58it/s]frame loading (JPEG):  73%|███████▎  | 11/15 [00:01<00:00, 12.10it/s]frame loading (JPEG):  87%|████████▋ | 13/15 [00:01<00:00, 12.04it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 12.36it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 11.06it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 15.42it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 12.16it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.17it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.90it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.08it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  7.89it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.75it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.63it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.52it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.46it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.51it/s]
+  [clean] J=0.9370  F=1.0000  J&F=0.9685
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=22.2084  Lr=35.7885  SSIM=1.0000
+    [supp|S2] step  10  Lw=-157.5909  Lr=26.5467  SSIM=0.9658
+    [supp|S2] step  20  Lw=-1250.7137  Lr=-1945.5677  SSIM=0.9458
+    [supp|S2] step  30  Lw=-1250.0791  Lr=-1945.4144  SSIM=0.9388
+    [supp|S3] step  40  Lw=-1251.8497  Lr=-1945.5780  SSIM=0.9314
+    [supp|S3] step  49  Lw=-1251.8525  Lr=-1945.5878  SSIM=0.9314
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):   6%|▌         | 1/17 [00:00<00:01,  9.26it/s]frame loading (JPEG):  18%|█▊        | 3/17 [00:00<00:01,  8.42it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01,  8.90it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:01, 10.50it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 11.73it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 10.75it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:01<00:00, 11.66it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 12.43it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 11.93it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.96it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.32it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:01, 11.61it/s]propagate in video:  41%|████      | 7/17 [00:00<00:01,  9.95it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.78it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.41it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.14it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.92it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.74it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.62it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.51it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.44it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.32it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.40it/s]
+  [suppression] J=0.0000  F=0.0000  J&F=0.0000  drop(J&F)=0.9685  SSIM=0.9778
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=10.3995  Lr=34.6427  SSIM=1.0000
+    [deco|S2] step  10  Lw=7.8397  Lr=27.6601  SSIM=0.9729
+    [deco|S2] step  20  Lw=1.4843  Lr=2.7826  SSIM=0.9506
+    [deco|S2] step  30  Lw=1.2983  Lr=2.0369  SSIM=0.9356
+    [deco|S3] step  40  Lw=0.3146  Lr=0.1549  SSIM=0.9301
+    [deco|S3] step  49  Lw=0.1098  Lr=0.0591  SSIM=0.9301
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 11.07it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 13.13it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 13.85it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 14.80it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 14.60it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 14.36it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 13.03it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 13.06it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 13.59it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.54it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.70it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.40it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.88it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.49it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.19it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.94it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.78it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.64it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.54it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.46it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.42it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.52it/s]
+  [decoy] J=0.0000  F=0.0015  J&F=0.0007  drop(J&F)=0.9678  SSIM=0.9771
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 0.9318634046939902}
+
+############################################################
+  dance-jump
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 13.11it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 12.57it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 11.66it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 12.35it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 11.97it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:01<00:00, 11.11it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 12.12it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 12.02it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 16.86it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:01,  9.93it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00,  9.16it/s]propagate in video:  53%|█████▎    | 8/15 [00:00<00:00,  8.64it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.27it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  7.92it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  7.73it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.60it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.47it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.38it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.00it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.15it/s]
+  [clean] J=0.8646  F=0.8600  J&F=0.8623
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=22.6484  Lr=33.2283  SSIM=0.9998
+    [supp|S2] step  10  Lw=-502.2365  Lr=17.7118  SSIM=0.9530
+    [supp|S2] step  20  Lw=-1136.8854  Lr=-1945.5432  SSIM=0.9369
+    [supp|S2] step  30  Lw=-1251.7979  Lr=-1945.5918  SSIM=0.9429
+    [supp|S3] step  40  Lw=-1252.7760  Lr=-1945.5927  SSIM=0.9370
+    [supp|S3] step  49  Lw=-1252.7765  Lr=-1945.5936  SSIM=0.9370
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 12.04it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 12.87it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 11.86it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 11.10it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 10.84it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:01<00:00, 11.50it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 11.15it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 11.74it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 11.75it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 15.28it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:01, 11.96it/s]propagate in video:  41%|████      | 7/17 [00:00<00:01,  9.95it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.66it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  7.99it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  7.51it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.46it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.42it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.38it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.35it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.34it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.34it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.18it/s]
+  [suppression] J=0.0000  F=0.0000  J&F=0.0000  drop(J&F)=0.8623  SSIM=0.9761
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=10.0217  Lr=28.4920  SSIM=0.9998
+    [deco|S2] step  10  Lw=6.1241  Lr=13.0848  SSIM=0.9586
+    [deco|S2] step  20  Lw=2.3706  Lr=2.2123  SSIM=0.9238
+    [deco|S2] step  30  Lw=0.2520  Lr=0.4080  SSIM=0.9267
+    [deco|S3] step  40  Lw=0.1041  Lr=0.0905  SSIM=0.9364
+    [deco|S3] step  49  Lw=0.0728  Lr=0.0411  SSIM=0.9364
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):   6%|▌         | 1/17 [00:00<00:01,  9.22it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01,  9.61it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 12.05it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 12.28it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 12.04it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 11.96it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:01<00:00, 11.35it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 11.55it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 10.19it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 10.92it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 18.49it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:01, 11.46it/s]propagate in video:  41%|████      | 7/17 [00:00<00:01,  9.76it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.70it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.24it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  7.99it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.78it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.66it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.55it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.48it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.44it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.41it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.36it/s]
+  [decoy] J=0.0003  F=0.0259  J&F=0.0131  drop(J&F)=0.8492  SSIM=0.9739
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 0.9813092201109306}
+
+############################################################
+  dance-twirl
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:01, 10.74it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 12.05it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 12.76it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 13.62it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 13.68it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 14.01it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 12.96it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 12.57it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.75it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 13.10it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.54it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.66it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.33it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.06it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.86it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.70it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.45it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.25it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.58it/s]
+  [clean] J=0.3078  F=0.2976  J&F=0.3027
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=4.9991  Lr=8.0224  SSIM=0.9997
+    [supp|S2] step  10  Lw=-623.7897  Lr=-0.6319  SSIM=0.9630
+    [supp|S2] step  20  Lw=-1251.8607  Lr=-1945.5784  SSIM=0.9404
+    [supp|S2] step  30  Lw=-1252.2589  Lr=-1945.5911  SSIM=0.9368
+    [supp|S3] step  40  Lw=-1252.4323  Lr=-1945.5941  SSIM=0.9345
+    [supp|S3] step  49  Lw=-1252.4325  Lr=-1945.5946  SSIM=0.9345
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01,  9.13it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01,  9.94it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 12.18it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 13.43it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 14.56it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 13.52it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 14.86it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 14.67it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 13.56it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.27it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.62it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.35it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.97it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.56it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.23it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.96it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.78it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.65it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.54it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.48it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.42it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.54it/s]
+  [suppression] J=0.0000  F=0.0000  J&F=0.0000  drop(J&F)=0.3027  SSIM=0.9836
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=7.2265  Lr=17.1665  SSIM=0.9997
+    [deco|S2] step  10  Lw=6.3947  Lr=15.4435  SSIM=0.9732
+    [deco|S2] step  20  Lw=2.0376  Lr=10.7272  SSIM=0.9501
+    [deco|S2] step  30  Lw=1.2621  Lr=6.0594  SSIM=0.9344
+    [deco|S3] step  40  Lw=0.2667  Lr=0.4197  SSIM=0.9314
+    [deco|S3] step  49  Lw=0.0959  Lr=0.0896  SSIM=0.9314
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:00, 16.28it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 15.87it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 15.77it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 15.04it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 15.26it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 13.70it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:00<00:00, 14.11it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 14.15it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.36it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.48it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.63it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.17it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.86it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.48it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.17it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.94it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.71it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.57it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.51it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.45it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  7.42it/s]propagate in video: 100%|██████████| 17/17 [00:02<00:00,  8.49it/s]
+  [decoy] J=0.9284  F=0.9824  J&F=0.9554  drop(J&F)=-0.6527  SSIM=0.9757
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 1.0632345197856008}
+
+############################################################
+  dog
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:01, 12.84it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 12.50it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 12.90it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 12.64it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 12.73it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 13.64it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:01<00:00, 13.93it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 13.31it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.82it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 13.12it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.56it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  9.08it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.66it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.29it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  8.02it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.82it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.66it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.56it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.83it/s]
+  [clean] J=0.9579  F=0.9935  J&F=0.9757
+  [suppression] optimizing (50 steps)...
+    [supp|S1] step   0  Lw=25.6697  Lr=39.3503  SSIM=1.0000
+    [supp|S2] step  10  Lw=-329.2406  Lr=20.8350  SSIM=0.9593
+    [supp|S2] step  20  Lw=-1251.3906  Lr=-1945.5826  SSIM=0.9299
+    [supp|S2] step  30  Lw=-1252.0410  Lr=-1945.5930  SSIM=0.9425
+    [supp|S3] step  40  Lw=-1252.1627  Lr=-1945.5892  SSIM=0.9325
+    [supp|S3] step  49  Lw=-1252.1630  Lr=-1945.5917  SSIM=0.9325
+  [suppression] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:00, 16.39it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 16.37it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 15.05it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 15.17it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 14.64it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 14.70it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:00<00:00, 13.20it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.62it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.58it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.39it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.47it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.30it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.93it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.55it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.23it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.98it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.79it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.65it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.54it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.47it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.45it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.54it/s]
+  [suppression] J=0.0000  F=0.0000  J&F=0.0000  drop(J&F)=0.9757  SSIM=0.9832
+            Sigs: {'neg_score_rate': 1.0, 'pos_score_rate': 0.0, 'collapse_rate': 1.0, 'n_eval': 5}
+  [decoy] optimizing (50 steps)...
+    [deco|S1] step   0  Lw=9.8462  Lr=31.1100  SSIM=1.0000
+    [deco|S2] step  10  Lw=8.7437  Lr=36.3155  SSIM=0.9601
+    [deco|S2] step  20  Lw=1.8367  Lr=2.4695  SSIM=0.9283
+    [deco|S2] step  30  Lw=0.1067  Lr=0.0866  SSIM=0.9360
+    [deco|S3] step  40  Lw=0.0817  Lr=0.0328  SSIM=0.9409
+    [deco|S3] step  49  Lw=0.0682  Lr=0.0205  SSIM=0.9409
+  [decoy] evaluating (17 frames)...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 10.83it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 13.72it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 14.88it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 16.34it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 15.62it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 16.27it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:00<00:00, 15.52it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 14.74it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.97it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.86it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.82it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.44it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  9.02it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.60it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.14it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.91it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.75it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.62it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.51it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.47it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.44it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.55it/s]
+  [decoy] J=0.0000  F=0.1418  J&F=0.0709  drop(J&F)=0.9048  SSIM=0.9762
+            Sigs: {'neg_score_rate': 0.0, 'pos_score_rate': 1.0, 'collapse_rate': 0.0, 'n_eval': 5, 'decoy_hit_rate': 1.0, 'centroid_shift': 0.7867295902870961}
+
+======================================================================
+  RESULTS (eval on f10-f14)
+======================================================================
+  Video                J&F_c  dJF_suppression  dJ_suppression      dJF_decoy     dJ_decoy
+----------------------------------------------------------------------
+  bear                0.9763         0.9763       0.9672         0.9017       0.9672 *
+  bike-packing        0.6216         0.6216       0.6288         0.1391       0.3263 *
+  blackswan           0.9357         0.9357       0.9435        -0.0112      -0.0011 *
+  bmx-bumps           0.0564         0.0492       0.0159        -0.3566      -0.2513
+  bmx-trees           0.5968         0.4615       0.3089         0.0002       0.0026
+  boat                0.8396         0.7072       0.6561         0.7797       0.7898 *
+  breakdance          0.2845        -0.0425      -0.0647        -0.0270       0.0047
+  breakdance-flare    0.1297         0.1297       0.0377        -0.0664      -0.0567
+  bus                 0.0078         0.0078       0.0156        -0.9837      -0.9689
+  car-roundabout      0.9718         0.8882       0.8161         0.9400       0.9833 *
+  car-shadow          0.9901         0.9330       0.8803         0.0042       0.0057 *
+  car-turn            0.9716         0.9679       0.9450         0.9716       0.9523 *
+  cat-girl            0.8600         0.8600       0.8940        -0.1092      -0.0795 *
+  classic-car         0.7884         0.4131       0.4575        -0.0700      -0.0782 *
+  color-run           0.9754         0.9754       0.9592         0.8151       0.9588 *
+  cows                0.9830         0.9830       0.9760         0.9151       0.9759 *
+  crossing            0.9685         0.9685       0.9370         0.9678       0.9370 *
+  dance-jump          0.8623         0.8623       0.8646         0.8492       0.8643 *
+  dance-twirl         0.3027         0.3027       0.3078        -0.6527      -0.6207
+  dog                 0.9757         0.9757       0.9579         0.9048       0.9579 *
+
+  Eligible (J&F >= 0.60): 14/20
+  suppression eligible: mean dJF=0.8620  median=0.9343  n=14
+  decoy eligible: mean dJF=0.5713  median=0.8321  n=14
+
+  Signature Comparison (eligible):
+  suppression: NegScore=1.00  PosScore=0.00  Collapse=1.00
+  decoy: NegScore=0.00  PosScore=1.00  Collapse=0.00  DecoyHit=1.00  CentShift=0.84
+
+Results: results_regimes/regimes_results.json
+EXIT_CODE=0

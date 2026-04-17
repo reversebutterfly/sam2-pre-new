@@ -1,0 +1,113 @@
+======================================================================
+  Mechanism Isolation Experiments (Block 2)
+======================================================================
+  Videos:   30
+  Variants: ['benign', 'perturb_only', 'insert_only', 'hybrid', 'hybrid_reset', 'clean_reset']
+  Seed:     42
+  Regimes:  ['suppression', 'decoy']
+  Steps:    50
+======================================================================
+
+############################################################
+  bike-packing
+############################################################
+  [clean] evaluating...
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 15.62it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 13.85it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 13.85it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 13.72it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 15.02it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 14.12it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:00<00:00, 14.31it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 13.66it/s]
+/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/sam2_video_predictor.py:786: UserWarning: cannot import name '_C' from 'sam2' (/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/__init__.py)
+
+Skipping the post-processing step due to the error above. You can still use SAM 2 and it's OK to ignore the error above, although some post-processing functionality may be limited (which doesn't affect the results in most cases; see https://github.com/facebookresearch/sam2/blob/main/INSTALL.md).
+  pred_masks_gpu = fill_holes_in_mask_scores(
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  13%|█▎        | 2/15 [00:00<00:00, 19.36it/s]propagate in video:  27%|██▋       | 4/15 [00:00<00:00, 12.71it/s]propagate in video:  40%|████      | 6/15 [00:00<00:00, 10.40it/s]propagate in video:  53%|█████▎    | 8/15 [00:00<00:00,  9.00it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  8.52it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.17it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  7.88it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  7.64it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.53it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.43it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.09it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.36it/s]
+  [clean] J&F=0.6216
+  [clean_reset] evaluating...
+frame loading (JPEG):   0%|          | 0/5 [00:00<?, ?it/s]frame loading (JPEG):  40%|████      | 2/5 [00:00<00:00, 17.39it/s]frame loading (JPEG):  80%|████████  | 4/5 [00:00<00:00, 15.34it/s]frame loading (JPEG): 100%|██████████| 5/5 [00:00<00:00, 13.39it/s]
+/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/sam2_video_predictor.py:786: UserWarning: cannot import name '_C' from 'sam2' (/IMBR_Data/Student-home/2025M_LvShaoting/sam2_privacy_preprocessor/src/sam2/sam2/__init__.py)
+
+Skipping the post-processing step due to the error above. You can still use SAM 2 and it's OK to ignore the error above, although some post-processing functionality may be limited (which doesn't affect the results in most cases; see https://github.com/facebookresearch/sam2/blob/main/INSTALL.md).
+  pred_masks_gpu = fill_holes_in_mask_scores(
+propagate in video:   0%|          | 0/5 [00:00<?, ?it/s]propagate in video:  60%|██████    | 3/5 [00:00<00:00, 17.99it/s]propagate in video: 100%|██████████| 5/5 [00:00<00:00, 12.72it/s]propagate in video: 100%|██████████| 5/5 [00:00<00:00, 13.40it/s]
+  [clean_reset] J&F=0.7151
+  [suppression_benign] running...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 11.36it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:01, 11.83it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 12.75it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 13.31it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 13.16it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 12.10it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 12.69it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 13.88it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 13.05it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 18.77it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 13.09it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.43it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  9.00it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.58it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.25it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.98it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.80it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.65it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.55it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.46it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.43it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.59it/s]
+  [suppression_benign] J&F=0.6177  drop=0.0039  time=0s
+  [suppression_perturb_only] running...
+    [pert|supp] step   0  Lw=11.0982  Lr=15.3694
+    [pert|supp] step  10  Lw=-1170.6405  Lr=-1945.5582
+    [pert|supp] step  20  Lw=-1170.3258  Lr=-1945.5819
+    [pert|supp] step  30  Lw=-1170.5630  Lr=-1945.5887
+    [pert|supp] step  40  Lw=-1171.7307  Lr=-1945.5895
+    [pert|supp] step  49  Lw=-1172.1097  Lr=-1945.5897
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 14.04it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 14.08it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 14.88it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 15.00it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 13.70it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 14.68it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:00<00:00, 14.90it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 14.40it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.49it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 13.07it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.54it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  9.08it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.64it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.29it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  8.02it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.83it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.68it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.58it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.83it/s]
+  [suppression_perturb_only] J&F=0.0000  drop=0.6216  time=136s
+  [suppression_insert_only] running...
+    [ins|supp] step   0  Lw=8.8497  Lr=15.3330
+    [ins|supp] step  10  Lw=-1535.4751  Lr=12.8524
+    [ins|supp] step  20  Lw=-1535.8673  Lr=-1941.8375
+    [ins|supp] step  30  Lw=-1535.9203  Lr=-1942.2489
+    [ins|supp] step  40  Lw=-1535.9055  Lr=-1942.6989
+    [ins|supp] step  49  Lw=-1535.8940  Lr=-1943.0498
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 13.12it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 13.99it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 12.37it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 13.28it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 14.36it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 14.87it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 12.75it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 13.10it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 13.16it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 18.83it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 13.11it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.56it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  9.09it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.66it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.31it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  8.03it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.83it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.70it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.60it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.52it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.47it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.64it/s]
+  [suppression_insert_only] J&F=0.6084  drop=0.0132  time=136s
+  [suppression_hybrid] running...
+    [supp|S1] step   0  Lw=10.5718  Lr=15.3330  SSIM=0.9997
+    [supp|S2] step  10  Lw=-333.7463  Lr=12.0610  SSIM=0.9527
+    [supp|S2] step  20  Lw=-974.8594  Lr=-354.7155  SSIM=0.9252
+    [supp|S2] step  30  Lw=-1252.6401  Lr=-1945.4309  SSIM=0.9291
+    [supp|S3] step  40  Lw=-1253.9840  Lr=-1945.5682  SSIM=0.9394
+    [supp|S3] step  49  Lw=-1253.9888  Lr=-1945.5823  SSIM=0.9394
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:00, 18.02it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 14.80it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 14.03it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 14.13it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 12.05it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 12.37it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 13.11it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 14.68it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.03it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 18.23it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.94it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.50it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  9.06it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.48it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.18it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.95it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.78it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.65it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.53it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.46it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.39it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.55it/s]
+  [suppression_hybrid] J&F=0.0073  drop=0.6142  time=151s
+  [suppression_hybrid_reset] running...
+    [supp|S1] step   0  Lw=10.5718  Lr=15.3330  SSIM=0.9997
+    [supp|S2] step  10  Lw=-334.4575  Lr=10.1659  SSIM=0.9514
+    [supp|S2] step  20  Lw=-1144.2449  Lr=-1945.5508  SSIM=0.9327
+    [supp|S2] step  30  Lw=-1148.3269  Lr=-1945.5830  SSIM=0.9380
+    [supp|S3] step  40  Lw=-1150.3875  Lr=-1945.5898  SSIM=0.9494
+    [supp|S3] step  49  Lw=-1152.4722  Lr=-1945.5889  SSIM=0.9494
+frame loading (JPEG):   0%|          | 0/5 [00:00<?, ?it/s]frame loading (JPEG):  40%|████      | 2/5 [00:00<00:00, 14.77it/s]frame loading (JPEG):  80%|████████  | 4/5 [00:00<00:00, 15.23it/s]frame loading (JPEG): 100%|██████████| 5/5 [00:00<00:00, 14.85it/s]
+propagate in video:   0%|          | 0/5 [00:00<?, ?it/s]propagate in video:  60%|██████    | 3/5 [00:00<00:00, 17.28it/s]propagate in video: 100%|██████████| 5/5 [00:00<00:00, 12.63it/s]propagate in video: 100%|██████████| 5/5 [00:00<00:00, 13.26it/s]
+  [suppression_hybrid_reset] J&F=0.7151  drop=-0.0936  time=152s
+  [decoy_benign] running...
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 13.81it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 13.60it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 12.68it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 13.88it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 13.66it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 14.47it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:00<00:00, 14.92it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 15.59it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.09it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 18.71it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 13.10it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.58it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  9.07it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.63it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.28it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  8.02it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.82it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.66it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.54it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.49it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.45it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.62it/s]
+  [decoy_benign] J&F=0.6064  drop=0.0152  time=1s
+  [decoy_perturb_only] running...
+    [pert|deco] step   0  Lw=8.9659  Lr=21.8967
+    [pert|deco] step  10  Lw=5.2564  Lr=12.0519
+    [pert|deco] step  20  Lw=1.3122  Lr=0.8711
+    [pert|deco] step  30  Lw=0.1831  Lr=0.2812
+    [pert|deco] step  40  Lw=0.1268  Lr=0.0541
+    [pert|deco] step  49  Lw=0.0892  Lr=0.0094
+frame loading (JPEG):   0%|          | 0/15 [00:00<?, ?it/s]frame loading (JPEG):  13%|█▎        | 2/15 [00:00<00:00, 13.81it/s]frame loading (JPEG):  27%|██▋       | 4/15 [00:00<00:00, 14.37it/s]frame loading (JPEG):  40%|████      | 6/15 [00:00<00:00, 13.50it/s]frame loading (JPEG):  53%|█████▎    | 8/15 [00:00<00:00, 14.02it/s]frame loading (JPEG):  67%|██████▋   | 10/15 [00:00<00:00, 15.39it/s]frame loading (JPEG):  80%|████████  | 12/15 [00:00<00:00, 15.04it/s]frame loading (JPEG):  93%|█████████▎| 14/15 [00:00<00:00, 14.13it/s]frame loading (JPEG): 100%|██████████| 15/15 [00:01<00:00, 14.09it/s]
+propagate in video:   0%|          | 0/15 [00:00<?, ?it/s]propagate in video:  20%|██        | 3/15 [00:00<00:00, 18.59it/s]propagate in video:  33%|███▎      | 5/15 [00:00<00:00, 13.05it/s]propagate in video:  47%|████▋     | 7/15 [00:00<00:00, 10.57it/s]propagate in video:  60%|██████    | 9/15 [00:00<00:00,  9.09it/s]propagate in video:  67%|██████▋   | 10/15 [00:01<00:00,  8.65it/s]propagate in video:  73%|███████▎  | 11/15 [00:01<00:00,  8.30it/s]propagate in video:  80%|████████  | 12/15 [00:01<00:00,  8.03it/s]propagate in video:  87%|████████▋ | 13/15 [00:01<00:00,  7.82it/s]propagate in video:  93%|█████████▎| 14/15 [00:01<00:00,  7.68it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  7.57it/s]propagate in video: 100%|██████████| 15/15 [00:01<00:00,  8.84it/s]
+  [decoy_perturb_only] J&F=0.4955  drop=0.1261  time=134s
+  [decoy_insert_only] running...
+    [ins|deco] step   0  Lw=5.9298  Lr=20.3599
+    [ins|deco] step  10  Lw=0.3550  Lr=6.3506
+    [ins|deco] step  20  Lw=0.2407  Lr=4.9116
+    [ins|deco] step  30  Lw=0.4490  Lr=4.9378
+    [ins|deco] step  40  Lw=0.1945  Lr=3.6669
+    [ins|deco] step  49  Lw=0.3667  Lr=4.2296
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:00, 15.06it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 13.40it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 14.19it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 15.45it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 15.46it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 14.77it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:00<00:00, 14.16it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 13.58it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 14.22it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 18.09it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.88it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.29it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.95it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.56it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.23it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.99it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.79it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.66it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.56it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.49it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.46it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.57it/s]
+  [decoy_insert_only] J&F=0.6326  drop=-0.0110  time=137s
+  [decoy_hybrid] running...
+    [deco|S1] step   0  Lw=7.9043  Lr=20.3599  SSIM=0.9997
+    [deco|S2] step  10  Lw=1.7254  Lr=3.9409  SSIM=0.9588
+    [deco|S2] step  20  Lw=2.0947  Lr=1.7009  SSIM=0.9279
+    [deco|S2] step  30  Lw=2.8911  Lr=4.3315  SSIM=0.9261
+    [deco|S3] step  40  Lw=0.1596  Lr=0.0412  SSIM=0.9307
+    [deco|S3] step  49  Lw=0.0748  Lr=0.0074  SSIM=0.9307
+frame loading (JPEG):   0%|          | 0/17 [00:00<?, ?it/s]frame loading (JPEG):  12%|█▏        | 2/17 [00:00<00:01, 12.00it/s]frame loading (JPEG):  24%|██▎       | 4/17 [00:00<00:00, 13.14it/s]frame loading (JPEG):  35%|███▌      | 6/17 [00:00<00:00, 13.45it/s]frame loading (JPEG):  47%|████▋     | 8/17 [00:00<00:00, 13.45it/s]frame loading (JPEG):  59%|█████▉    | 10/17 [00:00<00:00, 12.91it/s]frame loading (JPEG):  71%|███████   | 12/17 [00:00<00:00, 12.86it/s]frame loading (JPEG):  82%|████████▏ | 14/17 [00:01<00:00, 12.54it/s]frame loading (JPEG):  94%|█████████▍| 16/17 [00:01<00:00, 14.03it/s]frame loading (JPEG): 100%|██████████| 17/17 [00:01<00:00, 13.34it/s]
+propagate in video:   0%|          | 0/17 [00:00<?, ?it/s]propagate in video:  18%|█▊        | 3/17 [00:00<00:00, 17.08it/s]propagate in video:  29%|██▉       | 5/17 [00:00<00:00, 12.55it/s]propagate in video:  41%|████      | 7/17 [00:00<00:00, 10.21it/s]propagate in video:  53%|█████▎    | 9/17 [00:00<00:00,  8.91it/s]propagate in video:  59%|█████▉    | 10/17 [00:01<00:00,  8.51it/s]propagate in video:  65%|██████▍   | 11/17 [00:01<00:00,  8.20it/s]propagate in video:  71%|███████   | 12/17 [00:01<00:00,  7.95it/s]propagate in video:  76%|███████▋  | 13/17 [00:01<00:00,  7.77it/s]propagate in video:  82%|████████▏ | 14/17 [00:01<00:00,  7.62it/s]propagate in video:  88%|████████▊ | 15/17 [00:01<00:00,  7.54it/s]propagate in video:  94%|█████████▍| 16/17 [00:01<00:00,  7.48it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  7.43it/s]propagate in video: 100%|██████████| 17/17 [00:01<00:00,  8.51it/s]
+  [decoy_hybrid] J&F=0.0026  drop=0.6190  time=154s
+  [decoy_hybrid_reset] running...
+    [deco|S1] step   0  Lw=7.9043  Lr=20.3599  SSIM=0.9997
+    [deco|S2] step  10  Lw=1.7892  Lr=3.7829  SSIM=0.9588
+    [deco|S2] step  20  Lw=0.8374  Lr=1.0751  SSIM=0.9279
+    [deco|S2] step  30  Lw=0.8485  Lr=1.5498  SSIM=0.9274
+    [deco|S3] step  40  Lw=0.2533  Lr=0.2169  SSIM=0.9280

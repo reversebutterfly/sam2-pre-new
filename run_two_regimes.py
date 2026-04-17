@@ -54,12 +54,17 @@ sys.path.insert(0, ROOT)
 
 from memshield.config import MemShieldConfig
 from memshield.decoy import shift_mask
-from memshield.generator import build_role_targets, select_perturb_originals
+from memshield.generator import (
+    build_role_targets, build_synthetic_decoy_video, select_perturb_originals,
+)
 from memshield.losses import (
+    anti_anchor_loss,
     decoy_target_loss,
     differentiable_ssim,
     fake_uint8_quantize,
     mean_logit_loss,
+    memory_teacher_loss,
+    obj_ptr_teacher_loss,
     object_score_margin_loss,
     object_score_positive_loss,
 )
@@ -165,12 +170,36 @@ def _build_decoy_bases_and_targets(
     schedule: List[InsertionSlot],
     perturb_set: Set[int],
     device: torch.device,
-) -> Tuple[Dict[int, np.ndarray], dict, Tuple[int, int]]:
-    """Decoy bases (relocated object) + role targets from generator.py."""
+    surrogate=None,
+) -> Tuple[Dict[int, np.ndarray], dict, Tuple[int, int], Optional[List[dict]]]:
+    """Decoy bases (relocated object) + role targets + teacher trajectory.
+
+    When surrogate is provided, generates a synthetic decoy video and runs
+    SAM2 on it to get teacher memory features. These features represent
+    "what SAM2's memory looks like when tracking the object at the decoy
+    location" — the target for memory-level cooperation loss.
+    """
     role_data = build_role_targets(
         masks_uint8, frames_uint8, schedule, perturb_set, device,
     )
-    return role_data["insert_bases"], role_data, role_data["decoy_offset"]
+    offset = role_data["decoy_offset"]
+
+    teacher_features = None
+    if surrogate is not None:
+        # Build teacher on MODIFIED timeline (with inserts at same positions)
+        synth_frames, decoy_mask_f0, teacher_mod_to_orig = \
+            build_synthetic_decoy_video(
+                frames_uint8, masks_uint8, offset, schedule=schedule)
+        if decoy_mask_f0.sum() > 50:
+            teacher_features = surrogate.generate_teacher_trajectory(
+                synth_frames, decoy_mask_f0)
+            print(f"    [teacher] Generated {len(teacher_features)} features "
+                  f"on modified timeline ({len(synth_frames)} frames, "
+                  f"offset=({offset[0]},{offset[1]}))")
+        else:
+            print(f"    [teacher] Decoy mask too small at f0, skipping teacher")
+
+    return role_data["insert_bases"], role_data, offset, teacher_features
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -278,12 +307,37 @@ def _supp_read(all_outs, masks_uint8, eval_mod, eval_orig, device,
     return loss / max(n, 1)
 
 
-# ── Decoy losses ─────────────────────────────────────────────────────────────
+# ── Decoy losses (v2: teacher-based cooperation) ────────────────────────────
 
-def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device):
-    """Decoy write-path: relocate object in attack-window frames."""
+def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device,
+                 teacher_features=None, clean_features=None):
+    """Decoy write-path with teacher-based memory cooperation.
+
+    Three cooperation roles:
+      1. INSERTS: output-level decoy + memory features → match teacher
+         (write memories that encode "object at decoy location")
+      2. PRE-INSERT ORIGINALS: output-level decoy + memory → diverge from clean
+         (weaken the true-location anchor so poison dominates)
+      3. POST-INSERT ORIGINALS: output-level decoy + memory → match teacher
+         (reinforce the poison with compatible memories)
+    """
     loss = torch.tensor(0.0, device=device)
     n = 0
+    lambda_mem = 0.5   # Memory-level loss weight
+
+    # Teacher is on MODIFIED timeline — index by mi, not oi
+    def _teacher_at(mi_idx):
+        """Get teacher features at modified-video index."""
+        if teacher_features is None or mi_idx >= len(teacher_features):
+            return None, None
+        return (teacher_features[mi_idx].get("maskmem_features"),
+                teacher_features[mi_idx].get("obj_ptr"))
+
+    def _clean_at(mi_idx):
+        """Get clean features at modified-video index."""
+        if clean_features is None or mi_idx >= len(clean_features):
+            return None
+        return clean_features[mi_idx].get("maskmem_features")
 
     for oi in sorted(perturb_set):
         key = ("orig", oi)
@@ -297,14 +351,46 @@ def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device):
         if logits is None:
             continue
         td = _resize_td(targets[key], logits.shape[-2:])
+
+        # Output-level loss (same as before)
         fl = decoy_target_loss(logits, td)
         sc = out.get("object_score_logits")
         if sc is not None and float(td.get("score_w", 0)) > 0:
             fl = fl + float(td["score_w"]) * object_score_positive_loss(
                 sc, margin=float(td.get("score_margin", 0.5)))
+
+        # Memory-level cooperation based on frame role
+        is_pre_insert = any(oi == s.after_original_idx for s in schedule)
+        is_post_insert = any(oi in (s.after_original_idx + 1, s.after_original_idx + 2)
+                             for s in schedule)
+        adv_mem = out.get("maskmem_features")
+        adv_ptr = out.get("obj_ptr")
+
+        if oi == 0:
+            # f0: weaken true-location anchor memory
+            clean_mem = _clean_at(mi)
+            if adv_mem is not None and clean_mem is not None:
+                fl = fl + 0.3 * lambda_mem * anti_anchor_loss(adv_mem, clean_mem)
+        elif is_pre_insert:
+            # Pre-insert: weaken true anchor + weak teacher alignment
+            clean_mem = _clean_at(mi)
+            if adv_mem is not None and clean_mem is not None:
+                fl = fl + lambda_mem * anti_anchor_loss(adv_mem, clean_mem)
+            t_mem, _ = _teacher_at(mi)
+            if adv_mem is not None and t_mem is not None:
+                fl = fl + 0.3 * lambda_mem * memory_teacher_loss(adv_mem, t_mem)
+        elif is_post_insert:
+            # Post-insert: reinforce decoy by matching teacher memory
+            t_mem, t_ptr = _teacher_at(mi)
+            if adv_mem is not None and t_mem is not None:
+                fl = fl + lambda_mem * memory_teacher_loss(adv_mem, t_mem)
+            if adv_ptr is not None and t_ptr is not None:
+                fl = fl + 0.3 * lambda_mem * obj_ptr_teacher_loss(adv_ptr, t_ptr)
+
         loss = loss + fl
         n += 1
 
+    # Loss on inserted frames — the primary poison writers
     ins_indices = idx_map["insert_mod_indices"]
     for cursor in range(len(schedule)):
         key = ("insert", cursor)
@@ -318,11 +404,29 @@ def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device):
         if logits is None:
             continue
         td = _resize_td(targets[key], logits.shape[-2:])
+
+        # Output-level loss (weighted 1.5x as before)
         fl = decoy_target_loss(logits, td)
         sc = out.get("object_score_logits")
         if sc is not None and float(td.get("score_w", 0)) > 0:
             fl = fl + float(td["score_w"]) * object_score_positive_loss(
                 sc, margin=float(td.get("score_margin", 0.5)))
+
+        # Memory-level: STRONG teacher matching (this is the key cooperation)
+        # Teacher is on modified timeline — mi corresponds directly
+        adv_mem = out.get("maskmem_features")
+        adv_ptr = out.get("obj_ptr")
+        t_mem, t_ptr = _teacher_at(mi)
+        if adv_mem is not None and t_mem is not None:
+            fl = fl + 1.5 * lambda_mem * memory_teacher_loss(adv_mem, t_mem)
+        if adv_ptr is not None and t_ptr is not None:
+            fl = fl + 0.5 * lambda_mem * obj_ptr_teacher_loss(adv_ptr, t_ptr)
+
+        # Also push AWAY from clean memory
+        clean_mem = _clean_at(mi)
+        if adv_mem is not None and clean_mem is not None:
+            fl = fl + 0.5 * lambda_mem * anti_anchor_loss(adv_mem, clean_mem)
+
         loss = loss + 1.5 * fl
         n += 1
 
@@ -330,13 +434,22 @@ def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device):
 
 
 def _decoy_read(all_outs, masks_uint8, eval_mod, eval_orig, decoy_offset,
-                device):
-    """Decoy read-path: verify eval frames show relocated object."""
+                device, teacher_features=None):
+    """Decoy read-path with teacher memory cooperation.
+
+    Eval frames are CLEAN originals — we can't perturb them, but we CAN
+    optimize the attack prefix so that the MEMORIES written during the
+    attack window cause SAM2 to predict wrongly on these frames.
+
+    The teacher memory loss on eval frames provides gradient signal to
+    the attack-window frames (through the memory bank computation graph).
+    """
     dy, dx = decoy_offset
     T = len(masks_uint8)
     H, W = masks_uint8[0].shape
     loss = torch.tensor(0.0, device=device)
     n = 0
+    lambda_mem = 0.5
 
     for rank, (mi, oi) in enumerate(zip(eval_mod, eval_orig)):
         if mi >= len(all_outs):
@@ -349,7 +462,7 @@ def _decoy_read(all_outs, masks_uint8, eval_mod, eval_orig, decoy_offset,
         w = max(0.5, 2.5 - rank * 0.3)
         mask = masks_uint8[min(oi, T - 1)]
         if mask.sum() == 0:
-            continue  # Skip frames where object is genuinely absent
+            continue
         d_mask = shift_mask(mask, dy, dx)
         suppress = ((mask > 0) & (d_mask == 0)).astype(np.float32)
         decoy_only = ((d_mask > 0) & (mask == 0)).astype(np.float32)
@@ -367,10 +480,24 @@ def _decoy_read(all_outs, masks_uint8, eval_mod, eval_orig, decoy_offset,
             "decoy_margin": 0.9, "suppress_margin": 0.6, "rank_margin": 0.8,
         }
         td = _resize_td(td, logits.shape[-2:])
+
+        # Output-level: push predictions toward decoy on eval frames
         fl = decoy_target_loss(logits, td)
         sc = out.get("object_score_logits")
         if sc is not None:
             fl = fl + 0.30 * object_score_positive_loss(sc, margin=0.5)
+
+        # Memory-level: eval frames also write memories — ensure they
+        # continue the decoy trajectory (decaying weight for later frames).
+        # Teacher is on modified timeline; use mi for lookup.
+        adv_mem = out.get("maskmem_features")
+        if (teacher_features is not None and adv_mem is not None
+                and mi < len(teacher_features)):
+            t_mem = teacher_features[mi].get("maskmem_features")
+            if t_mem is not None:
+                mem_w = max(0.1, 0.5 - rank * 0.05)
+                fl = fl + mem_w * lambda_mem * memory_teacher_loss(adv_mem, t_mem)
+
         loss = loss + w * fl
         n += 1
 
@@ -407,14 +534,35 @@ def optimize_unified(
     perturb_set = select_perturb_originals(schedule, T)
 
     # ── Regime-specific setup ────────────────────────────────────────────
+    teacher_features = None
+    clean_features = None
     if regime == "suppression":
         insert_bases_np = _build_suppression_bases(frames_uint8, masks_uint8, schedule)
         decoy_targets = None
         decoy_offset = None
     else:
-        insert_bases_np, role_data, decoy_offset = _build_decoy_bases_and_targets(
-            frames_uint8, masks_uint8, schedule, perturb_set, device)
+        insert_bases_np, role_data, decoy_offset, teacher_features = \
+            _build_decoy_bases_and_targets(
+                frames_uint8, masks_uint8, schedule, perturb_set, device,
+                surrogate=surrogate)
         decoy_targets = role_data["targets"]
+        # Also generate clean trajectory on modified timeline (for anti-anchor loss)
+        if teacher_features is not None:
+            # Build clean modified video: original frames + duplicated inserts
+            insert_after_map = {}
+            for si, slot in enumerate(schedule):
+                insert_after_map.setdefault(slot.after_original_idx, []).append(si)
+            clean_mod_frames = []
+            for oi in range(T):
+                clean_mod_frames.append(frames_uint8[oi])
+                if oi in insert_after_map:
+                    for _ in insert_after_map[oi]:
+                        ref = min(oi + 1, T - 1)
+                        clean_mod_frames.append(frames_uint8[ref])
+            print(f"    [clean] Generating clean reference ({len(clean_mod_frames)} frames)...")
+            clean_features = surrogate.generate_teacher_trajectory(
+                clean_mod_frames, masks_uint8[0])
+            print(f"    [clean] Generated {len(clean_features)} clean features")
 
     # ── Deltas (identical init for both regimes) ─────────────────────────
     insert_deltas, insert_eps, insert_bases_t = {}, {}, {}
@@ -502,9 +650,12 @@ def optimize_unified(
             lr = _supp_read(all_outs, masks_uint8, eval_mod, eval_orig, device)
         else:
             lw = _decoy_write(all_outs, decoy_targets, idx_map, perturb_set,
-                              schedule, device)
+                              schedule, device,
+                              teacher_features=teacher_features,
+                              clean_features=clean_features)
             lr = _decoy_read(all_outs, masks_uint8, eval_mod, eval_orig,
-                             decoy_offset, device)
+                             decoy_offset, device,
+                             teacher_features=teacher_features)
 
         # ── Quality loss (shared) ────────────────────────────────────
         lq = torch.tensor(0.0, device=device)
@@ -578,9 +729,12 @@ def optimize_unified(
                               device)
         else:
             lw_f = _decoy_write(all_outs_final, decoy_targets, idx_map, perturb_set,
-                                schedule, device)
+                                schedule, device,
+                                teacher_features=teacher_features,
+                                clean_features=clean_features)
             lr_f = _decoy_read(all_outs_final, masks_uint8, eval_mod, eval_orig,
-                               decoy_offset, device)
+                               decoy_offset, device,
+                               teacher_features=teacher_features)
         loss_final = (lw_f + 1.3 * lr_f).item()
         if loss_final < best_loss:
             best_loss = loss_final
