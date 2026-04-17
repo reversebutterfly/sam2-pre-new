@@ -90,7 +90,7 @@ DAVIS_20 = DAVIS_VAL
 DAVIS_PILOT = ["blackswan", "car-shadow", "dog", "cows", "gold-fish"]
 
 ATTACK_PREFIX_SUPP = 15   # Suppression: 15-frame prefix (already persistent)
-ATTACK_PREFIX_DECOY = 30  # Decoy: 30-frame prefix (needs longer poisoning)
+ATTACK_PREFIX_DECOY = 21  # Decoy: 21-frame prefix (3 FIFO inserts, fits V100-32GB)
 EVAL_START = 10           # Disjoint eval window start (inclusive)
 EVAL_END = 15             # Legacy: short-horizon eval end (for backwards compat)
 
