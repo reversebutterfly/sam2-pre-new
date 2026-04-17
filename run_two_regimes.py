@@ -89,17 +89,21 @@ DAVIS_20 = DAVIS_VAL
 
 DAVIS_PILOT = ["blackswan", "car-shadow", "dog", "cows", "gold-fish"]
 
-EVAL_START = 10  # Disjoint eval window start (inclusive)
-EVAL_END = 15    # Exclusive
+ATTACK_PREFIX = 15  # PGD optimizes on first 15 original frames
+EVAL_START = 10     # Disjoint eval window start (inclusive)
+EVAL_END = 15       # Legacy: short-horizon eval end (for backwards compat)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Section 1: Dataset Loading
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_video(davis_root: str, vid: str, max_frames: int = 15,
+def load_video(davis_root: str, vid: str, max_frames: int = 0,
                target_obj: Optional[int] = None):
     """Load DAVIS 2017 video frames and per-object annotation masks.
+
+    Args:
+        max_frames: 0 = load all frames (default). >0 = truncate.
 
     DAVIS 2017 has multi-object sequences. We select a single target object
     for evaluation (default: smallest positive label = primary object).
@@ -696,6 +700,67 @@ def build_protected_video(
     return protected
 
 
+def build_full_protected_video(
+    frames_all: List[np.ndarray],
+    ins_u8: Dict[int, np.ndarray],
+    orig_u8: Dict[int, np.ndarray],
+    schedule: List[InsertionSlot],
+    attack_prefix: int,
+) -> Tuple[List[np.ndarray], List[int]]:
+    """Build full-length video: attacked prefix + clean tail.
+
+    PGD optimizes only the first `attack_prefix` frames. The rest of the
+    video is appended unchanged. Returns (full_video, mod_to_orig).
+    """
+    # Build attacked prefix (with inserts)
+    prefix_frames = frames_all[:attack_prefix]
+    prefix = build_protected_video(prefix_frames, ins_u8, orig_u8, schedule)
+
+    # Append clean tail
+    full = prefix + list(frames_all[attack_prefix:])
+
+    # Build full mod_to_orig mapping
+    prefix_map = build_modified_index_map(attack_prefix, schedule)
+    mod_to_orig = list(prefix_map["mod_to_orig"])
+    for i in range(attack_prefix, len(frames_all)):
+        mod_to_orig.append(i)
+
+    return full, mod_to_orig
+
+
+def compute_horizon_metrics(
+    per_frame: Dict[int, Tuple[float, float]],
+    T_full: int,
+) -> dict:
+    """Compute J/F/J&F for multiple time horizons.
+
+    Args:
+        per_frame: {orig_idx: (j_score, f_score)} for evaluated frames.
+        T_full: total number of original frames.
+
+    Returns dict with keys: short, mid, long, all_future, each containing
+    mean_j, mean_f, mean_jf, n_frames.
+    """
+    horizons = {
+        "short": range(EVAL_START, min(EVAL_START + 5, T_full)),
+        "mid": range(EVAL_START + 5, min(EVAL_START + 20, T_full)),
+        "long": range(EVAL_START + 20, T_full),
+        "all_future": range(EVAL_START, T_full),
+    }
+    results = {}
+    for name, frame_range in horizons.items():
+        js = [per_frame[i][0] for i in frame_range if i in per_frame]
+        fs = [per_frame[i][1] for i in frame_range if i in per_frame]
+        mj = float(np.mean(js)) if js else 0.0
+        mf = float(np.mean(fs)) if fs else 0.0
+        results[name] = {
+            "mean_j": mj, "mean_f": mf,
+            "mean_jf": 0.5 * (mj + mf),
+            "n_frames": len(js),
+        }
+    return results
+
+
 def evaluate_official(
     protected_frames: List[np.ndarray],
     masks_uint8: List[np.ndarray],
@@ -743,6 +808,7 @@ def evaluate_official(
                     preds[fi] = (masks_out[0] > 0.0).cpu().numpy().squeeze()
 
         j_scores, f_scores = [], []
+        per_frame = {}  # {orig_idx: (j, f)} for multi-horizon slicing
         for mi in range(len(protected_frames)):
             oi = mod_to_orig[mi]
             if oi < 0 or oi not in eval_range:
@@ -753,13 +819,17 @@ def evaluate_official(
             gt = masks_uint8[oi].astype(bool)
             inter = float((pred & gt).sum())
             union = float((pred | gt).sum())
-            j_scores.append(inter / max(union, 1e-9) if union > 0 else 1.0)
-            f_scores.append(compute_boundary_f(pred, gt))
+            j = inter / max(union, 1e-9) if union > 0 else 1.0
+            f = compute_boundary_f(pred, gt)
+            j_scores.append(j)
+            f_scores.append(f)
+            per_frame[oi] = (j, f)
 
         mj = float(np.mean(j_scores)) if j_scores else 0.0
         mf = float(np.mean(f_scores)) if f_scores else 0.0
         return {"mean_j": mj, "mean_f": mf, "mean_jf": 0.5 * (mj + mf),
                 "j_scores": j_scores, "f_scores": f_scores,
+                "per_frame": per_frame,
                 "n_eval_frames": len(j_scores)}
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -906,8 +976,13 @@ def main():
                         default="both")
     parser.add_argument("--videos", type=str, default=None,
                         help="Comma-separated video names")
-    parser.add_argument("--max_frames", type=int, default=15)
+    parser.add_argument("--max_frames", type=int, default=0,
+                        help="0=full video (default), >0=truncate")
+    parser.add_argument("--attack_prefix", type=int, default=ATTACK_PREFIX,
+                        help="PGD optimizes on first N frames (default 15)")
     parser.add_argument("--n_steps", type=int, default=50)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducible PGD")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--davis_root",
                         default=os.path.join(ROOT, "data", "davis"))
@@ -940,16 +1015,17 @@ def main():
         n_steps_strong=args.n_steps,
         device=args.device,
     )
-    eval_range = set(range(EVAL_START, min(args.max_frames, EVAL_END)))
+    ap = args.attack_prefix  # PGD prefix length
 
     print("=" * 70)
     print("  Two Memory-Poisoning Regimes - Unified Runner")
     print("=" * 70)
-    print(f"  Videos:      {len(videos)}")
-    print(f"  Regimes:     {regimes}")
-    print(f"  Eval window: f{EVAL_START}-f{EVAL_END - 1}")
-    print(f"  PGD steps:   {args.n_steps}")
-    print(f"  Budget:      f0=2/255  orig=4/255  "
+    print(f"  Videos:        {len(videos)}")
+    print(f"  Regimes:       {regimes}")
+    print(f"  Attack prefix: f0-f{ap - 1} ({ap} frames)")
+    print(f"  Eval start:    f{EVAL_START} to end of video")
+    print(f"  PGD steps:     {args.n_steps}  seed={args.seed}")
+    print(f"  Budget:        f0=2/255  orig=4/255  "
           f"ins_s=8/255  ins_w={cfg.epsilon_weak * 255:.0f}/255")
     print("=" * 70)
 
@@ -963,39 +1039,51 @@ def main():
         print(f"{'#' * 60}")
 
         frames, masks = load_video(args.davis_root, vid, args.max_frames)
-        if len(frames) < 15:
-            print(f"  [skip] {len(frames)} frames < 15")
+        T_full = len(frames)
+        if T_full < ap:
+            print(f"  [skip] {T_full} frames < attack_prefix {ap}")
             continue
 
-        vid_results = {}
-        T = len(frames)
+        vid_results = {"T_full": T_full}
 
-        # ── Clean baseline ───────────────────────────────────────────
-        print("  [clean] evaluating...")
+        # ── Clean baseline (full video) ──────────────────────────────
+        eval_all_future = set(range(EVAL_START, T_full))
+        print(f"  [clean] evaluating ({T_full} frames, eval f{EVAL_START}-f{T_full-1})...")
         clean_eval = evaluate_official(
-            frames, masks, list(range(T)), eval_range,
+            frames, masks, list(range(T_full)), eval_all_future,
             args.checkpoint, args.sam2_config, args.device)
-        vid_results["clean"] = clean_eval
-        print(f"  [clean] J={clean_eval['mean_j']:.4f}  "
-              f"F={clean_eval['mean_f']:.4f}  "
-              f"J&F={clean_eval['mean_jf']:.4f}")
+        clean_horizons = compute_horizon_metrics(
+            clean_eval.get("per_frame", {}), T_full)
+        vid_results["clean"] = {**clean_eval, "horizons": clean_horizons}
+        print(f"  [clean] J&F={clean_eval['mean_jf']:.4f}  "
+              f"(short={clean_horizons['short']['mean_jf']:.3f}  "
+              f"mid={clean_horizons['mid']['mean_jf']:.3f}  "
+              f"long={clean_horizons['long']['mean_jf']:.3f})")
 
+        # Schedule computed on attack prefix only
         schedule = compute_resonance_schedule(
-            T, cfg.fifo_window, cfg.max_insertion_ratio)
-        perturb_set = select_perturb_originals(schedule, T)
-        idx_map = build_modified_index_map(T, schedule)
+            ap, cfg.fifo_window, cfg.max_insertion_ratio)
+        perturb_set = select_perturb_originals(schedule, ap)
 
         # ── Run each regime ──────────────────────────────────────────
         for regime in regimes:
-            print(f"  [{regime}] optimizing ({args.n_steps} steps)...")
+            # Fixed seed for reproducibility
+            torch.manual_seed(args.seed)
+            np.random.seed(args.seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(args.seed)
+
+            print(f"  [{regime}] optimizing ({args.n_steps} steps on f0-f{ap-1})...")
             try:
                 t0 = time.time()
+                # PGD on attack prefix only
                 ins_u8, orig_u8, opt_met = optimize_unified(
-                    surrogate, frames, masks, schedule, cfg, regime)
+                    surrogate, frames[:ap], masks[:ap], schedule, cfg, regime)
                 opt_time = time.time() - t0
 
-                protected = build_protected_video(
-                    frames, ins_u8, orig_u8, schedule)
+                # Build full video: attacked prefix + clean tail
+                protected, mod_to_orig = build_full_protected_video(
+                    frames, ins_u8, orig_u8, schedule, ap)
 
                 if args.save_videos:
                     save_protected_video(
@@ -1003,32 +1091,49 @@ def main():
 
                 print(f"  [{regime}] evaluating ({len(protected)} frames)...")
                 ev = evaluate_official(
-                    protected, masks, idx_map["mod_to_orig"], eval_range,
+                    protected, masks, mod_to_orig, eval_all_future,
                     args.checkpoint, args.sam2_config, args.device)
 
+                # Multi-horizon metrics
+                atk_horizons = compute_horizon_metrics(
+                    ev.get("per_frame", {}), T_full)
+
+                # Signatures (on short horizon only, uses surrogate)
+                prefix_map = build_modified_index_map(ap, schedule)
+                short_range = set(range(EVAL_START, min(EVAL_START + 5, T_full)))
+                prefix_protected = build_protected_video(
+                    frames[:ap], ins_u8, orig_u8, schedule)
                 sigs = extract_signatures(
-                    surrogate, protected, masks, idx_map["mod_to_orig"],
-                    eval_range, opt_met.get("decoy_offset"))
+                    surrogate, prefix_protected, masks[:ap],
+                    prefix_map["mod_to_orig"],
+                    short_range, opt_met.get("decoy_offset"))
 
                 ssim_atk = compute_ssim_attacked(
-                    frames, protected, idx_map, perturb_set)
+                    frames[:ap], prefix_protected, prefix_map, perturb_set)
 
-                djf = clean_eval["mean_jf"] - ev["mean_jf"]
-                dj = clean_eval["mean_j"] - ev["mean_j"]
-                df = clean_eval["mean_f"] - ev["mean_f"]
+                # Compute drops for each horizon
+                drops = {}
+                for h in ["short", "mid", "long", "all_future"]:
+                    c = clean_horizons[h]["mean_jf"]
+                    a = atk_horizons[h]["mean_jf"]
+                    drops[h] = c - a
 
                 vid_results[regime] = {
                     **ev,
-                    "jf_drop": djf, "j_drop": dj, "f_drop": df,
+                    "horizons": atk_horizons,
+                    "drops": drops,
+                    "jf_drop": drops["all_future"],
                     "ssim_attacked": ssim_atk,
                     "opt_time": opt_time,
                     "signatures": sigs,
                     "opt_metrics": opt_met,
                 }
-                print(f"  [{regime}] J={ev['mean_j']:.4f}  "
-                      f"F={ev['mean_f']:.4f}  "
-                      f"J&F={ev['mean_jf']:.4f}  "
-                      f"drop(J&F)={djf:.4f}  SSIM={ssim_atk:.4f}")
+                print(f"  [{regime}] J&F={ev['mean_jf']:.4f}  "
+                      f"drop(all)={drops['all_future']:.4f}  "
+                      f"drop(short)={drops['short']:.4f}  "
+                      f"drop(mid)={drops.get('mid', 0):.4f}  "
+                      f"drop(long)={drops.get('long', 0):.4f}  "
+                      f"SSIM={ssim_atk:.4f}")
                 print(f"            Sigs: {sigs}")
 
             except Exception as e:
@@ -1044,57 +1149,60 @@ def main():
 
     # ── Summary Table ────────────────────────────────────────────────────
     print("\n" + "=" * 70)
-    print("  RESULTS (eval on f10-f14)")
+    print("  RESULTS — Multi-Horizon (all videos, primary=all_future)")
     print("=" * 70)
 
-    hdr = f"  {'Video':<18s} {'J&F_c':>7s}"
+    hdr = f"  {'Video':<20s} {'T':>3s} {'J&F_c':>7s}"
     for r in regimes:
-        hdr += f"  {'dJF_' + r:>13s}  {'dJ_' + r:>11s}"
+        hdr += f"  {'dAll_' + r[:4]:>11s} {'dShort':>7s} {'dMid':>6s} {'dLong':>6s}"
     print(hdr)
-    print("-" * 70)
+    print("-" * 90)
 
-    eligible = 0
     for vid, vr in all_results.items():
         jfc = vr.get("clean", {}).get("mean_jf", 0)
-        elig = jfc >= 0.60
-        if elig:
-            eligible += 1
-        row = f"  {vid:<18s} {jfc:>7.4f}"
+        tf = vr.get("T_full", 0)
+        row = f"  {vid:<20s} {tf:>3d} {jfc:>7.4f}"
         for r in regimes:
-            djf = vr.get(r, {}).get("jf_drop", float("nan"))
-            dj = vr.get(r, {}).get("j_drop", float("nan"))
-            row += f"  {djf:>13.4f}  {dj:>11.4f}"
-        print(row + (" *" if elig else ""))
+            drops = vr.get(r, {}).get("drops", {})
+            da = drops.get("all_future", float("nan"))
+            ds = drops.get("short", float("nan"))
+            dm = drops.get("mid", float("nan"))
+            dl = drops.get("long", float("nan"))
+            row += f"  {da:>11.4f} {ds:>7.4f} {dm:>6.3f} {dl:>6.3f}"
+        print(row)
 
-    print(f"\n  Eligible (J&F >= 0.60): {eligible}/{len(all_results)}")
-
-    # Aggregate stats on eligible subset
+    # Aggregate: ALL videos (primary)
+    print(f"\n  PRIMARY (all {len(all_results)} videos):")
     for r in regimes:
-        drops = [
-            vr[r]["jf_drop"]
-            for vr in all_results.values()
-            if vr.get("clean", {}).get("mean_jf", 0) >= 0.60
-            and isinstance(vr.get(r), dict) and "jf_drop" in vr[r]
-        ]
+        drops = [vr[r]["jf_drop"] for vr in all_results.values()
+                 if isinstance(vr.get(r), dict) and "jf_drop" in vr[r]]
         if drops:
-            print(f"  {r} eligible: mean dJF={np.mean(drops):.4f}  "
+            print(f"    {r}: mean dJF(all_future)={np.mean(drops):.4f}  "
                   f"median={np.median(drops):.4f}  n={len(drops)}")
 
-    # Signature comparison
-    print("\n  Signature Comparison (eligible):")
+    # Aggregate: trackable-clean subset (secondary, tau=0.60)
+    for tau in [0.50, 0.60, 0.70]:
+        n_elig = sum(1 for vr in all_results.values()
+                     if vr.get("clean", {}).get("mean_jf", 0) >= tau)
+        print(f"\n  SECONDARY (clean J&F >= {tau:.2f}: {n_elig}/{len(all_results)}):")
+        for r in regimes:
+            drops = [vr[r]["jf_drop"] for vr in all_results.values()
+                     if vr.get("clean", {}).get("mean_jf", 0) >= tau
+                     and isinstance(vr.get(r), dict) and "jf_drop" in vr[r]]
+            if drops:
+                print(f"    {r}: mean dJF={np.mean(drops):.4f}  "
+                      f"median={np.median(drops):.4f}  n={len(drops)}")
+
+    # Signature comparison (all videos)
+    print("\n  Signatures (all videos):")
     for r in regimes:
-        all_sigs = [
-            vr[r]["signatures"]
-            for vr in all_results.values()
-            if vr.get("clean", {}).get("mean_jf", 0) >= 0.60
-            and isinstance(vr.get(r), dict) and "signatures" in vr[r]
-        ]
+        all_sigs = [vr[r]["signatures"] for vr in all_results.values()
+                    if isinstance(vr.get(r), dict) and "signatures" in vr[r]]
         if all_sigs:
             neg_r = np.mean([s["neg_score_rate"] for s in all_sigs])
             pos_r = np.mean([s["pos_score_rate"] for s in all_sigs])
             col_r = np.mean([s["collapse_rate"] for s in all_sigs])
-            line = (f"  {r}: NegScore={neg_r:.2f}  PosScore={pos_r:.2f}  "
-                    f"Collapse={col_r:.2f}")
+            line = f"    {r}: NegScore={neg_r:.2f}  PosScore={pos_r:.2f}  Collapse={col_r:.2f}"
             if "decoy_hit_rate" in all_sigs[0]:
                 dhr = np.mean([s["decoy_hit_rate"] for s in all_sigs])
                 cs = np.mean([s["centroid_shift"] for s in all_sigs])
