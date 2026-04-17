@@ -375,6 +375,8 @@ def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device,
         n_orig += 1
 
     # === DECOY ACTIVATION on inserted frames ===
+    # Inserts must be independently effective: they carry the "redirect" role.
+    # Stronger margins and weights than originals to write dominant memories.
     ins_indices = idx_map["insert_mod_indices"]
     for cursor in range(len(schedule)):
         key = ("insert", cursor)
@@ -393,25 +395,25 @@ def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device,
         suppress_mask = td.get("suppress")
         fl = torch.tensor(0.0, device=device)
 
-        # Push UP logits at decoy region (the redirect)
+        # STRONG push UP at decoy region (higher margin = more confident memory)
         if decoy_mask is not None and decoy_mask.sum() > 0:
-            fl = fl + F.softplus(0.9 - logits * decoy_mask).sum() / (decoy_mask.sum() + 1e-6)
+            fl = fl + 1.5 * F.softplus(2.0 - logits * decoy_mask).sum() / (decoy_mask.sum() + 1e-6)
 
-        # Push DOWN logits at true region (reinforce the redirect)
+        # STRONG push DOWN at true region (must erase true object completely)
         if suppress_mask is not None and suppress_mask.sum() > 0:
-            fl = fl + 0.5 * F.softplus(logits * suppress_mask).sum() / (suppress_mask.sum() + 1e-6)
+            fl = fl + 1.0 * F.softplus(logits * suppress_mask + 1.0).sum() / (suppress_mask.sum() + 1e-6)
 
-        # Rank: decoy must beat true by margin
+        # Large rank margin: decoy must DOMINATE true (not just slightly beat it)
         if (decoy_mask is not None and suppress_mask is not None
                 and decoy_mask.sum() > 0 and suppress_mask.sum() > 0):
             true_mean = (logits * suppress_mask).sum() / (suppress_mask.sum() + 1e-6)
             decoy_mean = (logits * decoy_mask).sum() / (decoy_mask.sum() + 1e-6)
-            fl = fl + F.softplus(true_mean - decoy_mean + 0.8)
+            fl = fl + 1.5 * F.softplus(true_mean - decoy_mean + 2.0)
 
-        # Object score: FIRMLY POSITIVE (confident wrong, not absent)
+        # Object score: VERY FIRMLY POSITIVE (write high-confidence memory)
         sc = out.get("object_score_logits")
         if sc is not None:
-            fl = fl + 0.5 * object_score_positive_loss(sc, margin=1.0)
+            fl = fl + 0.8 * object_score_positive_loss(sc, margin=2.0)
 
         loss_ins = loss_ins + fl
         n_ins += 1

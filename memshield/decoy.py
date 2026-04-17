@@ -206,56 +206,78 @@ def create_decoy_base_frame(
     mask_after: np.ndarray,
     decoy_offset: Tuple[int, int],
 ) -> np.ndarray:
-    """Create a sharp base frame with decoy relocation using a SHARED offset.
+    """Create a high-fidelity base frame with object relocated to decoy position.
+
+    Uses Poisson seamless cloning for photorealistic paste (no ghostly alpha
+    blending, no artificial bridges). The result should look like a natural
+    frame where the object simply appears at a different location.
+
+    Pipeline:
+      1. Inpaint the true object region (large radius for clean removal)
+      2. Extract object with tight mask
+      3. Poisson seamless clone at decoy location (adapts color/lighting)
+      4. Fallback to alpha blend if seamlessClone fails (e.g., near border)
 
     Args:
-        frame_after: [H, W, 3] uint8 — sharp base (not blurry blend).
-        mask_after: [H, W] uint8 — GT mask for frame_after.
-        decoy_offset: (dy, dx) — the shared decoy direction from build_role_targets.
+        frame_after: [H, W, 3] uint8 RGB frame.
+        mask_after: [H, W] uint8 GT mask.
+        decoy_offset: (dy, dx) shared decoy direction.
 
     Returns:
-        base_frame: [H, W, 3] uint8.
+        base_frame: [H, W, 3] uint8 — high-fidelity relocated frame.
     """
     H, W = frame_after.shape[:2]
     mask_ref = (mask_after > 0).astype(np.uint8)
     dy, dx = decoy_offset
-    decoy_mask = shift_mask(mask_ref, dy, dx)
 
     obj_region = mask_ref > 0
     if not obj_region.any():
         return frame_after.copy()
 
-    # Remove the real object as strongly as possible so later memory writes do
-    # not keep re-anchoring on the true appearance.
-    inpaint_mask = (mask_ref * 255).astype(np.uint8)
+    # Step 1: Inpaint true object with larger radius for clean removal
+    # Dilate mask slightly so inpainting covers edge artifacts
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    inpaint_mask = cv2.dilate(mask_ref, kernel, iterations=1) * 255
     frame_bgr = cv2.cvtColor(frame_after, cv2.COLOR_RGB2BGR)
-    inpainted = cv2.inpaint(frame_bgr, inpaint_mask, 5, cv2.INPAINT_TELEA)
-    base = cv2.cvtColor(inpainted, cv2.COLOR_BGR2RGB).astype(np.float32)
+    inpainted_bgr = cv2.inpaint(frame_bgr, inpaint_mask, 10, cv2.INPAINT_TELEA)
 
-    # Build a soft alpha copy of the object and paste it at the decoy location.
-    obj_alpha = cv2.GaussianBlur(mask_ref.astype(np.float32), (0, 0), sigmaX=3.0, sigmaY=3.0)
-    obj_alpha = np.clip(obj_alpha, 0.0, 1.0)
-    obj_layer = frame_after.astype(np.float32) * obj_alpha[..., None]
+    # Step 2: Extract object pixels for paste
+    ys, xs = np.where(mask_ref > 0)
+    y0, y1 = ys.min(), ys.max() + 1
+    x0, x1 = xs.min(), xs.max() + 1
+    obj_crop_bgr = frame_bgr[y0:y1, x0:x1]
+    mask_crop = mask_ref[y0:y1, x0:x1] * 255
 
-    affine = np.float32([[1, 0, dx], [0, 1, dy]])
-    shifted_alpha = cv2.warpAffine(
-        obj_alpha, affine, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
-    )
-    shifted_layer = cv2.warpAffine(
-        obj_layer, affine, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
-    )
+    # Step 3: Compute decoy paste center
+    cy_obj = (y0 + y1) // 2 + dy
+    cx_obj = (x0 + x1) // 2 + dx
+    # Clamp to image bounds with margin
+    margin_y = (y1 - y0) // 2 + 5
+    margin_x = (x1 - x0) // 2 + 5
+    cy_obj = max(margin_y, min(H - margin_y, cy_obj))
+    cx_obj = max(margin_x, min(W - margin_x, cx_obj))
 
-    paste_alpha = 0.85 * shifted_alpha[..., None]
-    base = base * (1.0 - paste_alpha) + shifted_layer * 0.85
+    # Step 4: Poisson seamless clone (photorealistic paste)
+    try:
+        result_bgr = cv2.seamlessClone(
+            obj_crop_bgr, inpainted_bgr, mask_crop,
+            (cx_obj, cy_obj), cv2.NORMAL_CLONE)
+        result = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
+    except cv2.error:
+        # Fallback: alpha blend if seamlessClone fails (e.g., near image border)
+        base = inpainted_bgr.astype(np.float32)
+        obj_alpha = mask_ref.astype(np.float32)
+        obj_layer = frame_bgr.astype(np.float32)
+        affine = np.float32([[1, 0, dx], [0, 1, dy]])
+        shifted_alpha = cv2.warpAffine(
+            obj_alpha, affine, (W, H),
+            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        shifted_obj = cv2.warpAffine(
+            obj_layer, affine, (W, H),
+            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        alpha3 = shifted_alpha[..., None]
+        base = base * (1.0 - alpha3) + shifted_obj * alpha3
+        result = cv2.cvtColor(
+            np.clip(base, 0, 255).astype(np.uint8), cv2.COLOR_BGR2RGB)
 
-    # Add a visible soft bridge so the optimizer is not asked to create a
-    # whole connecting structure from tiny epsilon noise alone.
-    bridge_full = create_bridge_mask(mask_ref, decoy_mask, bridge_width=13)
-    bridge_only = ((bridge_full > 0) & (mask_ref == 0) & (decoy_mask == 0)).astype(np.float32)
-    if bridge_only.any():
-        bridge_alpha = cv2.GaussianBlur(bridge_only, (0, 0), sigmaX=5.0, sigmaY=5.0)
-        obj_mean = frame_after[obj_region].mean(axis=0).astype(np.float32)
-        bridge_strength = 0.30 * bridge_alpha[..., None]
-        base = base * (1.0 - bridge_strength) + obj_mean[None, None, :] * bridge_strength
-
-    return np.clip(base, 0, 255).astype(np.uint8)
+    return result
