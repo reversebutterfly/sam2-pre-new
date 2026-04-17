@@ -27,6 +27,7 @@ def compute_resonance_schedule(
     fifo_window: int = 7,
     max_ratio: float = 0.15,
     first_strong_pos: int = 1,
+    cover_prefix: bool = False,
 ) -> List[InsertionSlot]:
     """Compute FIFO-resonant insertion positions.
 
@@ -39,11 +40,16 @@ def compute_resonance_schedule(
         fifo_window: SAM2 FIFO bank size (num_maskmem, typically 7).
         max_ratio: Maximum inserted frames / original frames.
         first_strong_pos: Insert the first strong frame after this index.
+        cover_prefix: If True, ignore max_ratio and insert at every
+            resonance period until n_original - 5 (for persistent decoy).
 
     Returns:
         Sorted list of InsertionSlot.
     """
-    max_inserts = max(1, int(n_original * max_ratio))
+    if cover_prefix:
+        max_inserts = n_original  # No cap — cover the whole prefix
+    else:
+        max_inserts = max(1, int(n_original * max_ratio))
     period = max(2, fifo_window - 1)
 
     slots: List[InsertionSlot] = []

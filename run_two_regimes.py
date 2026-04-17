@@ -89,9 +89,10 @@ DAVIS_20 = DAVIS_VAL
 
 DAVIS_PILOT = ["blackswan", "car-shadow", "dog", "cows", "gold-fish"]
 
-ATTACK_PREFIX = 15  # PGD optimizes on first 15 original frames
-EVAL_START = 10     # Disjoint eval window start (inclusive)
-EVAL_END = 15       # Legacy: short-horizon eval end (for backwards compat)
+ATTACK_PREFIX_SUPP = 15   # Suppression: 15-frame prefix (already persistent)
+ATTACK_PREFIX_DECOY = 30  # Decoy: 30-frame prefix (needs longer poisoning)
+EVAL_START = 10           # Disjoint eval window start (inclusive)
+EVAL_END = 15             # Legacy: short-horizon eval end (for backwards compat)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -982,8 +983,12 @@ def main():
                         help="Comma-separated video names")
     parser.add_argument("--max_frames", type=int, default=0,
                         help="0=full video (default), >0=truncate")
-    parser.add_argument("--attack_prefix", type=int, default=ATTACK_PREFIX,
-                        help="PGD optimizes on first N frames (default 15)")
+    parser.add_argument("--attack_prefix_supp", type=int,
+                        default=ATTACK_PREFIX_SUPP,
+                        help="Attack prefix for suppression (default 15)")
+    parser.add_argument("--attack_prefix_decoy", type=int,
+                        default=ATTACK_PREFIX_DECOY,
+                        help="Attack prefix for decoy (default 30)")
     parser.add_argument("--n_steps", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducible PGD")
@@ -1012,11 +1017,12 @@ def main():
     else:
         videos = DAVIS_PILOT
 
-    if args.attack_prefix < EVAL_START + 5:
-        raise ValueError(
-            f"--attack_prefix ({args.attack_prefix}) must be >= "
-            f"EVAL_START+5 ({EVAL_START + 5}) so short eval window is "
-            f"within the prefix for signature extraction.")
+    for ap_name, ap_val in [("supp", args.attack_prefix_supp),
+                             ("decoy", args.attack_prefix_decoy)]:
+        if ap_val < EVAL_START + 5:
+            raise ValueError(
+                f"--attack_prefix_{ap_name} ({ap_val}) must be >= "
+                f"EVAL_START+5 ({EVAL_START + 5})")
 
     regimes = (["suppression", "decoy"] if args.regime == "both"
                else [args.regime])
@@ -1025,14 +1031,14 @@ def main():
         n_steps_strong=args.n_steps,
         device=args.device,
     )
-    ap = args.attack_prefix  # PGD prefix length
 
     print("=" * 70)
     print("  Two Memory-Poisoning Regimes - Unified Runner")
     print("=" * 70)
     print(f"  Videos:        {len(videos)}")
     print(f"  Regimes:       {regimes}")
-    print(f"  Attack prefix: f0-f{ap - 1} ({ap} frames)")
+    print(f"  Attack prefix: supp=f0-f{args.attack_prefix_supp-1}, "
+          f"decoy=f0-f{args.attack_prefix_decoy-1}")
     print(f"  Eval start:    f{EVAL_START} to end of video")
     print(f"  PGD steps:     {args.n_steps}  seed={args.seed}")
     print(f"  Budget:        f0=2/255  orig=4/255  "
@@ -1070,20 +1076,29 @@ def main():
               f"mid={clean_horizons['mid']['mean_jf']:.3f}  "
               f"long={clean_horizons['long']['mean_jf']:.3f})")
 
-        # Schedule computed on attack prefix only
-        schedule = compute_resonance_schedule(
-            ap, cfg.fifo_window, cfg.max_insertion_ratio)
-        perturb_set = select_perturb_originals(schedule, ap)
-
         # ── Run each regime ──────────────────────────────────────────
         for regime in regimes:
+            # Regime-specific attack prefix
+            ap = (args.attack_prefix_decoy if regime == "decoy"
+                  else args.attack_prefix_supp)
+            ap = min(ap, T_full)  # Don't exceed video length
+
+            # Decoy uses cover_prefix mode for persistent FIFO poisoning
+            use_cover = (regime == "decoy")
+            schedule = compute_resonance_schedule(
+                ap, cfg.fifo_window, cfg.max_insertion_ratio,
+                cover_prefix=use_cover)
+            perturb_set = select_perturb_originals(schedule, ap)
+
             # Fixed seed for reproducibility
             torch.manual_seed(args.seed)
             np.random.seed(args.seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(args.seed)
 
-            print(f"  [{regime}] optimizing ({args.n_steps} steps on f0-f{ap-1})...")
+            n_ins = len(schedule)
+            print(f"  [{regime}] optimizing ({args.n_steps} steps on f0-f{ap-1}, "
+                  f"{n_ins} inserts)...")
             try:
                 t0 = time.time()
                 # PGD on attack prefix only

@@ -125,16 +125,22 @@ def build_role_targets(
             "rank_margin": rank_margin,
         }, d_mask
 
-    # ── Frame 0: loosen conditioning memory ──────────────────────────────
+    # ── Frame 0: attack conditioning memory with weak decoy bias ─────────
+    # Frame 0 is stored as privileged conditioning memory in SAM2. Leaving
+    # it decoy-free gives the tracker a recovery anchor. Add weak decoy
+    # pressure to reduce the anchor's strength (eps is still only 2/255).
     if 0 in perturb_set:
         td, dm = make_target_dict(
             masks_uint8[0],
-            core_w=1.0,
-            bridge_w=0.0,
-            decoy_w=0.0,
-            suppress_w=0.0,
-            rank_w=0.0,
+            core_w=0.5,
+            bridge_w=0.10,
+            decoy_w=0.15,
+            suppress_w=0.10,
+            rank_w=0.10,
             score_w=0.0,
+            decoy_margin=0.3,
+            suppress_margin=0.15,
+            rank_margin=0.2,
         )
         targets[("orig", 0)] = td
         decoy_masks_np[0] = dm
