@@ -1056,8 +1056,9 @@ def main():
 
         frames, masks = load_video(args.davis_root, vid, args.max_frames)
         T_full = len(frames)
-        if T_full < ap:
-            print(f"  [skip] {T_full} frames < attack_prefix {ap}")
+        min_prefix = min(args.attack_prefix_supp, args.attack_prefix_decoy)
+        if T_full < min_prefix:
+            print(f"  [skip] {T_full} frames < min attack_prefix {min_prefix}")
             continue
 
         vid_results = {"T_full": T_full}
