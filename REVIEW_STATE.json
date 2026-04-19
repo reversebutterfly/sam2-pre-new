@@ -1,10 +1,10 @@
 {
-  "round": 1,
-  "threadId": "019d9459-6c5f-7160-8918-1d76f33becc6",
-  "status": "in_progress",
+  "round": 4,
+  "threadId": "019d9a09-db33-7073-b92c-5b2bfee69e48",
+  "status": "completed",
   "difficulty": "medium",
-  "last_score": null,
-  "last_verdict": "design phase",
-  "pending_experiments": [],
-  "timestamp": "2026-04-16T12:00:00"
+  "last_score": 6.0,
+  "last_verdict": "Not publishable as general decoy, viable as conditional secondary result",
+  "pending_experiments": ["old_vs_new_ablation"],
+  "timestamp": "2026-04-17T15:00:00"
 }

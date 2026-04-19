@@ -4,8 +4,8 @@ __pycache__/
 .idea/
 checkpoints/
 data/
-results_memshield/
-results_ablation/
+results_*/
+*.log
 *.egg-info/
 dist/
 build/
