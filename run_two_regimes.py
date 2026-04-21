@@ -667,6 +667,7 @@ def optimize_unified(
     insert_strength: float = 1.0,
     use_teacher: bool = False,
     high_fidelity_insert: bool = False,
+    hi_fi_gated: bool = False,
 ) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], Dict]:
     """Unified PGD for both regimes. Only loss + insert bases differ.
 
@@ -686,6 +687,8 @@ def optimize_unified(
     perturb_set = select_perturb_originals(schedule, T)
 
     # ── Regime-specific setup ────────────────────────────────────────────
+    high_fidelity_insert_effective = False
+    insert_edit_masks_np = {}
     if regime == "suppression":
         insert_bases_np = _build_suppression_bases(frames_uint8, masks_uint8, schedule)
         decoy_targets = None
@@ -697,13 +700,29 @@ def optimize_unified(
         # _decoy_write pulls inserts' maskmem_features + obj_ptr toward
         # those teacher features (memory-level cooperation, v3 resurrected).
         teacher_surr = surrogate if (use_teacher and not no_teacher) else None
+        # Probe is_natural_distractor cheaply for gated mode (reviewer Round 3).
+        effective_hifi = high_fidelity_insert
+        if hi_fi_gated and high_fidelity_insert:
+            from memshield.decoy import find_decoy_region
+            T_probe = len(masks_uint8)
+            ref_idx = min(1, T_probe - 1)
+            if masks_uint8[ref_idx].sum() < 100 and masks_uint8[0].sum() > 100:
+                ref_idx = 0
+            _, _, is_nd = find_decoy_region(
+                masks_uint8[ref_idx], frames_uint8[ref_idx], 0.75)
+            effective_hifi = not is_nd
+            print(f"    [gated hi-fi] is_natural_distractor={is_nd} "
+                  f"→ hi-fi={'ON' if effective_hifi else 'OFF'}")
         insert_bases_np, role_data, decoy_offset, teacher_features = \
             _build_decoy_bases_and_targets(
                 frames_uint8, masks_uint8, schedule, perturb_set, device,
                 surrogate=teacher_surr,
-                high_fidelity_insert=high_fidelity_insert)
+                high_fidelity_insert=effective_hifi)
         decoy_targets = role_data["targets"]
         insert_edit_masks_np = role_data.get("insert_edit_masks", {})
+        # When gating disabled hi-fi for this clip, the downstream spatial-eps
+        # branch must also be inactive. Flip the flag used later.
+        high_fidelity_insert_effective = effective_hifi
 
     # ── Deltas (identical init for both regimes) ─────────────────────────
     insert_deltas, insert_eps, insert_bases_t = {}, {}, {}
@@ -721,7 +740,11 @@ def optimize_unified(
     # Hard-clamp (Pilot A/B) regressed the attack because the signal is
     # distributed across the whole frame, not only inside the paste region.
     eps_outside = 2.0 / 255
-    if regime == "decoy" and high_fidelity_insert:
+    # Use the per-clip effective flag (flipped off by gated mode on distractor
+    # videos) so both the base construction and the epsilon map stay consistent.
+    _hifi_eff = (high_fidelity_insert_effective
+                 if regime == "decoy" else False)
+    if regime == "decoy" and _hifi_eff:
         for si in insert_deltas:
             em_np = insert_edit_masks_np.get(si)
             if em_np is None:
@@ -1378,6 +1401,10 @@ def main():
                              "Reviewer Pilot A: minimum fidelity fix.")
     parser.add_argument("--seam_dilate_px", type=int, default=5,
                         help="Seam ring width in pixels for edit support mask.")
+    parser.add_argument("--hi_fi_gated", action="store_true",
+                        help="Gate hi-fi mode: use hi-fi only when the clip "
+                             "is NOT a natural-distractor video. Reviewer "
+                             "Round 3 (2026-04-21): regime-aware Pareto.")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -1501,7 +1528,8 @@ def main():
                     no_teacher=args.no_teacher, ablation=args.ablation,
                     insert_strength=args.insert_strength,
                     use_teacher=args.use_teacher,
-                    high_fidelity_insert=args.high_fidelity_insert)
+                    high_fidelity_insert=args.high_fidelity_insert,
+                    hi_fi_gated=args.hi_fi_gated)
                 opt_time = time.time() - t0
 
                 # Build full video: attacked prefix + clean tail
