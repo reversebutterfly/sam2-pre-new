@@ -265,9 +265,12 @@ def build_role_targets(
         if high_fidelity_insert:
             # Identity anchor = frame_prev (clean frame just BEFORE insertion
             # point). LPIPS reference in measure_fidelity.py also uses
-            # frame_prev, so this keeps outside-paste pixels at LPIPS = 0.
+            # frame_prev, so this keeps outside-edit pixels at LPIPS = 0.
+            # Pilot B: also inpaint the true-object region from frame_prev so
+            # SAM2 sees "object deleted at prev location + reappeared at decoy"
+            # (retains memory-redirect signal).
             frame_prev = frames_uint8[pos]
-            # Try candidate offsets in rank order; pick first border-safe one.
+            mask_prev = masks_uint8[pos]
             base = None
             edit_mask_np = None
             chosen_offset = offset
@@ -276,6 +279,8 @@ def build_role_targets(
                     frame_prev, frame_after, mask_after, cand_off,
                     seam_dilate_px=seam_dilate_px,
                     safety_margin=safety_margin,
+                    mask_prev=mask_prev,
+                    inpaint_true_region=True,
                 )
                 if res is not None:
                     base, edit_mask_np = res

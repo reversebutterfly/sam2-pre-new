@@ -296,32 +296,45 @@ def create_decoy_base_frame_hifi(
     decoy_offset: Tuple[int, int],
     seam_dilate_px: int = 5,
     safety_margin: int = 8,
+    mask_prev: Optional[np.ndarray] = None,
+    inpaint_true_region: bool = True,
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """High-fidelity decoy base: use frame_prev as identity anchor.
+    """High-fidelity decoy base: f_prev identity anchor + optional true-region inpaint.
 
-    Differs from create_decoy_base_frame:
-      - Background = clean frame_prev (NO inpainting of frame_after → no
-        artifacts at the original object location, LPIPS vs f_prev stays low).
-      - Object crop sourced from frame_after (preserves real appearance).
-      - Border safety check: if paste region + safety_margin exits image,
-        return None (caller should try another offset; NO alpha fallback).
-      - Returns (base_frame, edit_support_mask) where edit_support_mask is
-        the pasted object region dilated by seam_dilate_px. PGD should
-        restrict delta to this region to preserve identity elsewhere.
+    Pilot B (2026-04-21): by default (inpaint_true_region=True), also
+    inpaints out the true object at its f_prev position so SAM2 sees a
+    "deleted + relocated" signal (required for memory redirect). Edit
+    support then includes BOTH inpaint and paste regions.
+
+    Pipeline:
+      1. Start from clean frame_prev.
+      2. If inpaint_true_region: inpaint out mask_prev (true object at
+         its f_prev position) — this restores the "object deletion" signal
+         the baseline had via inpaint(frame_after, mask_after).
+      3. Poisson-clone object crop (from frame_after, since that is where
+         the appearance is captured) at decoy location.
+      4. Edit mask = dilated(paste_region) [∪ dilated(mask_prev) when
+         inpaint_true_region is True] — PGD restricted to this union.
+
+    Border safety: if paste placement is within safety_margin of the
+    image border, return None (caller should try another offset; NO
+    alpha fallback).
 
     Args:
-        frame_prev: [H, W, 3] uint8 RGB — clean frame just before insertion
-                    point (identity anchor).
+        frame_prev: [H, W, 3] uint8 RGB — clean frame just before insertion.
         frame_after: [H, W, 3] uint8 RGB — clean frame just after insertion
-                     point (source of object appearance).
-        mask_after: [H, W] uint8 GT mask of object in frame_after.
+                     (source of object crop).
+        mask_after: [H, W] uint8 GT mask in frame_after.
         decoy_offset: (dy, dx) shared decoy direction.
-        seam_dilate_px: dilation radius for the edit support ring.
-        safety_margin: pixels of margin required between paste bbox and image border.
+        seam_dilate_px: dilation radius for edit support rings.
+        safety_margin: pixels required between paste bbox and border.
+        mask_prev: [H, W] uint8 GT mask in frame_prev. If None, falls back to
+                   mask_after (ok when motion is small between frames).
+        inpaint_true_region: if True (default), inpaint the true object from
+                             frame_prev so memory-redirect signal is retained.
 
     Returns:
-        (base_frame [H,W,3] uint8, edit_mask [H,W] uint8) on success, or
-        None if placement is not border-safe.
+        (base_frame, edit_mask) on success, else None.
     """
     H, W = frame_prev.shape[:2]
     mask_ref = (mask_after > 0).astype(np.uint8)
@@ -340,29 +353,42 @@ def create_decoy_base_frame_hifi(
         return None
 
     frame_after_bgr = cv2.cvtColor(frame_after, cv2.COLOR_RGB2BGR)
-    frame_prev_bgr = cv2.cvtColor(frame_prev, cv2.COLOR_RGB2BGR)
 
+    # Step 1: background = frame_prev, optionally with true object inpainted out.
+    if inpaint_true_region:
+        prev_mask = mask_prev if mask_prev is not None else mask_after
+        prev_mask_bin = (prev_mask > 0).astype(np.uint8)
+        kernel7 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        inpaint_mask = cv2.dilate(prev_mask_bin, kernel7, iterations=1) * 255
+        frame_prev_bgr = cv2.cvtColor(frame_prev, cv2.COLOR_RGB2BGR)
+        bg_bgr = cv2.inpaint(frame_prev_bgr, inpaint_mask, 10, cv2.INPAINT_TELEA)
+    else:
+        prev_mask_bin = np.zeros((H, W), dtype=np.uint8)
+        bg_bgr = cv2.cvtColor(frame_prev, cv2.COLOR_RGB2BGR)
+
+    # Step 2: Poisson clone object onto inpainted background.
     obj_crop_bgr = frame_after_bgr[y0:y1, x0:x1]
     mask_crop = mask_ref[y0:y1, x0:x1] * 255
-
     try:
         result_bgr = cv2.seamlessClone(
-            obj_crop_bgr, frame_prev_bgr, mask_crop,
+            obj_crop_bgr, bg_bgr, mask_crop,
             (cx_obj, cy_obj), cv2.NORMAL_CLONE)
     except cv2.error:
         return None
 
     result = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
 
-    # Edit support = paste region dilated by seam_dilate_px
+    # Step 3: edit support = dilated paste region ∪ dilated true-object region.
     paste_region = shift_mask(mask_ref, dy, dx)
     if seam_dilate_px > 0:
         ker_sz = max(3, 2 * seam_dilate_px + 1)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ker_sz, ker_sz))
-        edit_mask = cv2.dilate(paste_region, kernel, iterations=1)
+        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ker_sz, ker_sz))
+        paste_dil = cv2.dilate(paste_region, ker, iterations=1)
+        prev_dil = cv2.dilate(prev_mask_bin, ker, iterations=1)
     else:
-        edit_mask = paste_region
-    edit_mask = (edit_mask > 0).astype(np.uint8)
+        paste_dil = paste_region
+        prev_dil = prev_mask_bin
+    edit_mask = ((paste_dil > 0) | (prev_dil > 0)).astype(np.uint8)
 
     return result, edit_mask
 
