@@ -7,9 +7,15 @@
 
 ## Remote Server
 
+### Connection Policy (IMPORTANT)
+- **All remote SSH must be direct** — do NOT use ProxyJump, jump hosts, or SOCKS proxies for the SSH channel itself. The public SSH ports (6100 / 4100 / 6000) expose the target boxes directly.
+- Symptom when direct connection is bypassed / misrouted: `kex_exchange_identification: Connection closed by remote host` repeating in bursts. Observed 2026-04-21 during Pro 6000 work — resolved by reconnecting directly after a short wait.
+- If SSH drops with `kex_exchange_identification`, wait ~1-2 min and retry directly. Do NOT add `-o ProxyCommand=...` or tunnel through V100 / any other host.
+- HTTP(S) proxies (for GitHub/pip on V100) are fine and orthogonal to this rule — they apply inside the session, not to the SSH transport.
+
 ### V100 Server (primary, 2025M_LvShaoting)
 - SSH alias: `lvshaoting-gpu` (port 6100, 1-GPU entry), `lvshaoting-gpu-4x` (port 4100, 4-GPU entry)
-- HostName: 183.175.157.242
+- HostName: 183.175.157.242 — **direct connection only**
 - User: `2025M_LvShaoting`
 - Key: C:/Users/glitterrr/.ssh/aris_ed25519
 - Connect: `ssh lvshaoting-gpu` (no password needed, key auth)
@@ -20,13 +26,15 @@
 
 ### Pro 6000 Server (separate host, different account)
 - SSH alias: `lvshaoting-pro6000`
-- HostName: 183.175.157.243, Port 6000 (different box from V100, not same IP)
+- HostName: 183.175.157.243, Port 6000 — **direct connection only, different box from V100 (not same IP)**
 - Internal host: amax-Rack-Server (10.10.10.201)
 - User: `2025Lv_Zhaoting`
-- Home: /datanas01/nas01/Student-home/2025Lv_Zhaoting (NAS-mounted)
+- Home: /datanas01/nas01/Student-home/2025Lv_Zhaoting (NAS-mounted, 21 TB on volume1/nas01)
 - Key: C:/Users/glitterrr/.ssh/aris_ed25519 (same key as V100 account)
 - Connect: `ssh lvshaoting-pro6000`
-- GPUs: 2× NVIDIA RTX PRO 6000 Blackwell Server Edition (verified 2026-04-21)
+- GPUs: 2× NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 GB each (verified 2026-04-21)
+- Conda: `~/miniconda3` with env `memshield` (torch 2.8.0 cu128, required for Blackwell sm_120)
+- LD hook: `$CONDA_PREFIX/etc/conda/activate.d/ld_library_path.sh` prepends pip-installed nvidia libs (avoids system CUDA 12.4 / 13.0 cuBLASLt conflict). Always `conda activate memshield` before running SAM2 — do not rely on system CUDA.
 
 ## Paths
 
