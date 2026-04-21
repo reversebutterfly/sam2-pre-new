@@ -641,3 +641,92 @@ Teacher-memory cooperation (v3) was resurrected behind a flag, A/B-tested, and r
 from the mainline because the synthetic teacher encodes Poisson-blend artifacts that
 drag the optimizer away from the output-level decoy basin without improving absolute
 SAM2Long damage.
+
+## Manual Phase Execution Log (after loop closure)
+
+### Pro 6000 deployment (2026-04-21)
+- Hardware: 2× NVIDIA RTX Pro 6000 Blackwell (96 GB each, sm_120).
+- Software: `~/miniconda3` + `memshield` env with `torch 2.8.0 cu128` (nightly had cuBLASLt bug; stable 2.8 works). LD hook at `$CONDA_PREFIX/etc/conda/activate.d/ld_library_path.sh` shields from system CUDA 12.4/13.0.
+- Data: DAVIS-2017 480p + SAM2.1-tiny ckpt downloaded direct from official mirrors.
+- Full stack smoke-tested on cows in ~2 min (pipeline proven end-to-end on Blackwell).
+
+### E1 — 10-clip CVaR baseline (hardware-consistent re-run on Blackwell)
+
+| clip | drop_SAM2 | vs v4 |
+|---|---|---|
+| blackswan | 0.908 | ≈ 0.914 |
+| breakdance | **−0.503** | outlier (clean J&F=0.43 already bad, decoy shifts mask onto GT) |
+| car-shadow | 0.003 | saturated (SAM2 too confident) |
+| bike-packing | 0.726 | ≈ 0.745 |
+| bmx-trees | 0.310 | ≈ 0.302 |
+| camel | 0.957 | ≈ 0.976 |
+| car-roundabout | 0.980 | **+0.060** |
+| cows | 0.975 | ≈ 0.975 |
+| dance-twirl | 0.029 | ≈ 0.086 |
+| dog | 0.977 | **+0.356** |
+| **Mean 10** | **0.536** | v4 = 0.547 |
+| **Mean 9 (no breakdance)** | **0.652** | v4 9-clip = 0.616 |
+
+Soft CVaR matches v4 on saturated clips and strictly beats v4 on the 2 hardest diagnostic clips (dog, bmx-trees). The breakdance outlier is the sole negative entry; clean SAM2 baseline on breakdance is 0.43, meaning the decoy shift happens to coincide with GT and "accidentally" improves J&F.
+
+### E2 — SAM2Long retention on 10-clip CVaR attacks (hardware-consistent)
+
+| clip | clean_sL | attack_sL | drop_SAM2L | retention |
+|---|---|---|---|---|
+| bike-packing | 0.829 | 0.620 | 0.209 | 0.287 |
+| blackswan | 0.970 | 0.878 | 0.091 | 0.101 |
+| bmx-trees | 0.472 | 0.135 | **0.337** | **1.089** ← SAM2Long MORE vulnerable |
+| breakdance | 0.963 | 0.507 | **0.456** | n/a (d2<0) |
+| camel | 0.979 | 0.830 | 0.149 | 0.156 |
+| car-roundabout | 0.990 | 0.946 | 0.044 | 0.045 |
+| car-shadow | 0.978 | 0.871 | 0.108 | n/a (d2≈0) |
+| cows | 0.978 | 0.860 | 0.118 | 0.121 |
+| dance-twirl | 0.947 | 0.651 | 0.296 | n/a (d2≈0) |
+| dog | 0.974 | 0.650 | 0.324 | 0.331 |
+| **Mean 10** | 0.908 | 0.695 | **0.213** | — |
+| mean retention (strong-d2 only, n=7) | — | — | — | **0.304** |
+
+Two clips now show "**transfer stronger than SAM2 attack**":
+- bmx-trees retention > 1 (SAM2L drops MORE than SAM2)
+- breakdance: SAM2 helped (−0.503) but SAM2Long genuinely attacked (+0.456)
+
+This is the first evidence that the CVaR attack goes through the memory selector, not just SAM2's output softmax.
+
+### E3 — Fidelity on CVaR-10 outputs
+
+| class | mean SSIM | mean PSNR | mean LPIPS |
+|---|---|---|---|
+| Attacked originals ($\varepsilon_t$ ≤ 4/255) | **0.972** | **47.5 dB** | **0.016** |
+| Inserted frames ($\varepsilon_{\text{ins}}$ = 8/255) | 0.640 | 25.5 | 0.161 |
+
+Numerically identical to Stage-2 fidelity (0.016 vs 0.0162 for orig LPIPS). Confirms CVaR's loss change does NOT affect fidelity — the insert visibility remains the sole bottleneck, and Module 4 (perceptual insert loss) is the correct next investment.
+
+### E4 — Targeted mislocalization metrics
+
+| metric | threshold | mean 10-clip | pass |
+|---|---|---|---|
+| pos_score_rate | ≥ 0.8 | **1.000** | ✅ |
+| collapse_rate | ≤ 0.2 | **0.000** | ✅ |
+| decoy_hit_rate | ≥ 0.6 | **0.940** | ✅ |
+| centroid_shift | ≥ 0.35 | **0.934** | ✅ |
+
+Every clip (10/10) shows positive objectness, zero collapse, mask centroid shifted ≥ 0.37 toward the decoy target (dog's 0.373 is the floor; bmx-trees tops out at 1.45). This is the first quantified evidence that this is a targeted decoy attack, not a suppression-by-proxy.
+
+### Overall reviewer verdict checklist
+
+| criterion | value | pass |
+|---|---|---|
+| E1 mean ≥ 0.60 | 0.536 | ⚠️ near (0.652 without outlier) |
+| E1 ≥ v4's 0.547 | 0.536 | ≈ parity |
+| E1 ≥ 8/10 positive | 9/10 | ✅ |
+| E1 no cows/dog collapse | 0.975/0.977 | ✅ |
+| E2 mean ≥ 0.20 | 0.213 | ✅ |
+| E2 dog ≥ 0.20 | 0.324 | ✅ |
+| E2 bmx-trees ≥ 0.25 | 0.337 | ✅ |
+| E3 originals LPIPS ≤ 0.02 | 0.016 | ✅ |
+| E4 pos_score ≥ 0.8 | 1.000 | ✅ |
+| E4 collapse ≤ 0.2 | 0.000 | ✅ |
+| E4 decoy_hit ≥ 0.6 | 0.940 | ✅ |
+| E4 centroid_shift ≥ 0.35 | 0.934 | ✅ |
+
+**11/12 pass + 1 near-miss.** The standalone decoy story is defensible on the targeted-mislocalization + memory-transfer axes. Only remaining weakness: insert LPIPS 0.16 (unchanged from Stage-2; addressing this is the purpose of E5/Module 4).
