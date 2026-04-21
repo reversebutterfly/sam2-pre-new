@@ -27,14 +27,61 @@
 ### Pro 6000 Server (separate host, different account)
 - SSH alias: `lvshaoting-pro6000`
 - HostName: 183.175.157.243, Port 6000 — **direct connection only, different box from V100 (not same IP)**
+- Web UI (file manager): <http://183.175.157.243:6000>
 - Internal host: amax-Rack-Server (10.10.10.201)
 - User: `2025Lv_Zhaoting`
 - Home: /datanas01/nas01/Student-home/2025Lv_Zhaoting (NAS-mounted, 21 TB on volume1/nas01)
 - Key: C:/Users/glitterrr/.ssh/aris_ed25519 (same key as V100 account)
 - Connect: `ssh lvshaoting-pro6000`
+- CPU: AMD EPYC 9654 96-core
+- OS: Ubuntu 24.04.4 LTS
 - GPUs: 2× NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 GB each (verified 2026-04-21)
 - Conda: `~/miniconda3` with env `memshield` (torch 2.8.0 cu128, required for Blackwell sm_120)
 - LD hook: `$CONDA_PREFIX/etc/conda/activate.d/ld_library_path.sh` prepends pip-installed nvidia libs (avoids system CUDA 12.4 / 13.0 cuBLASLt conflict). Always `conda activate memshield` before running SAM2 — do not rely on system CUDA.
+
+#### Pro 6000 first-login initialization (already done for 2025Lv_Zhaoting)
+- After first password change, must run `sh /datanas01/nas01/Student-home/init_user.sh` once. Do not re-run on existing account.
+- Default `passwd` command changes the account password.
+- `apt` / `apt-get` are allowed with `sudo` (prompts for the account's own password). Common `sudo apt-get install pkg` works.
+- Non-admin user has NO other sudo privileges — contact admin for anything else.
+
+#### Pro 6000 canonical paths (from lab manual)
+| purpose | path |
+|---|---|
+| user home / code / data | `/datanas01/nas01/Student-home/2025Lv_Zhaoting` |
+| user conda envs (auto-placed here) | `/LAI_Data/Anaconda_envs/2025Lv_Zhaoting/` |
+| lab public datasets (**read-only, use this for DAVIS etc. if present**) | `/datanas02/public_data` |
+| lab private datasets (read-only) | `/datanas02/private_data` |
+| lab shared assets | `/datanas02` |
+| wifi re-auth scripts | `/datanas01/LAB_Data/Share_code/wifi/` |
+| system anaconda (do not modify) | `/usr/local/anaconda3` |
+| multi-CUDA switcher | `/home/amax/switch-cuda.sh` |
+| user init script | `/etc/skel/user_init_setup.sh` |
+
+**Check `/datanas02/public_data` first before downloading any standard dataset** — may already contain DAVIS/YouTube-VOS/etc. with read-only access (much faster than NAS-mounted home dir for I/O).
+
+#### Pro 6000 CUDA version switching
+- Installed: CUDA 13.0 (default), CUDA 12.4 also available.
+- Switch via: `source /home/amax/switch-cuda.sh 12.4` then verify with `nvcc -V`.
+- **Our memshield env uses pip-installed CUDA 12.8 libs via the LD hook** — does NOT depend on system CUDA. Do not call switch-cuda.sh in our workflow.
+
+#### Pro 6000 wifi re-auth (after reboot only)
+Campus network requires periodic auth. Normally not our concern, but if network drops:
+```bash
+screen -S wifi
+cd /datanas01/LAB_Data/Share_code/wifi
+bash wifi.sh       # or: bash wifi-run
+# Ctrl-A+D to detach
+```
+
+### Lab Resource Policy (IMPORTANT — applies to both V100 and Pro 6000)
+- **1 GPU per user by default**; up to 2 GPU per job with admin approval; up to 3 concurrent jobs max.
+- **Large runs should execute at night / weekends.** Avoid peak daytime slots.
+- **All long-running jobs must background** via `nohup` / `screen` / `tmux`. Our convention: `nohup bash -c '...' > log 2>&1 < /dev/null &`
+- **No interactive GPU sessions.** Do not leave PyCharm/VSCode connected with a GPU-holding kernel — treated as a violation.
+- **Do NOT run compute on the login node.** All work via screen + background.
+- **Re-check `nvidia-smi` immediately before launching** — other users' processes can spawn within seconds of a free slot; double-check to avoid bumping someone.
+- **Admin contact required for**: new account, quota issue, sudo beyond apt, unusual crash. Do NOT attempt to reboot or modify system config.
 
 ## Paths
 
