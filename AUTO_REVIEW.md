@@ -380,3 +380,87 @@ Given the 5e verdict, three options:
 - **Round 1 Phase A/C complete**; pilot OOMed, no decoy metrics obtained.
 - **Loop paused pending user decision** on A/B/C.
 - Next action: user selects path forward.
+
+---
+
+## Round 2 (2026-04-21) — NEW DIRECTIVE: 高保真 + 加强攻击
+
+User chose **Option A → continue decoy**. SAM2Long eval on existing Stage 2 attacks completed. User directed: *"继续为我优化 decoy 方法，高保真，但是加强攻击效果"* — improve both fidelity (insert imperceptibility) and attack strength simultaneously.
+
+### Assessment (Summary)
+- **Score (current Stage 2 as-is)**: 4/10 for top venue
+- **Score ceiling (triad met: LPIPS<0.05, SAM2 drop≥0.65, SAM2Long retention≥0.50)**: 8/10
+- **Verdict**: **Not ready** for top-venue decoy-specific submission. Two axes failing: attack regressed (-13pp vs v4 on SAM2), inserts fail fidelity bar (LPIPS 0.16 on inserts).
+
+### Reviewer Raw Response
+
+<details>
+<summary>GPT-5.4 xhigh, threadId 019dae7c-be42-78b3-b045-7a9ee7b3ec39</summary>
+
+**Primary Findings**
+- Current implementation is not a real high-fidelity attack yet. Only in-loop visual constraint is SSIM against the synthetic insert base in `run_two_regimes.py:746`, while decoy placement is a one-frame color heuristic in `memshield/decoy.py:20` and the base can fall back to alpha blending near borders. High SSIM under that setup can still look like a pasted ghost.
+- Stage 2 regression is plausibly self-inflicted by the write loss. `_decoy_write` adds strong ring/core negatives plus a hard top-20% rank on inserts, then upweights insert loss again. That is exactly the recipe for sharp, brittle peaks instead of broad decoy mass.
+
+**Top 5 Pareto Levers** (fidelity ↔ attack strength)
+
+1. **Replace hard top-20% rank with a soft quantile / CVaR / log-sum-exp rank.**
+   Plug-in: `_decoy_write()` rank term. Cleanest fix for the current regression. Hard top-k makes the active ring set jump across texture patches and PGD steps. Soft percentile preserves exclusivity without forcing spiky peaks.
+
+2. **Upgrade Stage 3 to MI-FGSM + TI-FGSM + DI²-FGSM, with optional admix.**
+   Plug-in: joint rollout phase in `optimize_unified()`. Keep plain PGD in warmup; in Stage 3 accumulate momentum, blur gradients with Gaussian for TI, backprop through 3-5 random resize-pad/mild JPEG/blur transforms for DIM. admix with nearby clean frames. Best cheap way to raise SAM2Long retention under fixed epsilon. TI also suppresses ugly high-frequency artifacts.
+
+3. **Add an honest perceptual loss: LPIPS + DeltaE/Perceptual Color Distance + learned edit mask.**
+   Plug-in: replace current quality term; return an `edit_mask` from `build_role_targets`. Outside edit mask match clean `frame_after`; inside match decoy base; on seam band penalize Lab DeltaE + light TV/frequency reg. Most important fidelity correction.
+
+4. **Motion-consistent + border-safe insert initialization.**
+   Plug-in: `find_decoy_region()` and `create_decoy_base_frame()`. Search offsets over f0:f14, reject motion-aligned or future-overlap offsets, bias toward natural distractors, never accept alpha-blend fallback.
+
+5. **Reparameterize insert residuals in low-frequency basis or VQ-constrained code space.**
+   Plug-in: `insert_deltas` init/update. Optimize DCT coefficients, wavelet bands, or small VQ residual codebook on insert support/seam band.
+
+**Minimum-Cost Fix (6 GPU-h)**: Remove hard top-20%, replace with soft quantile/LSE; keep annulus; slightly lower w_ring. Test on cows/dog/bmx-trees first.
+
+**Diagnosis of Stage 2 Regression**: Single most likely cause = **non-stationary hard-top-k support** (not annulus). Combination of hard top-20% rank + strong ring push-down + extended horizon makes optimizer chase texture hotspots moving frame-to-frame. Hits cows/dog hardest because their highest-response true pixels are texture-dependent. First test: ablate only top-k to soft quantile or plain mean.
+
+**Readiness**: Not ready. To move from "not ready" to "almost", need triad simultaneously: final-export LPIPS<0.05, mean SAM2 drop≥0.65, SAM2Long retention≥0.50, plus targeted mislocalization metric (object_score>0 with wrong-region occupancy).
+
+</details>
+
+### Actions Implemented (Phase C)
+
+1. **Soft CVaR rank replaces hard top-20%** (commit `5f0b4f4`).
+   - Added `_soft_cvar_mean(logits, mask, q=0.5)` helper: sigmoid gate around detached q-quantile. Gradient flows through values only.
+   - Replaced `_topk_mean(..., k_frac=0.2)` with `_soft_cvar_mean(..., q=0.5)` in `_decoy_write` rank term.
+   - Lowered `w_ring_base` 1.5 → 1.0 to reduce over-sharpening pressure.
+   - `_topk_mean` retained, marked DEPRECATED.
+
+2. **Fidelity measurement script** (`scripts/measure_fidelity.py`).
+   - Pixel-space SSIM + PSNR + LPIPS(alex) on saved attacked JPEGs vs DAVIS clean.
+   - Separates attacked-original frames from inserted frames.
+   - Ran on 10-clip Stage 2 attacks.
+
+### Fidelity Results — Baseline Measurement (NEW, revelatory)
+
+| region | SSIM | PSNR | LPIPS | evaluation |
+|---|---|---|---|---|
+| **Attacked originals (f0..f14, ε=2-4/255)** | **0.9715** | **47.46 dB** | **0.0162** | **Already passes <0.05 ceiling** ✓ |
+| **Inserted frames (3×, ε=8/255)** | 0.6398 | 25.53 dB | **0.1613** | Fails — visible as "pasted ghost" |
+
+Per-video LPIPS on inserts: bmx-trees 0.28 (worst, also highest SAM2Long retention 0.76), car-shadow 0.18, dog 0.18, dance-twirl 0.17, camel 0.15, blackswan 0.15, cows 0.12, breakdance 0.10, bike-packing 0.10.
+
+**Implication**: The "高保真" axis is *already fine* for the perturbed original frames. The entire fidelity problem lives in the 3 inserted frames. Reviewer's levers #3 (LPIPS+DeltaE loss inside edit mask) and #4 (motion-consistent init) are therefore the right next targets.
+
+### Results — Soft CVaR Pilot (pending)
+
+- Launched on cows/dog/bmx-trees at `max_frames=30` on GPU 4 (10.8G free): **OOM** — other user's process at 21G pushed effective free < our 10.5G peak.
+- Re-launched at `max_frames=20`: **also OOM** at decoy optimization step.
+- GPU 4 held by process 3616920 (21.2G). Other GPUs <3G free.
+- **Polling every 5 min for ≥16G free**; will rerun when slot opens.
+- Fallback: Pro 6000 server (97G free on GPU 1) requires full env setup (conda install, repo sync, checkpoint copy) — deferred unless V100 slot doesn't open in ~1 hour.
+
+### Status
+
+- Phase C code implemented + synced + committed.
+- Phase D blocked on GPU availability.
+- Fidelity baseline established: inserts (not perturbations) are the fidelity target.
+- Next: confirm soft CVaR fix reverses Stage 2 regression on cows/dog, then consider perceptual-loss upgrade for insert fidelity.

@@ -1,15 +1,20 @@
 {
-  "round": 1,
-  "threadId": "019da669-70ff-7562-8d14-925a94dcfbaf",
-  "status": "paused_awaiting_gpu",
+  "round": 2,
+  "threadId": "019dae7c-be42-78b3-b045-7a9ee7b3ec39",
+  "status": "in_progress",
   "difficulty": "medium",
-  "topic": "universal_decoy_redesign",
-  "last_score": 3.5,
-  "last_verdict": "Round 1 Phase C pilot attempted 3 times (GPU 0 / GPU 5 / GPU 5+max_frames=25). All decoy attempts OOMed — other users grab the free VRAM within 1-3 min of our launch. Stage 2 code is pushed and syntax-valid but has ZERO decoy J&F data to evaluate. Clean baselines captured. User chose option C: wait for a sustained dedicated GPU window (likely overnight/early AM).",
+  "topic": "decoy_high_fidelity_stronger_attack",
+  "last_score": 4.0,
+  "ceiling_score": 8.0,
+  "last_verdict": "Not ready; Stage 2 regressed (-13pp vs v4); inserts fail fidelity bar (LPIPS 0.16). Soft CVaR fix implemented + committed; pilot OOM blocked on GPU availability.",
   "pending_experiments": [
-    "wait_for_dedicated_gpu_window",
-    "then_Stage2_pilot_3clip_save_videos",
-    "then_SAM2Long_eval_on_saved_decoy_attacks"
+    "soft_cvar_pilot_cows_dog_bmx-trees_awaiting_gpu",
+    "if_recovered_then_full_10clip_rerun",
+    "if_recovered_then_sam2long_eval_on_new_attacks"
   ],
-  "timestamp": "2026-04-20T21:15:00"
+  "fidelity_baseline": {
+    "attacked_originals": {"lpips": 0.0162, "ssim": 0.9715, "psnr": 47.46},
+    "inserted_frames": {"lpips": 0.1613, "ssim": 0.6398, "psnr": 25.53}
+  },
+  "timestamp": "2026-04-21T13:58:00"
 }
