@@ -730,3 +730,149 @@ Every clip (10/10) shows positive objectness, zero collapse, mask centroid shift
 | E4 centroid_shift ≥ 0.35 | 0.934 | ✅ |
 
 **11/12 pass + 1 near-miss.** The standalone decoy story is defensible on the targeted-mislocalization + memory-transfer axes. Only remaining weakness: insert LPIPS 0.16 (unchanged from Stage-2; addressing this is the purpose of E5/Module 4).
+
+---
+
+# Auto Review Log: UAPSAM Reproduction Audit
+
+*Started 2026-04-21, separate topic from the MemoryShield / Decoy entries above. Reviewer: GPT-5.4 xhigh via Codex MCP (threadId `019db0ae-a85b-79e1-85b8-fcd951476442`).*
+
+## Round 1 (2026-04-21)
+
+### Assessment (Summary)
+- **Score: 7 / 10**
+- **Verdict: Almost** (STOP condition met on first round: score ≥ 6 AND verdict contains "almost")
+- Reviewer: GPT-5.4 xhigh via Codex MCP
+
+### Key Criticisms (ranked by severity)
+
+1. **(TOP)** **Prompt-protocol drift is the main remaining risk**, not training length / subset identity. Paper (OpenReview Ll29PmM3UH) states train/test prompts are *different and random*; public repo eval path uses the *dataset-provided first-frame center point*. Part of the 17pp in-domain gap could be prompt-protocol drift, not weaker training.
+2. **(HIGH)** Clean-J parity rules out gross eval issues but NOT prompt distribution, the `clean-IoU < 0.3` filter behavior / filtered-frame counts, or cross-host inference differences (V100 train → Blackwell eval).
+3. **(CORRECTED PRIOR)** I over-weighted "undocumented training length" — paper explicitly reports 10 epochs, seed 30, and its iteration ablation says performance stabilizes after 10 iterations. Longer training is a lower-priority probe than the prompt audit.
+4. **(CORRECTED PRIOR)** I over-weighted "unknown 100-video subset identity" — seed=30 + sorted sampling under the released code should deterministically define the subset. True uncertainty is "paper may have been run with internal code or slightly different protocol," not "we cannot know the subset."
+5. **(NUANCED)** My rationalization risk is narrower than I feared: the posture "reproduction is incomplete, not paper-is-unreproducible" is *correct*; the specific rationalization is *parking too much probability on training-side unknowns* when the sharper unresolved issue is prompt/eval protocol drift.
+
+### Reviewer Raw Response
+
+<details>
+<summary>Click to expand full reviewer response</summary>
+
+**Verdict**
+
+Score: 7/10 as a credible reproduction.
+
+This is already a serious baseline reproduction, not a strawman. Exact clean parity, v1/v2 A/B, contamination cleanup, and a held-out protocol all count strongly in your favor. But I would not call it fully locked down yet, because the main unresolved issue is no longer "maybe it just needs more steps"; it is "what exact paper protocol does 37.03 correspond to?"
+
+**Critical Weaknesses**
+
+1. The biggest remaining risk is paper-repo protocol ambiguity, especially on evaluation prompts. The released repo clearly evaluates on the train split, so your "public repo quick-start is in-domain" diagnosis is solid. But that does not fully pin down the paper's 37.03, because the paper's comparison section says train/test prompts are different and random, while the public repo eval path appears to use the dataset-provided first-frame center point. That means part of the 17pp gap could be prompt-protocol drift, not just weaker training.
+
+2. Clean parity is strong evidence, but it does not fully rule out eval-side mismatch. Matching clean J almost certainly rules out gross errors in model loading, resizing, basic preprocessing, and IoU computation. It does not rule out prompt distribution, clean-IoU < 0.3 filtering behavior, filtered frame counts, or small cross-host inference differences.
+
+3. Your optimizer fixes look correct, and I do not think you over-corrected. The public grad(loss, adv_img, loss) bug is a real bug. Your fix to grad(loss, adv_img)[0] and the EMA-only update are principled. The strongest evidence is empirical: v2 is stronger than v1 on both in-domain and held-out. So in your environment, the public bug is not "load-bearing."
+
+4. You are over-weighting "undocumented training length" as an explanation. The paper says 10 epochs, fixed seed 30, and its iteration ablation says performance stabilizes after 10 iterations. Longer training is still worth testing later, but it is not my top prior anymore.
+
+5. You are also over-weighting "unknown 100-video subset identity." If the authors used the released code and official YT-VOS train split, seed 30 plus sorted sampling should deterministically define the 100-video subset. The real uncertainty is not "we cannot know the subset"; it is "the paper may have been run with internal code or a slightly different protocol."
+
+6. The one rationalization I do see is narrower than you think. You are not rationalizing by refusing to declare the paper wrong. That is the correct posture. The risky rationalization is parking too much probability mass on vague training-side unknowns when the sharper unresolved issue is prompt/eval protocol drift between the paper and the released repo.
+
+**Minimum Fixes: Analysis Only**
+
+- Write one explicit protocol map: paper number → split → prompt protocol → filter → metric → source code path. This is the single highest-value clarification.
+- In the appendix, report both v1 and v2, exact train/eval video ID lists, post-filter frame counts, UAP hashes, and the fact that the primary Decoy comparison uses held-out valid-100.
+- Downgrade the rhetoric around training-length and subset uncertainty. The paper already discloses more than your current hypothesis ranking gives it credit for.
+- State plainly that the public repo quick-start is in-domain, but the paper's 37.03 may also depend on a random-prompt evaluation context that the quick-start path does not obviously reproduce.
+
+**Minimum Fixes: Code Change / New Measurement**
+
+- Add a prompt-ensemble evaluator that tests several random point prompts per video and compares them against the current center-point protocol. This is the cheapest measurement most likely to explain part of the gap.
+- Add a switch to evaluate without the clean-IoU < 0.3 filter, or at least dump the filtered frame IDs. Right now clean parity lowers concern, but it does not close this loophole.
+- Run one small same-UAP cross-host sanity check if you will keep training on V100 and evaluating held-out on Blackwell.
+- Only after the prompt audit, consider more expensive retraining sweeps. I would not spend the next GPU week on 30/50-step retrains before resolving prompt protocol.
+
+**Ready**
+
+Almost.
+
+As a Decoy-vs-UAPSAM baseline, v2 on held-out valid is defensible if you name it as a repaired UAPSAM reproduction and disclose the unresolved gap to the paper. For a submission-quality baseline, I would still want the prompt-protocol audit above, because that is the cleanest reviewer attack surface.
+
+Sources: OpenReview paper Ll29PmM3UH, public repo sam2_util.py / uap_atk_test.py / dataset_YOUTUBE.py, local scripts/uap_attack_v2.py / scripts/uap_eval_v2.py.
+
+</details>
+
+### Actions Taken (Round 1)
+- **None yet** — user standing instruction this session is "audit the gap but do not make code changes". Actions split into two staged buckets, both awaiting user approval.
+
+### Staged Actions — Analysis Only (doc edits, no code)
+- **A1.** Write an explicit **protocol map** (paper number → split → prompt protocol → clean-filter → metric → source file/line) and add as §9.11 of `UAPSAM_BASELINE_REVIEW_2026-04-20.md`.
+- **A2.** **Rewrite §9.10** candidate-cause ranking to demote training-length and subset-identity (reviewer says paper already pins these down) and promote prompt-protocol drift to the #1 candidate.
+- **A3.** Add a **reproduction appendix stub** in the review doc: v1+v2 numbers, exact train/eval video ID references (already on disk at `sam2_privacy_preprocessor/refine-logs/`), post-filter frame counts (163 held-out; in-domain count to be looked up), UAP checksums, and "primary Decoy comparison = held-out valid-100" declaration.
+- **A4.** Add a plain-language sentence in §9.10: "Public repo quick-start is in-domain; paper's 37.03 may also depend on a random-prompt eval context that the quick-start does not obviously reproduce."
+
+### Staged Actions — Code Change / New Measurement (gated on user approval)
+- **C1.** **Prompt-ensemble evaluator** — sample several random point prompts per video and re-evaluate v2, compare J drop vs current center-point protocol. Single new Python file; no change to `uap_attack_v2.py`. Likely the single highest-value probe.
+- **C2.** **Clean-IoU filter switch** — add `--no_clean_filter` flag OR dump the filtered frame IDs list from the existing eval so we can see what fraction of frames are being excluded and whether v1/v2 differ on the filtered set.
+- **C3.** **Cross-host sanity** — run the same UAP on both V100 and Pro 6000 Blackwell, compare J numbers. Quick check.
+- **C4.** After C1-C3: only if prompt audit leaves ≥5pp unexplained, consider longer-training or alpha-schedule ablation.
+
+### Status
+- **Loop stop condition met on Round 1** (score 7 / 10, verdict "Almost"). No further rounds unless user explicitly re-invokes.
+- All analysis-only and code-change recommendations staged for user approval (per session-wide "no code changes" directive).
+- Difficulty: medium.
+
+---
+
+## Fidelity Loop — Rounds 1-4 (2026-04-21, evening)
+
+Separate auto-review-loop triggered by user directive "我认为现在插入帧的保真度太差了". Focus: reduce insert-frame LPIPS from the Round-3 baseline of 0.161 to ≤ 0.10 while preserving attack strength. Reviewer: gpt-5.4 xhigh via codex MCP, thread `019db065-8a48-7732-9ce3-f34cc23fc680`. Loop terminated at Round 4 per MAX_ROUNDS, final score 6/10 verdict "Almost".
+
+### Final score trajectory
+
+| round | config | score | verdict |
+|---|---|---|---|
+| 1 | Pilot A (hard clamp, f_prev anchor, border-safe Poisson, no alpha fallback) | 7.0 (conditional) | design review |
+| 2 | Pilots A + B (B adds inpaint f_prev) 3-clip results | 6.0 | partial win |
+| 3 | Pilot C (spatial ε 8/255 inside, 2/255 outside) 3-clip | 6.5 | two-regimes hypothesis |
+| 4 | DAVIS-10 always-hi-fi + gated-hi-fi | **6.0** | **Almost — stop** |
+
+### Final results (DAVIS-10)
+
+| config | attack mean dJF (n=10) | attack (J&F≥0.5, n=8) | insert LPIPS | orig LPIPS |
+|---|---|---|---|---|
+| baseline CVaR (from E1) | **0.536** | n/a | **0.1613** | 0.0162 |
+| always hi-fi (Pilot C, GPU0) | 0.334 | 0.450 | **0.1336** | 0.0146 |
+| gated hi-fi (GPU1, same pipeline in practice) | 0.485 | 0.593 | 0.1342 | 0.0147 |
+
+Baseline E1 (v4.1 CVaR decoy) in `AUTO_REVIEW.md` E1 table is the reference. Pilot C hi-fi uses (1) `f_prev` identity anchor, (2) `find_decoy_candidates` + border-safe Poisson clone with no alpha fallback, (3) spatial ε budget ε_inside = 8/255 inside dilated edit support + ε_outside = 2/255 elsewhere. Gated variant adds `--hi_fi_gated` which probes `is_natural_distractor` via `find_decoy_region` before deciding; on the 10 DAVIS clips none triggered (all `False`), so gated ≡ always in code path.
+
+### Key findings
+
+- **Fidelity gain is real and robust**: insert LPIPS 0.161 → 0.134 across 10 clips (-17%). attacked-originals LPIPS essentially unchanged (0.016 → 0.015).
+- **Attack regression is real but noisy**: two independent same-pipeline runs produced 0.334 and 0.485 mean dJF, spanning ±0.1. GPU0 (Blackwell sm_120) vs GPU1 numerical non-determinism in cuDNN kernels accumulates over 200 PGD steps into large downstream differences near a chaotic optimum. Neither run equals or beats baseline E1 0.536; all consistent with a modest attack-fidelity trade-off.
+- **"Two regimes" hypothesis partly wrong**: I claimed cows was flagged `is_natural_distractor=True` based on historical CLAUDE.md entries, but in Pilot D the flag returned False for cows and for all 10 clips. The threshold (color_sim > 0.15) is stricter than my recollection. The gate never fired, so regime-aware conditional policy remains untested on this dataset.
+- **Hard-clamp is counterproductive**: Pilot A zeroed δ outside dilated paste support; cows attack collapsed 0.97 → 0.03. Pilot B's extra inpaint of the f_prev true-object region did not restore attack (cows 0.07). Reviewer-predicted failure mode — adversarial signal is distributed frame-wide, not local — confirmed.
+- **Border-safe Poisson placement is the one unambiguous win**: on bmx-trees it improved both LPIPS (0.28 → 0.14) and attack drop (0.39 → 0.43+). This is a compositing-quality improvement, not a method-level claim.
+
+### Reviewer termination narrative (adopt as paper section text)
+
+> On DAVIS-10, the high-fidelity insert variant — combining identity anchoring, border-safe Poisson cloning, and a spatially varying perturbation budget — consistently improves inserted-frame perceptual quality, reducing mean insert LPIPS from 0.161 to approximately 0.134 while preserving the low distortion of attacked original frames. However, this fidelity gain does not come for free: across two independent runs of the same hi-fi pipeline, mean attack strength remained below the baseline CVaR attack and showed substantial run-to-run variation (0.334 and 0.485 vs 0.536 baseline), indicating a real but noisy attack-fidelity trade-off under non-convex PGD optimization. We present high-fidelity inserts as a useful operating point that improves perceptual quality, but not as a universal Pareto improvement over the baseline attack.
+
+Future-work statement (also from reviewer, verbatim):
+
+> Future work should focus on regime-aware triggering and variance-controlled optimization, since the current bottleneck is not optimization length but deciding when localized high-fidelity constraints are compatible with attack success and measuring that trade-off reliably.
+
+### Deliverables
+
+- `memshield/decoy.py` — `find_decoy_candidates`, `create_decoy_base_frame_hifi`, `_is_border_safe`
+- `memshield/generator.py` — `build_role_targets(high_fidelity_insert=True)` threads edit masks
+- `run_two_regimes.py` — `--high_fidelity_insert`, `--hi_fi_gated`, `--seam_dilate_px`, spatial ε budget in PGD step
+- Remote results (Pro 6000): `runs/hifi_all_10clip/` (regimes_results.json + fidelity.json) and `runs/hifi_gated_10clip/` (same). Downloaded for local post-hoc analysis pending user choice.
+- Commits: `333f71b` (hi-fi Pilot A), `0a74548` (Pilot B), `66313f2` (Pilot C spatial ε), `a4a38a7` (--hi_fi_gated). All pushed to origin via V100 relay.
+
+### Loop status
+
+- **Stop condition met on Round 4** (score 6/10, verdict "Almost") AND MAX_ROUNDS=4 reached.
+- Module 4 status: **demoted from "solution" to "analysis of fidelity-strength frontier"** per reviewer.
+- Not touching `REVIEW_STATE.json` (currently holds a separate UAPSAM audit loop's completion state; topics don't collide).
+- Difficulty: medium.
