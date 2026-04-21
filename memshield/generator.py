@@ -280,7 +280,7 @@ def build_role_targets(
                     seam_dilate_px=seam_dilate_px,
                     safety_margin=safety_margin,
                     mask_prev=mask_prev,
-                    inpaint_true_region=True,
+                    inpaint_true_region=False,
                 )
                 if res is not None:
                     base, edit_mask_np = res

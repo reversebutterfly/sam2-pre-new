@@ -707,7 +707,7 @@ def optimize_unified(
 
     # ── Deltas (identical init for both regimes) ─────────────────────────
     insert_deltas, insert_eps, insert_bases_t = {}, {}, {}
-    insert_edit_mask_t = {}
+    insert_eps_map = {}  # Per-pixel ε budget when hi-fi is enabled.
     for si, slot in enumerate(schedule):
         base_np = insert_bases_np[si]
         base_t = torch.from_numpy(base_np).float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
@@ -715,8 +715,12 @@ def optimize_unified(
         insert_deltas[si] = torch.zeros(1, 3, H, W, device=device, requires_grad=True)
         insert_eps[si] = cfg.epsilon_strong if slot.frame_type == "strong" else cfg.epsilon_weak
 
-    # Edit-mask hard clamp (hi-fi decoy only): restrict δ to the dilated paste
-    # region so identity outside the pasted object is preserved exactly.
+    # Hi-fi decoy (Pilot C, 2026-04-21): spatial ε budget. Inside the dilated
+    # paste region keep full ε_ins (8/255); outside shrink to eps_outside
+    # (2/255) so the global adversarial field is preserved but bounded small.
+    # Hard-clamp (Pilot A/B) regressed the attack because the signal is
+    # distributed across the whole frame, not only inside the paste region.
+    eps_outside = 2.0 / 255
     if regime == "decoy" and high_fidelity_insert:
         for si in insert_deltas:
             em_np = insert_edit_masks_np.get(si)
@@ -724,7 +728,11 @@ def optimize_unified(
                 continue
             em_t = torch.from_numpy(em_np.astype(np.float32))
             em_t = em_t.unsqueeze(0).unsqueeze(0).to(device)  # [1,1,H,W]
-            insert_edit_mask_t[si] = em_t.detach()
+            eps_in = insert_eps[si]
+            eps_map = em_t * eps_in + (1.0 - em_t) * eps_outside
+            # Broadcast to [1,3,H,W] for elementwise clamp.
+            eps_map = eps_map.expand(1, 3, H, W).contiguous()
+            insert_eps_map[si] = eps_map.detach()
 
     orig_deltas, orig_eps = {}, {}
     for oi in perturb_set:
@@ -879,9 +887,13 @@ def optimize_unified(
                 g = insert_deltas[si].grad
                 if g is not None:
                     insert_deltas[si].data -= alpha_ins[si] * g.sign()
-                    insert_deltas[si].data.clamp_(-insert_eps[si], insert_eps[si])
-                    if si in insert_edit_mask_t:
-                        insert_deltas[si].data *= insert_edit_mask_t[si]
+                    if si in insert_eps_map:
+                        # Spatial ε budget: elementwise clamp to [-eps_map, eps_map].
+                        em = insert_eps_map[si]
+                        insert_deltas[si].data = torch.clamp(
+                            insert_deltas[si].data, -em, em)
+                    else:
+                        insert_deltas[si].data.clamp_(-insert_eps[si], insert_eps[si])
             for oi in a_orig:
                 g = orig_deltas[oi].grad
                 if g is not None:
