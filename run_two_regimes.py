@@ -98,6 +98,12 @@ ATTACK_PREFIX_SUPP = 15   # Suppression: 15-frame prefix (already persistent)
 ATTACK_PREFIX_DECOY = 15  # Decoy: same 15f prefix, but cover_prefix adds 3rd insert at f13
 EVAL_START = 10           # Disjoint eval window start (inclusive)
 EVAL_END = 15             # Legacy: short-horizon eval end (for backwards compat)
+# Round-1 universal redesign: extend PGD supervision horizon to cover post-prefix
+# clean frames (attacks FIFO self-healing directly via memory-attention gradient).
+# `min(T, EVAL_START + EVAL_HORIZON)` is used in optimize_unified.
+EVAL_HORIZON = 7          # 7-frame supervision window (f10..f16) — covers 2
+                          # frames past 15-frame attack prefix without blowing up
+                          # rollout memory. Bump to 10 if VRAM allows.
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -307,17 +313,55 @@ def _supp_read(all_outs, masks_uint8, eval_mod, eval_orig, device,
     return loss / max(n, 1)
 
 
-# ── Decoy losses (v4: suppress + redirect cooperation) ──────────────────────
+# ── Decoy losses (v4 + round-1 universal redesign) ─────────────────────────
 #
 # Design principle: perturbations and inserts have DIFFERENT attack roles.
 #   Perturbations: SUPPRESS — weaken true-location memories (independently useful)
 #   Inserts: REDIRECT — write confident decoy memories (independently useful)
 #   Combined: suppression creates vulnerability, decoy fills the gap (synergy)
 #
-# Loss formulas (from GPT-5.4 review):
-#   Originals: L = q(T) + λ_band * [ReLU(z - z_hi) + ReLU(z_lo - z)]
-#   Inserts:   L = -q(D) + α*q(T) + β*ReLU(τ_pos - z)
-#   Rollout:   L = ReLU(m + q(T) - q(D)) + β*ReLU(τ_pos - z)
+# Round-1 redesign:
+#   - Split true support into `core` (eroded GT) and `ring` (annulus inside GT)
+#     to prevent the "smear across GT" cheat where full-region mean rank is
+#     satisfied by diffuse activation over the whole true object.
+#   - Top-k mean rank (20%) instead of full-region mean: forces sharp decoy
+#     peak above sharp ring peak, not just average elevation.
+
+
+def _masked_pos(logits, mask, margin):
+    """Hinge penalty: push logits in masked region UP above `margin`.
+
+    Uses softplus(margin - logits*mask), normalized by mask area.
+    """
+    s = mask.sum()
+    if s.item() == 0:
+        return torch.tensor(0.0, device=logits.device)
+    return F.softplus(margin - logits * mask).sum() / (s + 1e-6)
+
+
+def _masked_neg(logits, mask, margin=0.0):
+    """Hinge penalty: push logits in masked region DOWN below `-margin`.
+
+    Uses softplus(logits*mask + margin), normalized by mask area.
+    """
+    s = mask.sum()
+    if s.item() == 0:
+        return torch.tensor(0.0, device=logits.device)
+    return F.softplus(logits * mask + margin).sum() / (s + 1e-6)
+
+
+def _topk_mean(logits, mask, k_frac=0.2):
+    """Top-k mean of logits inside `mask` (binary). k = k_frac * region size.
+
+    Forces rank/margin terms to compare SHARP peaks, not diffuse averages.
+    """
+    bmask = mask > 0.5
+    values = logits[bmask]
+    if values.numel() == 0:
+        return torch.tensor(0.0, device=logits.device)
+    k = max(1, int(values.numel() * k_frac))
+    topk = values.topk(k).values
+    return topk.mean()
 
 def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device,
                  masks_uint8=None, insert_strength=1.0,
@@ -376,19 +420,34 @@ def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device,
         loss_orig = loss_orig + w * fl
         n_orig += 1
 
-    # === DECOY ACTIVATION on inserted frames ===
-    # insert_strength interpolates between v4 (1.0) and v4.1 (2.0):
-    #   s=1.0: decoy_margin=0.9, suppress_offset=0, rank_margin=0.8, score_margin=1.0
-    #   s=2.0: decoy_margin=2.0, suppress_offset=1.0, rank_margin=2.0, score_margin=2.0
+    # === DECOY ACTIVATION on inserted frames (round-1 annulus + top-k rank) ===
+    # Split true support into `core` (eroded GT, deep interior) and `ring`
+    # (annulus inside GT outside core, excluding decoy overlap). Ring is pushed
+    # down harder than core to prevent the "smear across GT" solution.
+    # Top-k mean (20%) for rank comparison forces sharp decoy peak above
+    # sharp ring peak.
     s = insert_strength
     decoy_m = 0.9 + (s - 1.0) * 1.1     # 0.9 → 2.0
-    supp_off = max(0.0, (s - 1.0) * 1.0) # 0.0 → 1.0
     rank_m = 0.8 + (s - 1.0) * 1.2       # 0.8 → 2.0
     score_m = 1.0 + (s - 1.0) * 1.0      # 1.0 → 2.0
-    w_decoy = 1.0 + (s - 1.0) * 0.5      # 1.0 → 1.5
-    w_supp = 0.5 + (s - 1.0) * 0.5       # 0.5 → 1.0
-    w_rank = 1.0 + (s - 1.0) * 0.5       # 1.0 → 1.5
-    w_score = 0.5 + (s - 1.0) * 0.3      # 0.5 → 0.8
+    bridge_m = 0.2                        # light pressure, keeps region contiguous
+    ring_m = 0.5                          # stronger than core push-down
+    core_m = 0.5
+
+    # Weights (round-1 redesign; reviewer-prescribed)
+    w_decoy_base = 1.0
+    w_ring_base = 1.5
+    w_core_base = 0.5
+    w_bridge_base = 0.05
+    w_rank_base = 1.0
+    w_score_base = 0.4
+    # Scale with insert_strength but gently
+    w_decoy = w_decoy_base * s
+    w_ring = w_ring_base * (0.5 + 0.5 * s)
+    w_core = w_core_base
+    w_bridge = w_bridge_base
+    w_rank = w_rank_base * s
+    w_score = w_score_base * s
 
     ins_indices = idx_map["insert_mod_indices"]
     for cursor in range(len(schedule)):
@@ -404,24 +463,41 @@ def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device,
             continue
         td = _resize_td(targets[key], logits.shape[-2:])
 
+        core_mask = td.get("core")
+        bridge_mask = td.get("bridge")
         decoy_mask = td.get("decoy")
         suppress_mask = td.get("suppress")
         fl = torch.tensor(0.0, device=device)
 
+        # Compute ring = suppress & ~core (annulus inside GT, excluding core).
+        # suppress = GT\decoy, core = eroded GT \ decoy, so ring = GT \ core \ decoy.
+        if core_mask is not None and suppress_mask is not None:
+            ring_mask = suppress_mask * (1.0 - core_mask)
+        else:
+            ring_mask = suppress_mask
+
         # Push UP at decoy region
-        if decoy_mask is not None and decoy_mask.sum() > 0:
-            fl = fl + w_decoy * F.softplus(decoy_m - logits * decoy_mask).sum() / (decoy_mask.sum() + 1e-6)
+        if decoy_mask is not None:
+            fl = fl + w_decoy * _masked_pos(logits, decoy_mask, decoy_m)
 
-        # Push DOWN at true region
-        if suppress_mask is not None and suppress_mask.sum() > 0:
-            fl = fl + w_supp * F.softplus(logits * suppress_mask + supp_off).sum() / (suppress_mask.sum() + 1e-6)
+        # Push UP at bridge (light — keeps decoy region visually connected)
+        if bridge_mask is not None:
+            fl = fl + w_bridge * _masked_pos(logits, bridge_mask, bridge_m)
 
-        # Rank: decoy must beat true by margin
-        if (decoy_mask is not None and suppress_mask is not None
-                and decoy_mask.sum() > 0 and suppress_mask.sum() > 0):
-            true_mean = (logits * suppress_mask).sum() / (suppress_mask.sum() + 1e-6)
-            decoy_mean = (logits * decoy_mask).sum() / (decoy_mask.sum() + 1e-6)
-            fl = fl + w_rank * F.softplus(true_mean - decoy_mean + rank_m)
+        # Push DOWN at ring (hard — prevents smear into GT annulus)
+        if ring_mask is not None:
+            fl = fl + w_ring * _masked_neg(logits, ring_mask, ring_m)
+
+        # Push DOWN at core (mild — core already deep interior, weaker pressure)
+        if core_mask is not None:
+            fl = fl + w_core * _masked_neg(logits, core_mask, core_m)
+
+        # Rank: top-20% of decoy logits must beat top-20% of ring logits + margin
+        if (decoy_mask is not None and ring_mask is not None
+                and decoy_mask.sum() > 0 and ring_mask.sum() > 0):
+            ring_topk = _topk_mean(logits, ring_mask, k_frac=0.2)
+            decoy_topk = _topk_mean(logits, decoy_mask, k_frac=0.2)
+            fl = fl + w_rank * F.softplus(ring_topk - decoy_topk + rank_m)
 
         # Object score: positive (confident wrong, not absent)
         sc = out.get("object_score_logits")
@@ -489,8 +565,10 @@ def _decoy_read(all_outs, masks_uint8, eval_mod, eval_orig, decoy_offset,
         if sc is not None:
             fl = fl + 0.4 * object_score_positive_loss(sc, margin=0.5)
 
-        # Front-loaded weighting (closer frames matter more)
-        w = max(0.3, 2.0 - rank * 0.2)
+        # Front-loaded weighting (closer frames matter more).
+        # Round-1: floor raised 0.3 → 0.5 and decay slowed 0.2 → 0.15 so that
+        # post-prefix frames (f15+) carry non-trivial weight under EVAL_HORIZON=10.
+        w = max(0.5, 2.0 - rank * 0.15)
         loss = loss + w * fl
         n += 1
 
@@ -557,7 +635,10 @@ def optimize_unified(
         orig_eps[oi] = 2.0 / 255 if oi == 0 else 4.0 / 255
 
     # ── Eval indices ─────────────────────────────────────────────────────
-    eval_orig = [i for i in range(EVAL_START, min(T, EVAL_END))]
+    # Use EVAL_HORIZON (post-prefix coverage) for decoy, legacy EVAL_END for suppression
+    eval_end_effective = (min(T, EVAL_START + EVAL_HORIZON)
+                          if regime == "decoy" else min(T, EVAL_END))
+    eval_orig = [i for i in range(EVAL_START, eval_end_effective)]
     eval_mod = [idx_map["orig_to_mod"][j] for j in eval_orig]
 
     # ── PGD params ────────────────────────────────────────────────────────

@@ -252,3 +252,131 @@ MemoryShield is a video preprocessor that protects datasets against SAM2 segment
 ## Method Description
 
 MemoryShield's decoy regime uses teacher-based memory cooperation to achieve persistent object relocation in SAM2 video segmentation. A synthetic "teacher video" with the object relocated to the decoy position is pre-generated and run through SAM2 to extract target memory features (maskmem_features, obj_ptr). During PGD optimization, inserted frames match these teacher memories (spatial-aware cosine + smooth-L1), pre-insert frames weaken the true-location anchor (anti-anchor cosine divergence), and post-insert frames reinforce the decoy trajectory. The teacher is generated on the modified timeline (including insert slots) to match the FIFO occupancy pattern of the attacked video. On favorable videos (uniform background, distinctive object), this achieves 65%+ J&F degradation that persists 30+ frames beyond the attack prefix.
+
+## Universal Decoy Review Round 1 (2026-04-20)
+
+### Assessment (Summary)
+- Score: **3.5/10** for current v4 as a **universal decoy-only** method
+- Score: **5.5/10** for the proposed Stage1-4 redesign as a **universal decoy-only** method
+- Score: **7/10** if the redesign is reframed as the **decoy branch inside a unified adaptive attack** (decoy when viable, suppression fallback otherwise)
+- Verdict: **Not ready as a universal decoy-only claim**
+
+### Key Criticisms
+
+1. **Universal decoy-only is probably the wrong target.**
+   If some clips have no SAM2-trackable decoy offset under the perturbation budget, no amount of PGD cleanup makes the method universal in the user's stated sense.
+2. **v4 is still a short-horizon output attack.**
+   The current optimizer supervises `f10:f14` only, so any hidden state that looks decoy-like over five frames can win even if it self-heals immediately afterward.
+3. **Teacher viability is necessary but not sufficient.**
+   A synthetic pasted-object video can reveal whether a decoy offset is trackable by SAM2, but that does not guarantee the attack can reach the same basin under the given epsilon budget.
+4. **Teacher matching should be conditional, not the first hammer.**
+   If longer-horizon output supervision already fixes persistence on difficult clips, teacher features add complexity without proving necessity.
+
+### Final Recommendation
+
+1. **Do not sell v4 or Stage1-4 as a universal decoy-only method yet.**
+2. **Best universal story:** build a unified attack that auto-selects between:
+   - `decoy` when a viable offset exists
+   - `suppression` when no viable decoy exists
+3. **Best next decoy-only engineering path:**
+   - Stage 1: viability-aware offset scan
+   - Stage 2: extended read horizon + annulus/top-k rank
+   - Stage 3: add teacher memory only if Stage 1 finds a viable target and Stage 2 still fails
+   - Stage 4: base-only sanity check as a cheap guardrail
+
+### Priority Round-1 Actions
+
+1. Implement **Stage 1 viability scan** and use it to choose offsets automatically.
+2. Implement **Stage 2 extended-horizon supervision** (`EVAL_END` to ~20-25, stronger late-frame weights).
+3. Add **annulus / top-k rank** to remove the smeared-mask cheat.
+4. Delay teacher features until after the first Stage1+2 pilot on `breakdance`, `car-shadow`, and one easy success clip.
+
+### Claim Boundary
+
+- If 2-3 clips have no viable offset under the scan, then **universal decoy-only is not an honest claim**.
+- In that case, the honest contribution is:
+  - a **testable pre-attack viability predictor** for when relocation should work, and/or
+  - a **unified adaptive attack** that chooses the strongest regime automatically.
+
+---
+
+# New Auto-Review Loop (2026-04-20): Universal Decoy
+
+Continues beyond the previous 4-round loop that ended at score 6/10. User ask:
+"为我完善 decoy 的实现，我认为做一个通用的比较好." — redesign decoy toward a universal (per-clip-tuning-free) method.
+
+## Round 1 (2026-04-20)
+
+### Assessment (Summary)
+- **Score (current v4 as universal decoy-only)**: 3.5/10
+- **Score (proposed Stage1-4 as universal decoy-only)**: 5.5/10
+- **Score (same design as decoy branch of unified adaptive attack)**: 7/10 → **retracted to 4.5/10** after user challenge (see 5e below).
+- **Initial verdict**: Not ready; decoy-only universalization likely unachievable; Stage1-2 redesign is still the right first implementation step.
+- **Revised verdict (post 5e)**: **Adaptive architecture is post-hoc rationalization** — suppression strictly dominates decoy on 10/10 DAVIS clips. Publishable versions ranked: **(a) Suppression-only > (b) Two-regimes IF decoy proves a differentiator > (c) Adaptive (weakest)**. One cheap decisive test (SAM2Long transfer, ~4 GPU-h) should decide decoy's fate; further decoy engineering without that signal is sunk-cost rationalization.
+
+### Reviewer Raw Response
+Saved in REVIEW_DECOY_DIAGNOSIS.md round 5d (full transcript in threadId 019da669-70ff-7562-8d14-925a94dcfbaf). Key points:
+- Stage 1 (viability-aware selection) is **the** highest-value first fix — tells you whether you're wasting PGD on a dead offset.
+- Stage 2 (extended horizon + annulus/top-k rank) is the second priority — fixes self-healing gradient absence + the smeared-mask cheat.
+- Stage 3 (teacher features) only if Stage 1 finds viable offset AND Stage 2 still fails.
+- Stage 4 (base-only sanity) is diagnostic, not core.
+- Primary failure risk: **viability-to-reachability gap** — a decoy that is trackable in the pasted synthetic video may still be unreachable from the real attacked rollout under the perturbation budget.
+
+### Actions Planned (Round 1 Phase C)
+1. Stage 2 full: `EVAL_END` dynamic (= EVAL_START + 10), annulus + top-k rank in `_decoy_write`, weight-decay floor 0.3 → 0.5.
+2. Stage 1 diagnostic only: log viability metrics of the current-selection offset (no replacement yet).
+3. 3-clip pilot: blackswan (easy) + breakdance + car-shadow.
+
+### 5e — Adaptive architecture rejected (user challenge, 2026-04-20)
+
+User pushed back: "isn't suppression strictly dominant over decoy? Is adaptive even justifiable?" 10-DAVIS data answers this unambiguously.
+
+| video | supp drop | decoy drop | winner |
+|---|---|---|---|
+| all 10/10 | mean **0.744** | mean **0.547** | **suppression** |
+
+Suppression wins every single clip. Mean absolute J&F-drop gap = 0.20. Decoy is strictly dominated under same budget on the main metric.
+
+**Reviewer's revised verdict** (full transcript in thread 019da669-70ff-7562-8d14-925a94dcfbaf):
+- Adaptive is "engineering cope, not a scientific contribution" on current evidence
+- Reviewers will ask "if suppression wins 10/10 on same budget, why ever choose decoy?" — and we cannot answer from current data
+- **Three framings ranked**:
+  - (a) **Suppression-only**: cleanest, strongest numbers, most defensible ← **recommended default**
+  - (b) **Two-regimes**: requires ONE proven differentiator where decoy materially beats suppression (candidates below)
+  - (c) **Adaptive**: worst — no upside on current metric, invites obvious objection
+- **Decoy rescue criterion**: ONE cheap decisive test must land. Best candidate = **SAM2Long (confidence-gated memory) transfer test**:
+  - If `RetentionRatio_Decoy > RetentionRatio_Suppression` with meaningful absolute effect → keep decoy as secondary regime
+  - Otherwise → demote to appendix / future work
+  - Cost: ~4 GPU-h on existing attacked clips
+- **Sunk-cost warning**: "You are evaluating decoy by suppression's metric, then trying to save it with a story it has not yet proven."
+
+### Results
+
+**Pilot_r1b (Stage 2 implementation + 3-clip test)**: **Untested due to OOM**.
+- All 3 videos (blackswan, breakdance, car-shadow) OOMed during decoy insert-only warmup stage.
+- Another user's process at 20G on GPU 0; only 11.7G free when our process hit allocation peak.
+- Clean baselines captured; decoy results are **all NaN**.
+- Stage 2 design changes (EVAL_HORIZON=7, annulus + top-k, expandable_segments flag) **did not get a valid evaluation**.
+
+Implementation status:
+- `run_two_regimes.py`: Stage 2 code changes pushed to server (`_decoy_write` rewritten with annulus + top-k, `_decoy_read` weight floor raised to 0.5, `EVAL_HORIZON=7`).
+- Helper functions `_masked_pos`, `_masked_neg`, `_topk_mean` added.
+- Stage 1 viability scan: **not implemented** (waiting on decision whether to continue decoy engineering at all).
+
+### Decision Required Before Round 2
+
+Given the 5e verdict, three options:
+
+| option | cost | outcome |
+|---|---|---|
+| **A — SAM2Long transfer test** on existing v4 attacked clips | ~4 GPU-h | Resolves decoy's fate. If decoy wins → keep two-regimes. If not → pivot to suppression-only. |
+| **B — Continue decoy engineering** (Stage 2 validation, Stage 1 viability, full 10-video rerun) | 2-3 GPU-days | Best case: match suppression on viable clips. Sunk-cost risk. |
+| **C — Abandon decoy entirely**, commit to suppression-only paper | 0 | Clean pivot. Reallocate GPU to suppression ablations, codec/defense tests. |
+
+**Reviewer recommendation**: A or C. B is the sunk-cost trap.
+
+### Status
+
+- **Round 1 Phase A/C complete**; pilot OOMed, no decoy metrics obtained.
+- **Loop paused pending user decision** on A/B/C.
+- Next action: user selects path forward.
