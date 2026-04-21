@@ -15,7 +15,10 @@ import torch
 import torch.nn.functional as F
 
 from .config import MemShieldConfig
-from .decoy import find_decoy_region, create_bridge_mask, create_decoy_base_frame, shift_mask
+from .decoy import (
+    find_decoy_region, find_decoy_candidates, create_bridge_mask,
+    create_decoy_base_frame, create_decoy_base_frame_hifi, shift_mask,
+)
 from .losses import (
     decoy_target_loss, fake_uint8_quantize,
     differentiable_ssim,
@@ -48,6 +51,9 @@ def build_role_targets(
     perturb_set: Set[int],
     device: torch.device,
     offset_ratio: float = 0.75,
+    high_fidelity_insert: bool = False,
+    seam_dilate_px: int = 5,
+    safety_margin: int = 8,
 ) -> Dict:
     """Build per-frame pseudo-targets sharing ONE decoy direction.
 
@@ -56,6 +62,7 @@ def build_role_targets(
       'targets': {frame_or_slot_key: [1,1,H,W] float tensor}
       'decoy_masks': {frame_idx: np.ndarray} for visualization
       'insert_bases': {slot_i: [H,W,3] uint8} sharp base frames
+      'insert_edit_masks': {slot_i: [H,W] uint8} (only when high_fidelity_insert)
     """
     import cv2
 
@@ -67,14 +74,20 @@ def build_role_targets(
     ref_mask = masks_uint8[ref_idx]
     ref_frame = frames_uint8[ref_idx]
 
-    # Find ONE shared decoy direction + detect if it's a natural distractor
-    _, offset, is_natural_distractor = find_decoy_region(
-        ref_mask, ref_frame, offset_ratio)
+    if high_fidelity_insert:
+        candidates, is_natural_distractor = find_decoy_candidates(
+            ref_mask, ref_frame, offset_ratio, top_k=6)
+        offset = candidates[0][0]
+    else:
+        _, offset, is_natural_distractor = find_decoy_region(
+            ref_mask, ref_frame, offset_ratio)
+        candidates = [(offset, 0.0)]
     dy, dx = offset
 
     targets = {}
     decoy_masks_np = {}
     insert_bases = {}
+    insert_edit_masks = {}
 
     def erode_mask(mask, iters=2):
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
@@ -249,7 +262,41 @@ def build_role_targets(
             )
 
         # Fix C1: pass shared offset to base frame constructor
-        base = create_decoy_base_frame(frame_after, mask_after, offset)
+        if high_fidelity_insert:
+            # Identity anchor = frame_prev (clean frame just BEFORE insertion
+            # point). LPIPS reference in measure_fidelity.py also uses
+            # frame_prev, so this keeps outside-paste pixels at LPIPS = 0.
+            frame_prev = frames_uint8[pos]
+            # Try candidate offsets in rank order; pick first border-safe one.
+            base = None
+            edit_mask_np = None
+            chosen_offset = offset
+            for cand_off, _ in candidates:
+                res = create_decoy_base_frame_hifi(
+                    frame_prev, frame_after, mask_after, cand_off,
+                    seam_dilate_px=seam_dilate_px,
+                    safety_margin=safety_margin,
+                )
+                if res is not None:
+                    base, edit_mask_np = res
+                    chosen_offset = cand_off
+                    break
+            if base is None:
+                # Last-resort fallback: old pipeline (alpha-blend is possible).
+                base = create_decoy_base_frame(frame_after, mask_after, offset)
+                paste_region = shift_mask((mask_after > 0).astype(np.uint8),
+                                          offset[0], offset[1])
+                if seam_dilate_px > 0:
+                    ker = cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE,
+                        (2 * seam_dilate_px + 1, 2 * seam_dilate_px + 1))
+                    edit_mask_np = cv2.dilate(paste_region, ker, iterations=1)
+                else:
+                    edit_mask_np = paste_region
+                edit_mask_np = (edit_mask_np > 0).astype(np.uint8)
+            insert_edit_masks[slot_i] = edit_mask_np
+        else:
+            base = create_decoy_base_frame(frame_after, mask_after, offset)
 
         targets[("insert", slot_i)] = td
         insert_bases[slot_i] = base
@@ -261,6 +308,7 @@ def build_role_targets(
         "targets": targets,
         "decoy_masks": decoy_masks_np,
         "insert_bases": insert_bases,
+        "insert_edit_masks": insert_edit_masks,
     }
 
 

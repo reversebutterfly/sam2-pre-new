@@ -177,6 +177,7 @@ def _build_decoy_bases_and_targets(
     perturb_set: Set[int],
     device: torch.device,
     surrogate=None,
+    high_fidelity_insert: bool = False,
 ) -> Tuple[Dict[int, np.ndarray], dict, Tuple[int, int], Optional[List[dict]]]:
     """Decoy bases (relocated object) + role targets + teacher trajectory.
 
@@ -187,6 +188,7 @@ def _build_decoy_bases_and_targets(
     """
     role_data = build_role_targets(
         masks_uint8, frames_uint8, schedule, perturb_set, device,
+        high_fidelity_insert=high_fidelity_insert,
     )
     offset = role_data["decoy_offset"]
 
@@ -664,6 +666,7 @@ def optimize_unified(
     ablation: str = "combined",
     insert_strength: float = 1.0,
     use_teacher: bool = False,
+    high_fidelity_insert: bool = False,
 ) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], Dict]:
     """Unified PGD for both regimes. Only loss + insert bases differ.
 
@@ -697,17 +700,31 @@ def optimize_unified(
         insert_bases_np, role_data, decoy_offset, teacher_features = \
             _build_decoy_bases_and_targets(
                 frames_uint8, masks_uint8, schedule, perturb_set, device,
-                surrogate=teacher_surr)
+                surrogate=teacher_surr,
+                high_fidelity_insert=high_fidelity_insert)
         decoy_targets = role_data["targets"]
+        insert_edit_masks_np = role_data.get("insert_edit_masks", {})
 
     # ── Deltas (identical init for both regimes) ─────────────────────────
     insert_deltas, insert_eps, insert_bases_t = {}, {}, {}
+    insert_edit_mask_t = {}
     for si, slot in enumerate(schedule):
         base_np = insert_bases_np[si]
         base_t = torch.from_numpy(base_np).float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
         insert_bases_t[si] = base_t.detach()
         insert_deltas[si] = torch.zeros(1, 3, H, W, device=device, requires_grad=True)
         insert_eps[si] = cfg.epsilon_strong if slot.frame_type == "strong" else cfg.epsilon_weak
+
+    # Edit-mask hard clamp (hi-fi decoy only): restrict δ to the dilated paste
+    # region so identity outside the pasted object is preserved exactly.
+    if regime == "decoy" and high_fidelity_insert:
+        for si in insert_deltas:
+            em_np = insert_edit_masks_np.get(si)
+            if em_np is None:
+                continue
+            em_t = torch.from_numpy(em_np.astype(np.float32))
+            em_t = em_t.unsqueeze(0).unsqueeze(0).to(device)  # [1,1,H,W]
+            insert_edit_mask_t[si] = em_t.detach()
 
     orig_deltas, orig_eps = {}, {}
     for oi in perturb_set:
@@ -863,6 +880,8 @@ def optimize_unified(
                 if g is not None:
                     insert_deltas[si].data -= alpha_ins[si] * g.sign()
                     insert_deltas[si].data.clamp_(-insert_eps[si], insert_eps[si])
+                    if si in insert_edit_mask_t:
+                        insert_deltas[si].data *= insert_edit_mask_t[si]
             for oi in a_orig:
                 g = orig_deltas[oi].grad
                 if g is not None:
@@ -1340,6 +1359,13 @@ def main():
                         help="Ablation mode: combined (default), perturb_only, insert_only")
     parser.add_argument("--insert_strength", type=float, default=1.0,
                         help="Insert loss strength: 1.0=v4 gentle, 2.0=v4.1 aggressive")
+    parser.add_argument("--high_fidelity_insert", action="store_true",
+                        help="Hi-fi insert pipeline: f_prev identity anchor, "
+                             "border-safe Poisson clone (no alpha fallback), "
+                             "and hard-clamp PGD delta to dilated paste region. "
+                             "Reviewer Pilot A: minimum fidelity fix.")
+    parser.add_argument("--seam_dilate_px", type=int, default=5,
+                        help="Seam ring width in pixels for edit support mask.")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -1462,7 +1488,8 @@ def main():
                     surrogate, frames[:ap], masks[:ap], schedule, cfg, regime,
                     no_teacher=args.no_teacher, ablation=args.ablation,
                     insert_strength=args.insert_strength,
-                    use_teacher=args.use_teacher)
+                    use_teacher=args.use_teacher,
+                    high_fidelity_insert=args.high_fidelity_insert)
                 opt_time = time.time() - t0
 
                 # Build full video: attacked prefix + clean tail

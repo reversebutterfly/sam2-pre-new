@@ -201,6 +201,172 @@ def shift_mask(mask: np.ndarray, dy: int, dx: int) -> np.ndarray:
     return shifted
 
 
+def find_decoy_candidates(
+    mask: np.ndarray,
+    frame: np.ndarray,
+    offset_ratio: float = 0.5,
+    top_k: int = 6,
+) -> Tuple[list, bool]:
+    """Return top-K decoy offsets ranked by (bg_fraction, color_sim).
+
+    Same scoring as find_decoy_region but keeps all candidates. Used by
+    build_role_targets to iterate until a border-safe placement is found.
+
+    Returns:
+        (candidates, is_natural_distractor) where candidates is a list of
+        ((dy, dx), score) tuples sorted by score descending.
+    """
+    H, W = mask.shape
+    ys, xs = np.where(mask > 0)
+    if len(ys) == 0:
+        return [((0, 0), 0.0)], False
+
+    obj_h = ys.max() - ys.min() + 1
+    obj_w = xs.max() - xs.min() + 1
+    obj_color = frame[mask > 0].mean(axis=0) if (mask > 0).any() else np.zeros(3)
+
+    directions = [
+        (0, 1), (0, -1), (1, 0), (-1, 0),
+        (1, 1), (1, -1), (-1, 1), (-1, -1),
+    ]
+    ratios = [offset_ratio, offset_ratio * 0.7, offset_ratio * 1.3]
+
+    candidates = []
+    best_color_sim = 0.0
+    for r in ratios:
+        shift_px = max(int(max(obj_h, obj_w) * r), 10)
+        for dy_dir, dx_dir in directions:
+            dy = int(dy_dir * shift_px)
+            dx = int(dx_dir * shift_px)
+            shifted = shift_mask(mask, dy, dx)
+            retained = shifted.sum() / max(mask.sum(), 1)
+            if retained < 0.3:
+                continue
+            overlap = (shifted > 0) & (mask > 0)
+            bg_fraction = 1.0 - overlap.sum() / max(shifted.sum(), 1)
+            decoy_pixels = frame[shifted > 0]
+            if len(decoy_pixels) > 0:
+                decoy_color = decoy_pixels.mean(axis=0)
+                color_sim = 1.0 / (np.linalg.norm(obj_color - decoy_color) + 1.0)
+            else:
+                color_sim = 0.0
+            score = 0.7 * bg_fraction + 0.3 * color_sim
+            candidates.append(((dy, dx), score))
+            best_color_sim = max(best_color_sim, color_sim)
+
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    seen = set()
+    dedup = []
+    for off, sc in candidates:
+        if off in seen:
+            continue
+        seen.add(off)
+        dedup.append((off, sc))
+        if len(dedup) >= top_k:
+            break
+    if not dedup:
+        dedup = [((0, 0), 0.0)]
+    is_natural_distractor = best_color_sim > 0.15
+    return dedup, is_natural_distractor
+
+
+def _is_border_safe(
+    mask_after_bbox: Tuple[int, int, int, int],
+    paste_center: Tuple[int, int],
+    H: int,
+    W: int,
+    safety_margin: int = 8,
+) -> bool:
+    """Check that the paste bbox with safety margin is fully inside [H, W]."""
+    y0, y1, x0, x1 = mask_after_bbox
+    cy, cx = paste_center
+    half_h = (y1 - y0) // 2
+    half_w = (x1 - x0) // 2
+    py0 = cy - half_h - safety_margin
+    py1 = cy + half_h + safety_margin
+    px0 = cx - half_w - safety_margin
+    px1 = cx + half_w + safety_margin
+    return (py0 >= 0 and py1 < H and px0 >= 0 and px1 < W)
+
+
+def create_decoy_base_frame_hifi(
+    frame_prev: np.ndarray,
+    frame_after: np.ndarray,
+    mask_after: np.ndarray,
+    decoy_offset: Tuple[int, int],
+    seam_dilate_px: int = 5,
+    safety_margin: int = 8,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """High-fidelity decoy base: use frame_prev as identity anchor.
+
+    Differs from create_decoy_base_frame:
+      - Background = clean frame_prev (NO inpainting of frame_after → no
+        artifacts at the original object location, LPIPS vs f_prev stays low).
+      - Object crop sourced from frame_after (preserves real appearance).
+      - Border safety check: if paste region + safety_margin exits image,
+        return None (caller should try another offset; NO alpha fallback).
+      - Returns (base_frame, edit_support_mask) where edit_support_mask is
+        the pasted object region dilated by seam_dilate_px. PGD should
+        restrict delta to this region to preserve identity elsewhere.
+
+    Args:
+        frame_prev: [H, W, 3] uint8 RGB — clean frame just before insertion
+                    point (identity anchor).
+        frame_after: [H, W, 3] uint8 RGB — clean frame just after insertion
+                     point (source of object appearance).
+        mask_after: [H, W] uint8 GT mask of object in frame_after.
+        decoy_offset: (dy, dx) shared decoy direction.
+        seam_dilate_px: dilation radius for the edit support ring.
+        safety_margin: pixels of margin required between paste bbox and image border.
+
+    Returns:
+        (base_frame [H,W,3] uint8, edit_mask [H,W] uint8) on success, or
+        None if placement is not border-safe.
+    """
+    H, W = frame_prev.shape[:2]
+    mask_ref = (mask_after > 0).astype(np.uint8)
+    dy, dx = decoy_offset
+
+    ys, xs = np.where(mask_ref > 0)
+    if len(ys) == 0:
+        return frame_prev.copy(), np.zeros((H, W), dtype=np.uint8)
+
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    cy_obj = (y0 + y1) // 2 + dy
+    cx_obj = (x0 + x1) // 2 + dx
+
+    if not _is_border_safe((y0, y1, x0, x1), (cy_obj, cx_obj), H, W, safety_margin):
+        return None
+
+    frame_after_bgr = cv2.cvtColor(frame_after, cv2.COLOR_RGB2BGR)
+    frame_prev_bgr = cv2.cvtColor(frame_prev, cv2.COLOR_RGB2BGR)
+
+    obj_crop_bgr = frame_after_bgr[y0:y1, x0:x1]
+    mask_crop = mask_ref[y0:y1, x0:x1] * 255
+
+    try:
+        result_bgr = cv2.seamlessClone(
+            obj_crop_bgr, frame_prev_bgr, mask_crop,
+            (cx_obj, cy_obj), cv2.NORMAL_CLONE)
+    except cv2.error:
+        return None
+
+    result = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
+
+    # Edit support = paste region dilated by seam_dilate_px
+    paste_region = shift_mask(mask_ref, dy, dx)
+    if seam_dilate_px > 0:
+        ker_sz = max(3, 2 * seam_dilate_px + 1)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ker_sz, ker_sz))
+        edit_mask = cv2.dilate(paste_region, kernel, iterations=1)
+    else:
+        edit_mask = paste_region
+    edit_mask = (edit_mask > 0).astype(np.uint8)
+
+    return result, edit_mask
+
+
 def create_decoy_base_frame(
     frame_after: np.ndarray,
     mask_after: np.ndarray,
