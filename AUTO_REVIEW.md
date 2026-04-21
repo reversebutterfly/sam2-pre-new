@@ -464,3 +464,180 @@ Per-video LPIPS on inserts: bmx-trees 0.28 (worst, also highest SAM2Long retenti
 - Phase D blocked on GPU availability.
 - Fidelity baseline established: inserts (not perturbations) are the fidelity target.
 - Next: confirm soft CVaR fix reverses Stage 2 regression on cows/dog, then consider perceptual-loss upgrade for insert fidelity.
+
+## Round 3 (2026-04-21) — NEW DIRECTIVE: no cost cap, reuse all useful modules
+
+### New Evidence
+
+- **Soft CVaR fix validated on `cows`**: Stage 2 hard-top-k drop `0.066` -> Round 2 soft-CVaR drop `0.974`, fully recovering v4-level behavior.
+- This strongly supports the diagnosis that **hard top-k was the regression source**, not annulus decomposition itself.
+- User directive changed from "minimum-cost fix" to **"optimal decoy design regardless of implementation effort; reuse previously tried modules"**.
+
+### Updated Assessment
+
+- **Score (Round 2 stack if cows/dog/bmx all rebound to v4-or-better)**: **6.5/10**
+- **Score ceiling (maximalist decoy, if DAVIS-30 + SAM2Long succeed)**: **8.5/10**
+- **Verdict**: Decoy can become submission-grade **without suppression as a backup method**, but only if framed as a **targeted, high-fidelity mislocalization attack** rather than the strongest overall degradation attack.
+
+### Maximalist Architecture Recommendation
+
+1. **Keep Round 2 core as the irreversible base**
+   - annulus decomposition + soft CVaR rank + extended read horizon + positive objectness
+   - This is now the correct output-level backbone.
+
+2. **Restore teacher-memory cooperation**
+   - Re-enable `maskmem_features` + `obj_ptr` teacher alignment on inserted frames and early post-insert clean frames.
+   - Keep anti-anchor on f0 / pre-insert originals to weaken the clean true-location memory.
+   - Use modified-timeline synthetic teacher only; original-timeline teacher is not acceptable.
+
+3. **Upgrade decoy geometry / insert base quality**
+   - Replace one-frame color-only offset choice with motion-aware prefix-wide search.
+   - Reject offsets with high future overlap, motion-aligned "fake decoys", or border conditions that trigger alpha-blend fallback.
+   - Use Poisson-cloned, border-safe insert bases only.
+
+4. **Add a real fidelity stack for inserts**
+   - Edit-masked perceptual objective: LPIPS + Lab DeltaE on seam band + SSIM-to-base + outside-mask identity preservation.
+   - Measure on final exported attacked videos, not only against the synthetic insert base.
+
+5. **Use low-frequency insert parameterization**
+   - Optimize inserts in DCT / wavelet residual space (optionally with seam-band pixel residuals).
+   - This should reduce ghosting while preserving transferable structure.
+
+6. **Add transfer hardening as the final optimization phase**
+   - MI-FGSM + TI-FGSM + DI^2-FGSM + admix, plus mild codec / blur EOT.
+   - This is mainly for SAM2Long retention and cross-evaluator persistence, not the first-order SAM2 objective.
+
+### Narrative Constraint
+
+- The paper must **not** claim "decoy beats suppression on raw J&F drop".
+- The winning claim is:
+  - **targeted mislocalization while objectness stays positive**
+  - **persistent memory poisoning under a stronger memory-pathway evaluator**
+  - **high-fidelity attacked videos where the edited inserts remain visually plausible**
+- Suppression should remain in the paper as a **baseline**, but does **not** need to remain a backup regime if decoy clears those three bars.
+
+## Round 3 Result Update (2026-04-21) — teacher A/B completed on 3 hard clips
+
+### New Measurements
+
+- **Soft CVaR validated strongly on all 3 diagnostic clips**:
+  - `cows`: `0.066 -> 0.9745`
+  - `dog`: `0.069 -> 0.9769`
+  - `bmx-trees`: `0.443 -> 0.4509`
+- Mean SAM2 drop on these 3 clips: `0.193 -> 0.8008`.
+- This confirms the Stage 2 regression was **entirely** the hard-top-k choice, not annulus decomposition.
+
+### Teacher Memory A/B
+
+- Implemented:
+  - insert-frame `memory_teacher_loss` (`w=0.6`)
+  - insert-frame `obj_ptr_teacher_loss` (`w=0.2`)
+  - first-3-post-insert-frame `memory_teacher_loss` in read path (`w=0.3`)
+- Not implemented:
+  - anti-anchor branch (requires separate clean anchor rollout)
+
+### Teacher Outcome
+
+- **Net SAM2 regression**:
+  - CVaR-only mean SAM2 drop = `0.8008`
+  - CVaR+Teacher mean SAM2 drop = `0.7685`
+  - delta = `-0.032`
+- **No real absolute SAM2Long gain**:
+  - CVaR-only mean SAM2Long drop = `0.261`
+  - CVaR+Teacher mean SAM2Long drop = `0.262`
+  - delta = `+0.001`
+- Retention ratio improved only because SAM2 drop weakened, not because SAM2Long attack got stronger.
+
+### Revised Conclusion on Teacher
+
+- Teacher memory matching is **not** currently a useful mainline lever.
+- Most likely explanation: the synthetic teacher encodes artifact-specific memory states from the pasted decoy video, and alignment drags optimization away from the stronger output-level decoy basin.
+- Unless a later anti-anchor-only ablation proves otherwise, the current evidence supports:
+  - **keep soft CVaR + annulus + extended read as the main path**
+  - **drop teacher from the main architecture**
+  - focus the next effort on:
+    1. insert-fidelity loss stack
+    2. transfer hardening
+    3. better temporal offset / border-safe base selection
+
+## Round 3 Closure — Reviewer Verdict (2026-04-21)
+
+### Assessment (Summary)
+- **Score (current state, 3-hard-clip subset + failed teacher A/B + partial 10-clip)**: **6.0/10**
+- **Expected score after 10-clip CVaR completes without collapse**: **6.5–6.8/10**
+- **Revised ceiling (drop teacher; implement Module 4 perceptual + Module 6 transfer hardening)**: **8.0/10** (down from 8.5 because teacher is disqualified)
+- **Verdict**: **Almost** — loop stop criterion (`score ≥ 6 AND verdict ∈ {ready, almost}`) is MET.
+
+### Reviewer Raw Response (Round 3 close)
+
+<details>
+<summary>GPT-5.4 xhigh, threadId 019dae7c-be42-78b3-b045-7a9ee7b3ec39</summary>
+
+> **Score** — Revised current score, right now: **6.0/10**. If the pending 7 clips confirm the same CVaR-only pattern without new collapses: **6.5-6.8/10**. Revised ceiling if you drop teacher entirely and only add Module 4 + Module 6: **8.0/10**.
+>
+> This does change my earlier estimate. The old `8.5` ceiling assumed teacher would create a real persistence gain. It did not. Your A/B shows the core fact very clearly: **teacher increased retention ratio mostly by shrinking the SAM2 denominator, not by increasing absolute SAM2Long damage**. `0.261 -> 0.262` in absolute SAM2Long drop is effectively no gain.
+>
+> At the same time, soft CVaR worked better than I expected. That offsets some of the teacher disappointment. So the architecture got **simpler and stronger** on the main SAM2 axis, but the transfer mechanism I previously expected to help is now basically disqualified.
+>
+> **Verdict** — Loop verdict: **Almost**. Paper verdict: **Not ready yet**.
+>
+> If your stopping rule for this autonomous review loop is `score >= 6` and verdict contains `almost` or `ready`, then **yes, you can stop the loop here**. Why `almost` is justified: the biggest architectural uncertainty is now resolved; soft CVaR is a real fix, not noise; teacher is now falsified enough to remove from the critical path; the remaining work is narrower and much cleaner — **fix insert fidelity** and **raise absolute transfer strength**.
+>
+> **Q2: Mainline choice: B. Skip teacher entirely.** Do not do A next — lowering weights is unlikely to rescue a module whose absolute target metric moved by `+0.001`. C (anti-anchor) is optional only as a separate science ablation later.
+>
+> **Remaining weaknesses:**
+> - Insert fidelity still fails the bar (`LPIPS 0.16` on inserts).
+> - Absolute SAM2Long strength is still too low (mean SAM2Long drop `0.261`, retention `0.400`).
+> - Strong result is only on a 3-clip diagnostic subset.
+> - Teacher is no longer a credible mechanism claim.
+> - Still need a targeted metric (wrong-region occupancy with positive objectness).
+>
+> **Minimum fixes:**
+> 1. Finish the 10-clip CVaR-only baseline first. MANDATORY before further changes.
+> 2. Implement Module 4: insert-only `LPIPS + DeltaE + edit-mask identity preservation + seam regularization`, plus border-safe Poisson-only base selection.
+> 3. Implement Module 6: final-stage `MI-FGSM + TI-FGSM + DI²-FGSM + admix + mild codec/blur EOT`.
+> 4. Do not spend the next round on teacher weight sweeps; at most an isolated anti-anchor ablation.
+
+</details>
+
+### Actions Taken (Round 3 Summary)
+
+1. **CVaR validated on 3 hard clips** (full video length): mean SAM2 drop 0.801, strictly ≥ v4 on dog (+0.36) and bmx-trees (+0.15), matches v4 on cows.
+2. **v3 teacher memory resurrected behind `--use_teacher` flag** (`memory_teacher_loss` + `obj_ptr_teacher_loss` on inserts and first 3 post-insert clean frames). Full A/B run.
+3. **SAM2Long retention evaluated** for CVaR-only and CVaR+Teacher on same 3 clips. Absolute SAM2Long drop: 0.261 vs 0.262 (null). Retention ratio: 0.400 vs 0.423 (denominator effect only).
+4. **Teacher falsified as a mainline module**: committed and deployed, but removed from recommended design per reviewer's Round-3 close.
+5. **7-clip CVaR baseline** launched on GPU 4 but OOM'd at model init (shared V100 grabbed by another user mid-launch). Pending GPU reopen.
+
+### Status
+
+- **Loop termination: YES** (6.0 ≥ 6, verdict = "Almost").
+- **Loop status**: COMPLETED after 3 rounds (of 4 max).
+- **Final design**: soft-CVaR + annulus + extended read + SSIM-constrained Poisson insert (Round 2 config). Teacher NOT in mainline.
+- **Outstanding work (handed off to future manual rounds, not part of this loop)**:
+  - Complete 10-clip CVaR baseline (re-launch when GPU window opens).
+  - Implement Module 4 (perceptual LPIPS + ΔE + edit-mask seam reg) for insert fidelity.
+  - Implement Module 6 (MI+TI+DI²+admix+EOT) for absolute SAM2Long strength.
+  - Add targeted mislocalization metric (wrong-region occupancy with positive objectness).
+  - Full DAVIS-30 evaluation with the mainline design.
+
+## Method Description (Final, after Round 3 loop closure)
+
+MemoryShield's Decoy regime, as of Round 3 loop closure, is a unified 3-stage PGD attack
+on SAM2 that interleaves 3 Poisson-blended synthetic frames at FIFO-resonant positions
+(after original frames f3, f7, f11) into a 15-frame attack prefix. The shared optimizer
+(budget ε0=2/255, ε1..14=4/255, ε_insert=8/255) runs perturb-only, insert-only, then
+joint stages. The decoy-specific loss decomposes the true-object support into eroded
+core, annulus ring, and bridge, pushes decoy logits up and ring logits down under
+masked softplus hinges, and couples the two via a **soft CVaR_0.5 rank penalty** that
+requires the top-50% of decoy logits to beat the top-50% of ring logits by a margin.
+A read-path loss on the disjoint evaluation window (f10 to f10+EVAL_HORIZON) propagates
+the decoy preference through SAM2's memory bank with front-loaded, floor-0.5 weighting
+so post-prefix frames remain supervised. SSIM constraints against the Poisson base
+(inserts) and the clean frame (originals) bound visible distortion; this budget
+empirically yields LPIPS 0.016 on attacked originals and 0.16 on inserts. On the
+3-clip regression diagnostic subset, the design achieves mean SAM2 Δ(J&F) = 0.801 and
+mean SAM2Long Δ(J&F) = 0.261 (retention 0.400), strictly outperforming v4 on 2/3 clips.
+Teacher-memory cooperation (v3) was resurrected behind a flag, A/B-tested, and removed
+from the mainline because the synthetic teacher encodes Poisson-blend artifacts that
+drag the optimizer away from the output-level decoy basin without improving absolute
+SAM2Long damage.

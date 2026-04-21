@@ -1,20 +1,33 @@
 {
-  "round": 2,
+  "round": 3,
   "threadId": "019dae7c-be42-78b3-b045-7a9ee7b3ec39",
-  "status": "in_progress",
+  "status": "completed",
   "difficulty": "medium",
-  "topic": "decoy_high_fidelity_stronger_attack",
-  "last_score": 4.0,
+  "topic": "decoy_maximalist_design_reuse_old_modules",
+  "last_score": 6.0,
   "ceiling_score": 8.0,
-  "last_verdict": "Not ready; Stage 2 regressed (-13pp vs v4); inserts fail fidelity bar (LPIPS 0.16). Soft CVaR fix implemented + committed; pilot OOM blocked on GPU availability.",
+  "last_verdict": "Almost — loop stop criterion met. Soft CVaR validated as strict improvement over v4 on hard clips (mean 3-clip SAM2 drop 0.801 vs v4 0.633). Teacher resurrection tested and falsified: no absolute SAM2Long gain, only ratio effect from denominator shrink. Teacher dropped from mainline.",
   "pending_experiments": [
-    "soft_cvar_pilot_cows_dog_bmx-trees_awaiting_gpu",
-    "if_recovered_then_full_10clip_rerun",
-    "if_recovered_then_sam2long_eval_on_new_attacks"
+    "complete_10clip_cvar_baseline_7_remaining_oomed_retry_when_gpu_opens",
+    "sam2long_retention_on_full_10clip_cvar",
+    "fidelity_measurement_on_r2_cvar_full_attacks",
+    "manual_followup_module4_perceptual_lpips_edit_mask",
+    "manual_followup_module6_mi_ti_di2_admix_transfer_hardening"
   ],
-  "fidelity_baseline": {
-    "attacked_originals": {"lpips": 0.0162, "ssim": 0.9715, "psnr": 47.46},
-    "inserted_frames": {"lpips": 0.1613, "ssim": 0.6398, "psnr": 25.53}
+  "round_summary": {
+    "r2_cvar_3clip": {
+      "cows_drop": 0.9745, "dog_drop": 0.9769, "bmx_trees_drop": 0.4509,
+      "mean_sam2": 0.8008, "mean_sam2long": 0.261, "mean_retention": 0.400
+    },
+    "r3_teacher_3clip": {
+      "cows_drop": 0.9793, "dog_drop": 0.8952, "bmx_trees_drop": 0.4310,
+      "mean_sam2": 0.7685, "mean_sam2long": 0.262, "mean_retention": 0.423,
+      "verdict": "net_sam2_regression_no_absolute_sam2long_gain_dropped_from_mainline"
+    },
+    "fidelity_stage2_10clip": {
+      "originals_lpips": 0.0162, "inserts_lpips": 0.1613
+    }
   },
-  "timestamp": "2026-04-21T13:58:00"
+  "final_design": "cvar_annulus_extended_read_ssim_poisson_no_teacher",
+  "timestamp": "2026-04-21T15:25:00"
 }
