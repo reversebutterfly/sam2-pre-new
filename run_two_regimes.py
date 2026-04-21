@@ -354,6 +354,11 @@ def _topk_mean(logits, mask, k_frac=0.2):
     """Top-k mean of logits inside `mask` (binary). k = k_frac * region size.
 
     Forces rank/margin terms to compare SHARP peaks, not diffuse averages.
+
+    DEPRECATED for rank loss: hard top-k makes the active support jump
+    across texture patches and PGD steps, causing "sharp but brittle" peaks
+    that don't persist under memory refresh. Use `_soft_cvar_mean` instead.
+    Retained here for A/B comparison and legacy call sites.
     """
     bmask = mask > 0.5
     values = logits[bmask]
@@ -362,6 +367,34 @@ def _topk_mean(logits, mask, k_frac=0.2):
     k = max(1, int(values.numel() * k_frac))
     topk = values.topk(k).values
     return topk.mean()
+
+
+def _soft_cvar_mean(logits, mask, q=0.5, tau=None):
+    """Soft CVaR: smooth mean of logits above the q-quantile inside `mask`.
+
+    Round-2 fix for hard top-k brittleness (Stage 2 regression on cows/dog).
+    Uses a sigmoid gate centred on the DETACHED q-quantile so gradient flows
+    through values only, not through the quantile selector. As q→1 this
+    approaches max; q=0.5 gives mean-of-top-half (CVaR_0.5), which is a
+    softer peak estimator than top-20% mean.
+
+    Args:
+        q: quantile threshold in [0,1]. Default 0.5 = mean of top 50%.
+        tau: sigmoid temperature. If None, auto-scale via in-mask stdev
+             (clamped ≥0.05) so the gate width tracks the logit range.
+    """
+    bmask = mask > 0.5
+    values = logits[bmask]
+    if values.numel() == 0:
+        return torch.tensor(0.0, device=logits.device)
+    with torch.no_grad():
+        qv = torch.quantile(values.detach().float(), q).to(values.dtype)
+        if tau is None:
+            tau_val = (values.detach().std() * 0.5).clamp(min=0.05)
+        else:
+            tau_val = torch.tensor(tau, device=values.device, dtype=values.dtype)
+    weights = torch.sigmoid((values - qv) / tau_val)
+    return (values * weights).sum() / (weights.sum() + 1e-6)
 
 def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device,
                  masks_uint8=None, insert_strength=1.0,
@@ -434,9 +467,11 @@ def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device,
     ring_m = 0.5                          # stronger than core push-down
     core_m = 0.5
 
-    # Weights (round-1 redesign; reviewer-prescribed)
+    # Weights (round-2 tuning; reviewer-prescribed soft-CVaR rank).
+    # w_ring lowered 1.5 → 1.0 to reduce "over-sharpening" pressure that
+    # combined with hard top-k caused Stage-2 regression on cows/dog.
     w_decoy_base = 1.0
-    w_ring_base = 1.5
+    w_ring_base = 1.0
     w_core_base = 0.5
     w_bridge_base = 0.05
     w_rank_base = 1.0
@@ -492,12 +527,15 @@ def _decoy_write(all_outs, targets, idx_map, perturb_set, schedule, device,
         if core_mask is not None:
             fl = fl + w_core * _masked_neg(logits, core_mask, core_m)
 
-        # Rank: top-20% of decoy logits must beat top-20% of ring logits + margin
+        # Rank: soft CVaR_0.5 (mean of top 50%) of decoy logits must beat
+        # CVaR_0.5 of ring logits + margin. Replaces hard top-20% (Round 1).
+        # Soft aggregator keeps the active support stable across PGD steps,
+        # giving persistent decoy mass instead of brittle spiky peaks.
         if (decoy_mask is not None and ring_mask is not None
                 and decoy_mask.sum() > 0 and ring_mask.sum() > 0):
-            ring_topk = _topk_mean(logits, ring_mask, k_frac=0.2)
-            decoy_topk = _topk_mean(logits, decoy_mask, k_frac=0.2)
-            fl = fl + w_rank * F.softplus(ring_topk - decoy_topk + rank_m)
+            ring_agg = _soft_cvar_mean(logits, ring_mask, q=0.5)
+            decoy_agg = _soft_cvar_mean(logits, decoy_mask, q=0.5)
+            fl = fl + w_rank * F.softplus(ring_agg - decoy_agg + rank_m)
 
         # Object score: positive (confident wrong, not absent)
         sc = out.get("object_score_logits")
