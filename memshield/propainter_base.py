@@ -161,13 +161,18 @@ def is_propainter_available(config: Optional[ProPainterConfig] = None) -> bool:
 
 # Pinned ProPainter source for reproducibility. Update these together if
 # we ever re-install: commit, checkpoint URLs, and SHA256 go in 3b log.
-PROPAINTER_COMMIT = "v0.1.0"   # latest tagged release (update in 3b after
-                               # we verify the tag resolves on the Pro 6000)
+PROPAINTER_COMMIT = "main@e870e79"  # Verified 2026-04-22: `v0.1.0` tag is
+#   an empty scaffold; actual code/weights live on main at HEAD=e870e79.
+#   The weight URLs use the `v0.1.0` GitHub release as a CDN path, but the
+#   code must be at main; we thus pin the code commit explicitly.
 PROPAINTER_WEIGHT_SHAS: Dict[str, str] = {
-    # Fill in during 3b with `sha256sum weights/*.pth` output, e.g.:
-    #   "ProPainter.pth": "<64-hex>",
-    #   "raft-things.pth": "<64-hex>",
-    #   "recurrent_flow_completion.pth": "<64-hex>",
+    # Verified 2026-04-22 after download via sha256sum.
+    "ProPainter.pth":
+        "12c070c4b48f374c91d8a2a17851140b85c159621080989f9e191bbc18bd6591",
+    "raft-things.pth":
+        "fcfa4125d6418f4de95d84aec20a3c5f4e205101715a79f193243c186ac9a7e1",
+    "recurrent_flow_completion.pth":
+        "22939a1a7900da878dbe1ccd011d646b1bfb30b8290039d8ff0e0c2fefbfd283",
 }
 
 
@@ -270,59 +275,141 @@ def _load_propainter(cfg: ProPainterConfig) -> Dict[str, object]:
     return bundle
 
 
+def _pad_to_multiple_of_8(frames: np.ndarray, masks: np.ndarray):
+    """Pad frames/masks so H,W are both multiples of 8 (ProPainter constraint).
+
+    Returns (padded_frames, padded_masks, (top, bottom, left, right)) where
+    the offsets let the caller crop back to the original size.
+    """
+    T, H, W, C = frames.shape
+    pad_h = (-H) % 8
+    pad_w = (-W) % 8
+    if pad_h == 0 and pad_w == 0:
+        return frames, masks, (0, 0, 0, 0)
+    top, bottom = pad_h // 2, pad_h - pad_h // 2
+    left, right = pad_w // 2, pad_w - pad_w // 2
+    frames_p = np.pad(frames, ((0, 0), (top, bottom), (left, right), (0, 0)),
+                      mode="edge")
+    masks_p = np.pad(masks, ((0, 0), (top, bottom), (left, right)),
+                     mode="constant", constant_values=0)
+    return frames_p, masks_p, (top, bottom, left, right)
+
+
 def _propainter_fill(
-    frames: "np.ndarray | list",
-    masks: "np.ndarray | list",
+    frames,
+    masks,
     target_idx: int,
     cfg: ProPainterConfig,
+    raft_iters: int = 20,
 ) -> np.ndarray:
     """Run ProPainter on a video clip and return the filled target frame.
 
-    Sequence-based contract (matches ProPainter's intended inference API).
+    Sequence-based contract that mirrors ProPainter's intended inference
+    API (see inference_propainter.py in sczhou/ProPainter @ main).
 
     Args:
-        frames: Length-T sequence of `[H, W, 3]` uint8 RGB frames. Arranged
-            as `np.ndarray[T, H, W, 3]` or a Python list of per-frame
-            arrays. The "insert slot" frame can be any placeholder (zeros,
-            copy of a neighbor, whatever — it gets masked out and ignored).
-        masks: Length-T sequence of `[H, W]` uint8 fill masks, one per
-            frame. A value of 1 marks a pixel to be inpainted, 0 to keep.
-            For the middle-slot design: `masks[i] = ones` only at
-            `i == target_idx`, zero elsewhere.
+        frames: Length-T sequence of `[H, W, 3]` uint8 RGB frames. Accepts
+            np.ndarray of shape (T, H, W, 3) or a list of (H, W, 3) arrays.
+        masks: Length-T sequence of `[H, W]` uint8 masks (1 = fill, 0 =
+            keep). Accepts np.ndarray of shape (T, H, W) or a list.
         target_idx: Index into `frames` whose filled version is returned.
         cfg: Resolved ProPainterConfig.
+        raft_iters: RAFT iteration count (ProPainter default = 20).
 
     Returns:
-        The filled version of `frames[target_idx]` as `[H, W, 3]` uint8.
+        Filled version of `frames[target_idx]` as `[H, W, 3]` uint8.
 
     Raises:
-        InstallationError if ProPainter is not installed.
-        NotImplementedError until Chunk 3b wires the actual forward call.
+        InstallationError: if ProPainter is not installed.
+        ValueError: on shape / target_idx / length mismatches.
 
-    Design note (from Codex R3, 2026-04-22): the original stub took
-    `(frame_prev, frame_after, mask_fill)` for a "two-frame video" — that
-    is a poor fit for ProPainter's recurrent flow-completion module which
-    expects a neighbor window (default length 10) and per-frame masks.
-    The recommended formulation for MemoryShield is a 3-frame clip
-    `[frame_prev, insert_slot, frame_after]` with `masks = [0, 1, 0]` and
-    `target_idx = 1`, letting ProPainter fill a single center slot from
-    its two clean neighbors. Chunks 3b / 5 can extend the clip to the
-    entire clean prefix if the 3-frame design is insufficient.
+    Pipeline (from sczhou/ProPainter inference_propainter.py main loop):
+      1. RAFT bidirectional flows on [B, T, 3, H, W] in [-1, 1].
+      2. flow_complete.forward_bidirect_flow + .combine_flow to fill flows
+         under the mask.
+      3. model.img_propagation to produce masked-region warps via nearest-
+         neighbor flow sampling.
+      4. model(updated_frames, pred_flows_bi, masks, updated_masks, T) to
+         run the transformer refinement over all T frames.
+      5. Return target frame, mapped back to uint8 [H, W, 3].
+
+    H and W must be multiples of 8 for ProPainter. We pad with edge/zeros
+    and crop back before returning.
     """
-    _load_propainter(cfg)  # raises InstallationError if not installed
+    import torch
+    import torch.nn.functional as F  # noqa: F401  (may be used by callers)
 
-    T = len(frames)
+    frames_arr = np.asarray(frames)
+    masks_arr = np.asarray(masks)
+    if frames_arr.ndim != 4 or frames_arr.shape[-1] != 3:
+        raise ValueError(
+            f"frames must have shape (T, H, W, 3), got {frames_arr.shape}")
+    if masks_arr.ndim != 3:
+        raise ValueError(
+            f"masks must have shape (T, H, W), got {masks_arr.shape}")
+    T, H, W, _ = frames_arr.shape
+    if masks_arr.shape != (T, H, W):
+        raise ValueError(
+            f"masks shape {masks_arr.shape} inconsistent with frames "
+            f"(expected {(T, H, W)})")
     if not (0 <= target_idx < T):
         raise ValueError(f"target_idx={target_idx} out of range for T={T}")
-    if len(masks) != T:
-        raise ValueError(f"len(masks)={len(masks)} != T={T}")
 
-    raise NotImplementedError(
-        "ProPainter forward-wiring is specified but not yet implemented; "
-        "this is pending Chunk 3b (Pro-6000 installation + inspection of "
-        "InpaintGenerator.forward signature). The call chain from "
-        "create_insert_base() already raises this cleanly upstream."
-    )
+    bundle = _load_propainter(cfg)   # may raise InstallationError
+    raft, flow_complete, inpainter = (
+        bundle["raft"], bundle["flow_complete"], bundle["inpainter"])
+    device = torch.device(cfg.device)
+
+    padded_frames, padded_masks, (top, bottom, left, right) = \
+        _pad_to_multiple_of_8(frames_arr, masks_arr)
+    Hp, Wp = padded_frames.shape[1:3]
+
+    frames_t = torch.from_numpy(padded_frames).to(device).float() / 255.0
+    frames_t = frames_t.permute(0, 3, 1, 2).unsqueeze(0)        # [1, T, 3, H, W]
+    frames_t = frames_t * 2.0 - 1.0                              # to [-1, 1]
+    masks_t = torch.from_numpy((padded_masks > 0).astype(np.float32)).to(device)
+    masks_t = masks_t.unsqueeze(0).unsqueeze(2)                  # [1, T, 1, H, W]
+
+    if cfg.half_precision:
+        frames_t = frames_t.half()
+        masks_t = masks_t.half()
+
+    with torch.no_grad():
+        flows_f, flows_b = raft(frames_t, iters=raft_iters)
+        gt_flows_bi = (flows_f, flows_b)
+        if cfg.half_precision:
+            gt_flows_bi = (gt_flows_bi[0].half(), gt_flows_bi[1].half())
+        pred_flows_bi, _ = flow_complete.forward_bidirect_flow(
+            gt_flows_bi, masks_t)
+        pred_flows_bi = flow_complete.combine_flow(
+            gt_flows_bi, pred_flows_bi, masks_t)
+
+        masked = frames_t * (1 - masks_t)
+        prop, upd = inpainter.img_propagation(
+            masked, pred_flows_bi, masks_t, "nearest")
+        b, t, _, _, _ = masks_t.size()
+        upd_frames = frames_t * (1 - masks_t) + prop.view(b, t, 3, Hp, Wp) * masks_t
+        upd_masks = upd.view(b, t, 1, Hp, Wp)
+
+        pred_img = inpainter(upd_frames, pred_flows_bi, masks_t, upd_masks, T)
+        # pred_img: [1, T, 3, Hp, Wp] in roughly [-1, 1]
+        pred_img = (pred_img + 1.0) / 2.0
+        pred_img = pred_img.clamp(0.0, 1.0)
+
+    frame = pred_img[0, target_idx].permute(1, 2, 0).cpu().numpy()
+    frame = (frame * 255.0).round().astype(np.uint8)
+
+    # Crop back to original H, W
+    if top or bottom or left or right:
+        frame = frame[top:Hp - bottom, left:Wp - right, :]
+
+    # Composite: keep original pixels where mask == 0, use predicted pixels
+    # where mask == 1. This matches inference_propainter.py's final step and
+    # avoids ProPainter's tendency to slightly shift unmasked pixels.
+    orig = frames_arr[target_idx]
+    mk = (masks_arr[target_idx] > 0)[..., None].astype(np.uint8)
+    frame = frame * mk + orig * (1 - mk)
+    return frame.astype(np.uint8)
 
 
 def create_insert_base_propainter(
