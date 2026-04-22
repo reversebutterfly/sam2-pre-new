@@ -18,12 +18,14 @@ This module wraps ProPainter behind a strategy dispatcher so we can:
 (c) All downstream runs: strategy decided by R002 outcome per
     EXPERIMENT_PLAN.md gate logic.
 
-Current state (2026-04-22)
---------------------------
-ProPainter is NOT yet installed on the Pro 6000 memshield env. This module
-loads fine without ProPainter (lazy import) and `is_propainter_available()`
-returns False. Any call to `create_insert_base(strategy="propainter", ...)`
-in the meantime raises an InstallationError with install instructions.
+Current state (2026-04-22, post-Chunk 3b)
+-----------------------------------------
+ProPainter IS installed on the Pro 6000 memshield env; tag-pinned to main
+@e870e79 with the three weights verified by SHA256 (PROPAINTER_WEIGHT_SHAS
+below). On the local Windows dev machine the module still loads fine
+without ProPainter (lazy import); `is_propainter_available()` returns
+False locally and any call to `create_insert_base(strategy="propainter",
+...)` raises InstallationError with install instructions.
 
 Installation
 ------------
@@ -161,10 +163,11 @@ def is_propainter_available(config: Optional[ProPainterConfig] = None) -> bool:
 
 # Pinned ProPainter source for reproducibility. Update these together if
 # we ever re-install: commit, checkpoint URLs, and SHA256 go in 3b log.
-PROPAINTER_COMMIT = "main@e870e79"  # Verified 2026-04-22: `v0.1.0` tag is
-#   an empty scaffold; actual code/weights live on main at HEAD=e870e79.
-#   The weight URLs use the `v0.1.0` GitHub release as a CDN path, but the
-#   code must be at main; we thus pin the code commit explicitly.
+PROPAINTER_COMMIT = "e870e79"  # Verified 2026-04-22: `v0.1.0` tag is an
+#   empty scaffold; actual code/weights live on main at HEAD=e870e79.
+#   The weight URLs use the `v0.1.0` GitHub release as a CDN path; we pin
+#   the code commit explicitly. Use `git checkout e870e79` (detached HEAD)
+#   or `git checkout main` if you trust the HEAD hasn't drifted.
 PROPAINTER_WEIGHT_SHAS: Dict[str, str] = {
     # Verified 2026-04-22 after download via sha256sum.
     "ProPainter.pth":
@@ -185,11 +188,18 @@ def _install_instructions(cfg: ProPainterConfig) -> str:
         f"    rec. flow:  {cfg.recurrent_flow_checkpoint}\n"
         "\n"
         "Install (on Pro 6000, once user has approved). Pinned to "
-        f"{PROPAINTER_COMMIT} for reproducibility:\n"
+        f"commit {PROPAINTER_COMMIT} on main for reproducibility:\n"
         "    cd ~\n"
         "    git clone https://github.com/sczhou/ProPainter\n"
         f"    cd ~/ProPainter && git checkout {PROPAINTER_COMMIT}\n"
-        "    bash scripts/download_weights.sh\n"
+        "    # v0.1.0 tag is an empty scaffold; actual code lives on main.\n"
+        "    # There is no scripts/download_weights.sh in this repo; use\n"
+        "    # their Python helper directly to fetch the three weights:\n"
+        "    python -c \"import sys; sys.path.insert(0,'.'); "
+        "from utils.download_util import load_file_from_url; "
+        "base='https://github.com/sczhou/ProPainter/releases/download/v0.1.0/'; "
+        "[load_file_from_url(url=base+n, model_dir='weights', "
+        "progress=False) for n in ['raft-things.pth','recurrent_flow_completion.pth','ProPainter.pth']]\"\n"
         "    # After download, record SHA256 of each .pth and update\n"
         "    # PROPAINTER_WEIGHT_SHAS in memshield/propainter_base.py:\n"
         "    sha256sum weights/*.pth\n"
@@ -423,26 +433,27 @@ def create_insert_base_propainter(
     feather_px: int = 3,
     config: Optional[ProPainterConfig] = None,
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """ProPainter-based insert base (3-frame middle-slot design).
+    """ProPainter-based insert base (3-frame middle-slot, full-fill design).
 
-    Pipeline (3-frame clip formulation per Codex R3 recommendation):
+    Pipeline (3-frame clip formulation per Codex R3 recommendation; full
+    middle-frame mask per Codex R4 correction):
 
     1. Compute paste region = shifted copy of mask_after by decoy_offset.
        If paste region violates border safety, return None (caller tries
        another offset).
     2. Build a length-3 "video" `[frame_prev, placeholder, frame_after]`
-       with per-frame masks `[0, 1, 0]` — ProPainter sees two clean
-       neighbors and is asked to fill exactly the middle slot.
-    3. Call _propainter_fill(frames, masks, target_idx=1, cfg) to get an
-       inpainted middle frame. This is what ProPainter is built for
-       (flow-guided recurrent fill from a neighbor window).
+       with per-frame masks `[zeros, ones, zeros]` — ProPainter sees two
+       clean neighbors and is asked to synthesize the ENTIRE middle slot
+       from them. This is the "true 3-frame interpolation" reading: the
+       placeholder is genuinely never read (it is fully masked out).
+    3. Call _propainter_fill(frames, masks, target_idx=1, cfg) to get a
+       fully-synthesized middle frame (temporally coherent with its
+       neighbors).
     4. On the returned middle frame, alpha-composite the object crop
        (from frame_after[y0:y1, x0:x1]) at the decoy center with a
-       `feather_px`-pixel soft alpha to avoid a hard seam.
-    5. If the user wants additional true-object suppression signal in
-       frame_prev's position, we also modify the crop's edge blending
-       using `prev_mask_bin` as support in the edit_mask return.
-    6. edit_mask = dilated(paste_region) ∪ dilated(mask_prev). This is
+       `feather_px`-pixel soft alpha to avoid a hard seam between the
+       pasted object and the synthesized background.
+    5. edit_mask = dilated(paste_region) ∪ dilated(mask_prev). This is
        the region PGD is allowed to perturb downstream.
 
     Args match `decoy.create_decoy_base_frame_hifi` so it can serve as a
@@ -454,7 +465,6 @@ def create_insert_base_propainter(
 
     Raises:
         InstallationError: when ProPainter is not installed.
-        NotImplementedError: until Chunk 3b wires the actual forward.
     """
     cfg = (config or ProPainterConfig()).resolve()
     H, W = frame_prev.shape[:2]
@@ -478,17 +488,15 @@ def create_insert_base_propainter(
     prev_mask = mask_prev if mask_prev is not None else mask_after
     prev_mask_bin = (prev_mask > 0).astype(np.uint8)
     paste_region = _decoy.shift_mask(mask_ref, dy, dx)
-    # Middle-frame fill region: true-obj (at prev position) + paste location.
-    middle_mask = ((prev_mask_bin > 0) | (paste_region > 0)).astype(np.uint8)
 
-    # Build 3-frame clip; placeholder can be the average of neighbors — it
-    # gets masked out completely and never influences the output.
-    placeholder = ((frame_prev.astype(np.int32) + frame_after.astype(np.int32))
-                   // 2).astype(np.uint8)
+    # FULL middle-frame mask: ProPainter synthesizes every pixel of the
+    # middle frame from the two clean neighbors. This guarantees the
+    # placeholder never contaminates the output.
+    placeholder = np.zeros((H, W, 3), dtype=np.uint8)
     frames = np.stack([frame_prev, placeholder, frame_after], axis=0)
     masks = np.stack([
         np.zeros((H, W), dtype=np.uint8),
-        middle_mask,
+        np.ones((H, W), dtype=np.uint8),
         np.zeros((H, W), dtype=np.uint8),
     ], axis=0)
 
@@ -550,7 +558,8 @@ def list_strategies() -> Dict[str, str]:
     """Return {name: one-line description} for introspection / CLI help."""
     return {
         "propainter":    "Flow-guided recurrent inpainting (ICCV'23). "
-                         "Primary choice for LPIPS <= 0.10 target.",
+                         "Primary choice for LPIPS <= 0.10 target. "
+                         "Installed + SHA-verified on Pro 6000.",
         "poisson_hifi":  "Pilot-B Poisson clone + true-region inpaint; "
                          "LPIPS ~0.13-0.14 floor (Pilot A/B/C 2026-04-21).",
         "poisson_basic": "Original Poisson clone only; used by pre-hifi runs.",
