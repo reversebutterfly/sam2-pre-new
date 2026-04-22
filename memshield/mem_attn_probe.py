@@ -126,7 +126,17 @@ class MemAttnProbe:
         self.slot_tag_by_frame = slot_tag_by_frame
 
     def reset(self) -> None:
+        """Clear all per-call state so the probe is fully step-local.
+
+        Codex R8 MINOR: clearing only P_u_by_frame left `current_frame_id`,
+        `fg_mask_by_frame`, and `slot_tag_by_frame` from the previous call
+        as latent state. They are overwritten on each __call__ so no bug
+        today, but full-reset avoids the fragility under future changes.
+        """
         self.P_u_by_frame = {}
+        self.current_frame_id = None
+        self.fg_mask_by_frame = {}
+        self.slot_tag_by_frame = {}
 
     # -- context manager ----------------------------------------------------
     def __enter__(self) -> "MemAttnProbe":
@@ -160,25 +170,26 @@ class MemAttnProbe:
         saved_forward = attn_module.forward  # captured before patch
         probe_self = self
 
+        # SAM2's memory_attention calls these with keyword args (q=, k=, v=,
+        # num_k_exclude_rope=), so the patched forward must accept those exact
+        # kwarg names.
         if is_rope:
-            def patched_forward(q_in: Tensor, k_in: Tensor, v_in: Tensor,
+            def patched_forward(q: Tensor, k: Tensor, v: Tensor,
                                 num_k_exclude_rope: int = 0) -> Tensor:
-                # Main path: unchanged.
-                out = saved_forward(q_in, k_in, v_in,
+                out = saved_forward(q, k, v,
                                     num_k_exclude_rope=num_k_exclude_rope)
-                # Side channel for P_u (conditional).
                 if probe_self.current_frame_id is not None:
                     probe_self._compute_P_u_rope(
                         layer_idx, attn_module,
-                        q_in, k_in, num_k_exclude_rope,
+                        q, k, num_k_exclude_rope,
                         apply_rotary_enc,
                     )
                 return out
         else:
-            def patched_forward(q_in: Tensor, k_in: Tensor, v_in: Tensor) -> Tensor:
-                out = saved_forward(q_in, k_in, v_in)
+            def patched_forward(q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+                out = saved_forward(q, k, v)
                 if probe_self.current_frame_id is not None:
-                    probe_self._compute_P_u_plain(layer_idx, attn_module, q_in, k_in)
+                    probe_self._compute_P_u_plain(layer_idx, attn_module, q, k)
                 return out
 
         return patched_forward
