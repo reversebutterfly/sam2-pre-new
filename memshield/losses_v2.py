@@ -76,7 +76,9 @@ def masked_cvar_over_set(
                 without blowing up.
 
     Returns:
-        Scalar tensor (per-batch mean if batched).
+        * [H, W] input -> scalar tensor.
+        * [B, H, W] input -> length-`B` vector (one CVaR per batch item).
+          Downstream callers typically mean or sum this vector themselves.
 
     Differentiability: uses torch.topk which propagates gradients through
     exactly the selected indices. No sort-based branches.
@@ -272,6 +274,7 @@ def l_stale_margin(
     P_u_list: Sequence[Optional[torch.Tensor]],
     gamma: float = 0.4,
     lambda_other: float = 0.2,
+    ref: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Fallback margin form — triggered by F4 in failure-mode plan.
 
@@ -282,15 +285,21 @@ def l_stale_margin(
         P_u_list: list of tensors [A_ins, A_recent, A_other]; Nones skipped.
         gamma: separation margin (A_ins should exceed A_recent by at least γ).
         lambda_other: weight on A_other (discourages "other" collapse).
+        ref: any tensor used to pick device/dtype when ALL entries of
+             `P_u_list` are None and no valid P is available for
+             inference. Usually passed by `l_rec` as `eval_logits[0]` so
+             the all-None zero stays on the same device as the rest of
+             the loss graph. Defaults to CPU/float32 if not provided.
 
     Returns:
-        Scalar tensor.
+        Scalar tensor matching the device/dtype of `ref` (or of the
+        first non-None P, or CPU/float32 as last resort).
     """
     valid = [P for P in P_u_list if P is not None]
     if len(valid) == 0:
-        device = next((p.device for p in P_u_list if p is not None),
-                      torch.device("cpu"))
-        return torch.zeros((), device=device)
+        if ref is not None:
+            return ref.new_zeros(())
+        return torch.zeros(())
 
     vals = []
     for P in valid:
@@ -353,7 +362,8 @@ def l_rec(
     if P_u_list is not None:
         if use_margin:
             stale = l_stale_margin(P_u_list, gamma=margin_gamma,
-                                   lambda_other=margin_lambda)
+                                   lambda_other=margin_lambda,
+                                   ref=eval_logits[0])
         else:
             if Q is None:
                 raise ValueError("l_rec with P_u_list requires Q (KL mode)")
@@ -680,7 +690,39 @@ def _smoke() -> None:
                        lambda_r=1.0, lambda_f=1.0, gate_loss=1, gate_rec=1)
     assert t_s3.item() == 6.0, t_s3
 
-    print("  all 12 loss-module invariants OK")
+    # 13. (Codex R4 IMPORTANT) margin-fallback all-None path keeps
+    #     device/dtype consistent with the caller's logits tensor
+    device_ref = torch.ones((2, 2), dtype=torch.float64)
+    empty_stale = l_stale_margin([None, None, None], ref=device_ref)
+    assert empty_stale.dtype == torch.float64
+    assert empty_stale.device == device_ref.device
+    assert empty_stale.item() == 0.0
+    # Same for KL path with ref-less all-None: returns Q.new_zeros
+    empty_kl = l_stale_kl([None, None, None],
+                           torch.tensor([0.6, 0.2, 0.2], dtype=torch.float64))
+    assert empty_kl.dtype == torch.float64 and empty_kl.item() == 0.0
+
+    # 14. (Codex R4 IMPORTANT) batched masked_cvar_over_set returns a
+    #     length-B vector, not a scalar.
+    B = 3
+    vals_b = torch.randn(B, H, W)
+    mask_b = torch.zeros(B, H, W)
+    mask_b[:, 4:8, 4:12] = 1.0
+    out = masked_cvar_over_set(vals_b, mask_b, alpha=0.5)
+    assert out.shape == (B,), out.shape
+
+    # 15. l_rec with use_margin=True + all-None P_u_list stays on-device
+    evl_cuda_like = [torch.randn(H, W, dtype=torch.float64) for _ in range(3)]
+    Cs_sm = [(torch.rand(H, W) > 0.5).to(torch.float64) for _ in range(3)]
+    rec_margin_allnone = l_rec(
+        evl_cuda_like, Cs_sm, alpha_supp=1.0, alpha_conf=1.0, tau_conf=0.0,
+        P_u_list=[None, None, None], beta=0.3, use_margin=True,
+    )
+    assert rec_margin_allnone.dtype == torch.float64
+    # Finite and non-negative (all terms nonneg by construction)
+    assert torch.isfinite(rec_margin_allnone).item()
+
+    print("  all 15 loss-module invariants OK")
 
 
 if __name__ == "__main__":
