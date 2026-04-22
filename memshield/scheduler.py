@@ -216,14 +216,18 @@ class ClockPositions:
     """Three-clock position of a single insert in the modified prefix.
 
     w_k -- memory-write index in the modified prefix (Clock W).
-    m_k -- modified-sequence index (Clock M). Equals w_k because every
-           modified prefix frame produces exactly one SAM2 write.
-    o_after -- the insert is placed immediately AFTER original-frame index
-           `o_after` (Clock O). Range: [-1, T_prefix_orig - 1], where -1
-           means "before original frame 0" (possible only when the first
-           scheduled w is 0).
+    m_k -- modified-sequence index (Clock M). Equals w_k under MemoryShield's
+           standard SAM2 inference path (streaming, `run_mem_encoder=True`,
+           `num_maskmem > 0`, first-frame prompt, temporal stride 1). Under
+           those defaults every modified prefix frame produces exactly one
+           SAM2 write; other inference modes (no-mem-encoder, dropped
+           writes, multi-cond workflows) would break the invariant.
+    o_after -- the insert sits immediately AFTER original-frame index
+           `o_after` (Clock O). Range: [0, T_prefix_orig - 1]. Consecutive
+           inserts can share the same `o_after`; they are still
+           distinguished by `w_k` / `m_k`.
     role -- "seed" for the K_ins-1 resonance seeds, "boundary" for the
-           forced adjacent-to-eval insert.
+           forced adjacent-to-eval (w = T_prefix_mod - 1) insert.
     """
     w_k: int
     m_k: int
@@ -292,16 +296,22 @@ def compute_schedule_v2(
         offset: Used only when variant == "offset_shift". Shift applied to
             seed positions; boundary is unaffected.
         custom_m: Used only when variant == "custom". Sequence of modified-
-            index positions. Length must equal K_ins. Last element is the
-            boundary; preceding entries are seeds. Must be strictly
-            increasing and within [0, T_prefix_mod - 1].
+            index positions (== write indices under the M==W assumption;
+            `custom_w` is an accepted alias conceptually). Length must
+            equal K_ins. Must be strictly increasing; every entry must be
+            in [0, T_prefix_mod - 1]; the LAST entry must equal
+            `T_prefix_mod - 1` so the "boundary" role retains its
+            adjacent-to-eval semantics. Callers that need a non-adjacent
+            last insert should use a different role scheme; this function
+            deliberately keeps "boundary" == "adjacent to eval" invariant.
 
     Returns:
         ScheduleV2 with `slots` sorted by w_k ascending.
 
     Raises:
         ValueError: on inconsistent configuration (bad K_ins, out-of-range
-            positions, non-increasing positions, insufficient prefix room).
+            positions, non-increasing positions, insufficient prefix room,
+            or custom_m[-1] != T_prefix_mod - 1).
     """
     if K_ins < 1:
         raise ValueError(f"K_ins must be >= 1, got {K_ins}")
@@ -329,6 +339,17 @@ def compute_schedule_v2(
         for i in range(len(cm) - 1):
             if cm[i + 1] <= cm[i]:
                 raise ValueError(f"custom_m must be strictly increasing, got {cm}")
+        # Enforce "boundary" semantics: the last custom slot must be the
+        # adjacent-to-eval position, otherwise labeling it "boundary" would
+        # silently mis-represent matched-recency controls downstream.
+        if cm[-1] != T_prefix_mod - 1:
+            raise ValueError(
+                f"variant='custom' requires custom_m[-1] == T_prefix_mod - 1 "
+                f"({T_prefix_mod - 1}) so the last insert is the adjacent-to-"
+                f"eval boundary, got custom_m[-1]={cm[-1]}. If a non-adjacent "
+                "final insert is intentional, rework the role scheme rather "
+                "than mislabeling it 'boundary'."
+            )
         seed_w = cm[:-1]
         w_boundary = cm[-1]
     else:
@@ -359,12 +380,15 @@ def compute_schedule_v2(
     for one_idx, w in enumerate(w_positions, start=1):
         # With k inserts preceding (k-1 of them before this one), the number
         # of originals before position w is w - (k-1). The insert sits right
-        # after the last such original, whose index is w - k.
+        # after the last such original, whose index is w - k. Given we force
+        # the last slot to T_prefix_mod - 1 and seeds live strictly before
+        # it, o_after is always in [0, T_prefix_orig - 1] for supported
+        # variants; the check below is a defensive invariant.
         o_after = w - one_idx
-        if not (-1 <= o_after < T_prefix_orig):
+        if not (0 <= o_after < T_prefix_orig):
             raise ValueError(
                 f"Computed o_after={o_after} for w={w} (k={one_idx}) out of "
-                f"range [-1, {T_prefix_orig - 1}]. Check T_prefix_orig "
+                f"range [0, {T_prefix_orig - 1}]. Check T_prefix_orig "
                 f"vs K_ins={K_ins}."
             )
         role = "boundary" if one_idx == K_ins else "seed"
@@ -562,6 +586,42 @@ def _run_invariant_checks(verbose: bool = False) -> None:
     assert maps["n_modified"] == 13
     assert maps["insert_mod_indices"] == [12]
     assert maps["orig_to_mod"] == list(range(12))
+
+    # 14. (Codex R2 IMPORTANT) custom must fail when cm[-1] != T_mod - 1
+    try:
+        # T_orig=12, K_ins=3 -> T_mod=15 -> boundary must be 14.
+        compute_schedule_v2(T_prefix_orig=12, K_ins=3, variant="custom",
+                             custom_m=[6, 10, 13])
+    except ValueError as e:
+        assert "adjacent-to-eval" in str(e) or "T_prefix_mod - 1" in str(e)
+    else:
+        raise AssertionError("expected ValueError for custom_m[-1] != T_mod - 1")
+
+    # 15. (Codex R2 MINOR) duplicate-o_after roundtrip via offset_shift +1
+    s = compute_schedule_v2(T_prefix_orig=12, num_maskmem=7, K_ins=3,
+                             variant="offset_shift", offset=+1)
+    # Seeds at w=7,13; boundary at 14; o_after = 6, 11, 11 (last two share)
+    assert [x.o_after for x in s.slots] == [6, 11, 11]
+    maps = build_index_maps_v2(s)
+    # Inserts at mod-indices 7, 13, 14; originals 0..11 fill the rest in order.
+    assert maps["insert_mod_indices"] == [7, 13, 14]
+    placed = [m for m in maps["mod_to_orig"] if m != -1]
+    assert placed == list(range(12))
+    legacy = to_legacy_slots(s)
+    assert [sl.after_original_idx for sl in legacy] == [6, 11, 11]
+
+    # 16. (Codex R2 MINOR) o_after=-1 path is unreachable in practice: with the
+    # enforcement cm[-1] == T_mod-1, only K_ins=1 can reach w=0; but K_ins=1's
+    # boundary is T_mod-1 = T_orig, so w=0 requires T_orig=0 which is already
+    # rejected. Verify that a would-be custom_m=[0] is correctly rejected via
+    # the boundary-position enforcement (T_orig=1, K_ins=1 -> T_mod=2, cm=[0]):
+    try:
+        compute_schedule_v2(T_prefix_orig=1, K_ins=1, variant="custom",
+                             custom_m=[0])
+    except ValueError as e:
+        assert "adjacent-to-eval" in str(e) or "T_prefix_mod - 1" in str(e)
+    else:
+        raise AssertionError("expected ValueError for custom_m=[0] with T_orig=1")
 
     if verbose:
         print("  all invariants OK")
