@@ -226,7 +226,13 @@ class MemAttnProbe:
         # was updated (possibly in place) by the main-path forward that
         # already ran; we reuse it as-is so q/k here match the main path.
         attn_module.freqs_cis = attn_module.freqs_cis.to(q.device)
-        num_k_rope = k.size(-2) - num_k_exclude_rope
+        Nk_total = k.size(-2)
+        # Codex R2 MINOR: explicit range assertion.
+        if num_k_exclude_rope < 0 or num_k_exclude_rope > Nk_total:
+            raise ValueError(
+                f"num_k_exclude_rope {num_k_exclude_rope} out of range "
+                f"[0, {Nk_total}]")
+        num_k_rope = Nk_total - num_k_exclude_rope
         q, k_rope = apply_rotary_enc(
             q, k[:, :, :num_k_rope],
             freqs_cis=attn_module.freqs_cis,
@@ -256,9 +262,26 @@ class MemAttnProbe:
         if fg_mask.shape[-1] != Nq:
             raise ValueError(f"fg_mask length {fg_mask.shape[-1]} != Nq {Nq}")
         if slot_tag.shape[-1] != Nk:
-            raise ValueError(f"slot_tag length {slot_tag.shape[-1]} != Nk {Nk}")
+            # Codex R2 IMPORTANT: strict runtime-vs-declared Nk check.
+            # A mismatch means the caller's MemoryProvenanceHook.declare() did
+            # not match the real SAM2 memory concat. Do NOT silently pad or
+            # truncate — this would hide a provenance bug.
+            raise RuntimeError(
+                f"slot_tag length {slot_tag.shape[-1]} != observed Nk {Nk}. "
+                f"This indicates MemoryProvenanceHook.declare() did not match "
+                f"SAM2's actual to_cat_memory concat order. Verify "
+                f"cond/recent frame-id lists and hw_per_slot/num_obj_ptr_tokens.")
         if q.shape[-2] != Nq or k.shape[-2] != Nk:
             raise ValueError(f"unexpected q/k shapes: q {q.shape} k {k.shape}")
+        # Codex R2 MINOR: explicit dtype + value-range checks on slot_tag.
+        if slot_tag.dtype != torch.long:
+            raise TypeError(
+                f"slot_tag must be torch.long, got {slot_tag.dtype}")
+        if slot_tag.numel() > 0:
+            lo = int(slot_tag.min().item()); hi = int(slot_tag.max().item())
+            if lo < 0 or hi > 2:
+                raise ValueError(
+                    f"slot_tag values must be in {{0,1,2}}, got range [{lo},{hi}]")
 
         n_fg = int(fg_mask.sum().item())
         if n_fg == 0:
@@ -302,13 +325,20 @@ class MemAttnProbe:
 class MemoryProvenanceHook:
     """Capture SAM2's ACTUAL memory-concat provenance at each frame.
 
-    This hook intercepts the concat that happens inside
-    `_prepare_memory_conditioned_features` by wrapping the model's
-    `memory_attention.__call__`. At call time, `memory` has already been
-    built, so its layout IS the ground-truth provenance. The hook uses a
-    per-call closure state populated by the caller immediately before the
-    SAM2 per-frame forward to map (cond frame-indices, recent frame-indices,
-    hw_per_slot, num_obj_ptr_tokens) → slot_tag.
+    **Codex R2 IMPORTANT unresolved**: this implementation relies on the
+    caller accurately declaring the cond/recent frame-id lists and token
+    counts to match SAM2's real `to_cat_memory` concat order. If the
+    declaration drifts from runtime reality, `slot_tag` silently mis-tags
+    memory slots. A strict Nk length check in `_reduce_to_P_u` will catch
+    mismatches that change the total token count, but NOT reorderings that
+    preserve total length.
+
+    The proper runtime binding — monkey-patching
+    `SAM2Base._prepare_memory_conditioned_features` to record the actual
+    concat order — is deferred to Chunk 5 (integration into the PGD loop),
+    where it is cleaner to wrap the full per-frame forward. For now, the
+    declaration-based path is sufficient for unit tests and for Chunk 1
+    standalone validation (single-frame, single-memory-state smoke tests).
 
     The caller registers, BEFORE each frame's forward:
         hook.declare(
