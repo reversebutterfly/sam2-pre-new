@@ -142,7 +142,19 @@ class RuntimeProvenanceHook:
     def _wrapped(self, frame_idx, is_init_cond_frame, current_vision_feats,
                  current_vision_pos_embeds, feat_sizes, output_dict,
                  num_frames, track_in_reverse=False):
-        """Call the original with slot-tag side effect."""
+        """Call the original with slot-tag side effect.
+
+        Fails closed on `track_in_reverse=True` — MemoryShield is forward-
+        only (Codex R7 MINOR #1). The `_build_slot_tag` reverse math is
+        intentionally still present for future support; we only refuse to
+        fire the hook in that mode.
+        """
+        if track_in_reverse:
+            raise NotImplementedError(
+                "RuntimeProvenanceHook does not support track_in_reverse "
+                "(MemoryShield is forward-only). Remove the hook before "
+                "any reverse-tracking SAM2 calls."
+            )
         # Init-cond frames have no memory concat (SAM2 returns a fused
         # single-token path); skip tagging for them.
         if is_init_cond_frame or self.sam2_base.num_maskmem == 0:
@@ -390,9 +402,14 @@ def _smoke() -> None:
     assert tag4.shape == (0,) and tag4.dtype == torch.long
     print("  empty-memory PASS")
 
-    # 5. Cond chunk contains a frame that IS in FIFO (unselected cond
-    #    promoted into FIFO — SAM2 allows this). Rule: insert > recent >
-    #    other; FIFO wins over other for non-insert frames.
+    # 5. PRECEDENCE UNIT TEST (Codex R7 MINOR #2): this scenario —
+    #    cond_frame_ids and recent_frame_ids sharing a frame id — does
+    #    NOT arise under real SAM2 runtime, because `selected_cond` and
+    #    `unselected_cond` are disjoint by construction; an unselected
+    #    cond can appear in the recent chunk via the fallback, but not
+    #    in the cond chunk at the same time. This test exists only to
+    #    verify the precedence rule in the pure `build_slot_tag_direct`
+    #    helper (insert > FIFO-resident > cond-beyond-FIFO).
     tag5 = build_slot_tag_direct(
         insert_frame_ids={12},
         cond_frame_ids=[0, 10],
