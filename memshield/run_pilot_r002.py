@@ -188,6 +188,7 @@ def main():
         stage3_delta_per_nu_ratio=2,
         lpips_budget=args.lpips_budget,
         lagrange_update_every=10, log_every=10, device=device,
+        seed=args.seed,
     )
 
     adapter = SAM2VideoAdapter(

@@ -54,7 +54,14 @@ from memshield.eval_v2 import evaluate_run
 def load_davis_clip(davis_root: Path, clip: str, n_frames: int
                     ) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray]:
     """Returns (frames [N,H,W,3] uint8, gt_masks list of [H,W] uint8,
-    first-frame GT mask [H,W] uint8)."""
+    first-frame GT mask [H,W] uint8).
+
+    Target semantics follow `run_pilot_r001.py` / `run_pilot_r002.py`: the
+    foreground is the UNION of all non-zero annotation labels, not a
+    specific object id. This matters on multi-object DAVIS clips — using
+    a single id here would silently evaluate against a different target
+    than the one the attack was generated for.
+    """
     jpg_dir = davis_root / "JPEGImages" / "480p" / clip
     ann_dir = davis_root / "Annotations" / "480p" / clip
     jpgs = sorted(jpg_dir.glob("*.jpg"))[:n_frames]
@@ -66,13 +73,7 @@ def load_davis_clip(davis_root: Path, clip: str, n_frames: int
         raise RuntimeError(
             f"{clip} Annotations: {len(anns)} < required {n_frames}")
     frames = np.stack([np.array(Image.open(p).convert("RGB")) for p in jpgs])
-
-    # DAVIS first-frame annotation defines the target object id.
-    ann0 = np.array(Image.open(anns[0]))
-    ids = sorted(set(ann0.flat) - {0})
-    target_obj = ids[0] if ids else 1
-    gt_masks = [(np.array(Image.open(p)) == target_obj).astype(np.uint8)
-                for p in anns]
+    gt_masks = [(np.array(Image.open(p)) > 0).astype(np.uint8) for p in anns]
     mask0 = gt_masks[0]
     return frames, gt_masks, mask0
 

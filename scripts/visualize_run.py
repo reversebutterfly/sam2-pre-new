@@ -108,6 +108,13 @@ def main():
     out_dir = Path(args.out_dir) if args.out_dir else run_dir / "viz"
     mod_dir = out_dir / "modified"
     diff_dir = out_dir / "diff"
+    seq_dir = out_dir / "_seq_for_mp4"
+    # Clear stale output subdirs from prior runs so a rerun with smaller T_mod
+    # (or a prior ffmpeg failure) can't leave stragglers that confuse the MP4
+    # encoder or make diff/modified look out of sync.
+    for d in (mod_dir, diff_dir, seq_dir):
+        if d.exists():
+            shutil.rmtree(d)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     mod_video = np.load(mod_path)
@@ -127,7 +134,6 @@ def main():
     print(f"[viz] wrote {T_mod} modified JPGs to {mod_dir}")
 
     # Also copy plain-numbered files for ffmpeg's sequential reader.
-    seq_dir = out_dir / "_seq_for_mp4"
     if args.mp4:
         seq_dir.mkdir(parents=True, exist_ok=True)
         for m in range(T_mod):
