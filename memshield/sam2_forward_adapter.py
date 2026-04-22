@@ -221,8 +221,12 @@ class SAM2VideoAdapter:
         if mode not in ("attack", "clean"):
             raise ValueError(f"mode must be 'attack' or 'clean', got {mode!r}")
         if self._H_feat is None:
-            raise RuntimeError(
-                "adapter not set up — call prepare_from_clean(bundle) first.")
+            # Auto-prep on first call so callers using optimize_unified_v2
+            # (which constructs the bundle internally) do not have to thread
+            # prepare_from_clean manually. Explicit prep is still recommended
+            # for R001+ drivers, but this keeps the smoke / optimize path
+            # robust against a missed setup call.
+            self.prepare_from_clean(bundle)
 
         device = modified_video.device
         T_mod = bundle.schedule.T_prefix_mod
