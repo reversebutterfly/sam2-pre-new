@@ -1,54 +1,44 @@
 """Memory-attention probe: extract differentiable attention-mass distributions
 over FIFO memory-bank slots, for MemoryShield's L_stale regularizer.
 
-Background
-----------
-SAM2 computes cross-attention from the current frame's queries to a concatenated
-memory tensor with layout:
+Design (after Codex R1 review)
+------------------------------
+The probe is *observational*, not intrusive. The forward path of SAM2's
+memory cross-attention is left UNCHANGED (fused `F.scaled_dot_product_attention`
+still produces `out`). On top of that, we compute a SIDE channel:
 
-    memory = [ cond-frame spatial tokens (HW) |
-               FIFO slot_0 spatial tokens (HW) |
-               FIFO slot_1 spatial tokens (HW) |
-               ...
-               FIFO slot_{N-1} spatial tokens (HW) |
-               object-pointer tokens (num_obj_ptr_tokens) ]
+    weights_fg = softmax(q_fg @ k^T / sqrt(d), dim=-1)   # [B, H, Nq_fg, Nk]
 
-The cross-attention is implemented with `F.scaled_dot_product_attention`, which
-is a fused kernel that does NOT return attention weights. This module replaces
-that call at forward time on selected `MemoryAttentionLayer.cross_attn_image`
-modules with an explicit `softmax(q @ k^T / sqrt(d)) @ v` computation that
-yields a differentiable attention-weight tensor of shape `[B, H, Nq, Nk]`.
+where `q_fg` is `q` restricted to foreground-query tokens only (Nq_fg << Nq).
+This side channel is differentiable end-to-end (it reuses the same `q` and
+`k` tensors computed by the main path), and is reduced to a 3-bin vector
+`P_u = [A^ins, A^recent, A^other]` via the caller-provided slot-provenance tag.
 
-The weight tensor is large (Nq·Nk ≈ 10^8 floats for 1024-res). To avoid OOM we
-do NOT store the full weight tensor. Instead we reduce it on-the-fly inside
-the patched forward to a 3-bin vector `P_u = [A^ins, A^recent, A^other]`
-using pre-set foreground-query mask and per-key slot-provenance tag.
+Why a side channel:
+- Keeps SAM2 numerical path identical to upstream; no fused-kernel loss.
+- Avoids retaining the full `[B, H, Nq, Nk]` weight tensor in the autograd
+  graph; we only retain `[B, H, Nq_fg, Nk]` and reduce it immediately.
+- Side-channel softmax is done in float32 for numerical stability at large Nk.
 
-Usage
------
-    probe = MemAttnProbe(sam2_model.memory_attention)
-    probe.set_targets(fg_query_mask_per_frame,   # dict: frame_idx -> [Nq] bool
-                      slot_tag_per_frame)        # dict: frame_idx -> [Nk] long {0,1,2}
-    with probe:
-        outs = sam2_surrogate.forward_video(frames, gt_mask)
-        # probe.P_u_by_frame[frame_idx][layer_idx] is a [3] differentiable tensor
-        # use in L_stale = KL(Q || mean_u P_u[last_layer])
+Slot-provenance tagging (Codex R1 CRITICAL #2):
+- SAM2's `_prepare_memory_conditioned_features` builds `memory` as a concat
+  of MULTIPLE selected conditioning frames + recent non-conditioning frames
+  + object pointer tokens, in that order. The counts are video-state-
+  dependent. This probe does NOT assume any fixed layout. The caller must
+  pass in a `slot_tag` of length exactly Nk built from the ACTUAL memory
+  assembly at the current frame (see helpers in `build_slot_tag_from_memory`
+  below, which hooks the concat site).
 
-Design notes
-------------
-- Patches only the `cross_attn_image` module of each `MemoryAttentionLayer`
-  (not self-attn, not SAM-head attention). Restores originals on __exit__.
-- Captures `weights` INSIDE the forward and eagerly reduces to `P_u`. The
-  reduction MUST stay in the autograd graph for L_stale gradients to flow.
-- Frame tagging is keyed by a mutable frame-counter that the caller must
-  advance between frames (see `advance_frame`). This mirrors SAM2's
-  sequential-frame inference API.
-- "Final memory-attention block" per the paper spec = last layer index.
+Gradient / memory guarantees:
+- `out` of the main path = original SDPA (untouched).
+- `P_u` backprops through the side-channel softmax to `q` and `k`, which
+  are projected from the current frame's queries and the memory tensor.
+  Memory tensor includes features from inserted frames (our `ν`), so
+  ∂L_stale/∂ν is non-trivial.
 """
 from __future__ import annotations
 
 import math
-from contextlib import contextmanager
 from typing import Dict, List, Optional
 
 import torch
@@ -56,57 +46,58 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 
-class MemAttnProbe:
-    """Context manager that instruments SAM2's memory cross-attention.
+# ══════════════════════════════════════════════════════════════════════════════
+# Probe
+# ══════════════════════════════════════════════════════════════════════════════
 
-    After `__enter__`, every call to the patched `cross_attn_image.forward`
-    reduces its attention-weight tensor into a per-layer 3-bin `P_u` using
-    the foreground-query mask + slot-provenance tag registered for the
-    current frame. On `__exit__`, originals are restored.
+
+class MemAttnProbe:
+    """Observational probe on SAM2's memory cross-attention.
+
+    Usage:
+        probe = MemAttnProbe(sam2_model.memory_attention)
+        probe.set_targets(fg_mask_by_frame, slot_tag_by_frame)
+        with probe:
+            for frame_id in range(T):
+                probe.set_frame(frame_id)
+                # ... run SAM2 forward for this frame ...
+        # Now probe.P_u_by_frame[frame_id][layer_idx] is a [3] diff tensor.
 
     Args:
-        memory_attention: the `MemoryAttention` module (has `.layers`).
-        layer_indices: which layers to probe. Default = [last layer only],
-            matching the paper spec "final memory-attention block".
-        store_frames: if True, store P_u per frame (dict). If False, only
-            store the most-recent frame's P_u. Default True.
+        memory_attention: the `MemoryAttention` module containing `.layers`.
+        layer_indices: which layers to probe. Default = [last layer only].
+        dtype_softmax: dtype to use for the side-channel softmax.
+            float32 is strongly recommended for numerical stability when Nk
+            is large (≈ 30k). The main path dtype is unchanged.
     """
 
     def __init__(
         self,
         memory_attention: nn.Module,
         layer_indices: Optional[List[int]] = None,
-        store_frames: bool = True,
+        dtype_softmax: torch.dtype = torch.float32,
     ):
         self.memory_attention = memory_attention
         all_layers = list(memory_attention.layers)
         if layer_indices is None:
-            # Default: final layer only (paper spec).
             layer_indices = [len(all_layers) - 1]
         for i in layer_indices:
             if not (0 <= i < len(all_layers)):
                 raise ValueError(
                     f"layer_index {i} out of range for {len(all_layers)} layers")
         self.layer_indices = layer_indices
-        self.store_frames = store_frames
+        self.dtype_softmax = dtype_softmax
 
-        # Per-frame state, set by caller before each SAM2 forward.
         self.current_frame_id: Optional[int] = None
         self.fg_mask_by_frame: Dict[int, Tensor] = {}
         self.slot_tag_by_frame: Dict[int, Tensor] = {}
-
-        # Collected outputs.
-        # P_u_by_frame[frame_id][layer_idx] = [3] differentiable tensor.
         self.P_u_by_frame: Dict[int, Dict[int, Tensor]] = {}
 
-        # Backup of original forward bound methods (one per patched attn module).
         self._saved_forwards: Dict[int, callable] = {}
-        # Keep attn-module references for restore.
         self._attn_modules: Dict[int, nn.Module] = {}
 
     # -- target registration ------------------------------------------------
     def set_frame(self, frame_id: int) -> None:
-        """Advance to frame_id; subsequent forward uses its fg_mask/slot_tag."""
         self.current_frame_id = frame_id
 
     def set_targets(
@@ -114,34 +105,37 @@ class MemAttnProbe:
         fg_mask_by_frame: Dict[int, Tensor],
         slot_tag_by_frame: Dict[int, Tensor],
     ) -> None:
-        """Register the foreground-query mask and slot-provenance tag per frame.
+        """Register per-frame foreground-query mask + slot-provenance tag.
 
-        fg_mask_by_frame: frame_id -> [Nq] bool tensor on the SAME device as
-            q. Nq is the number of spatial query tokens of the current frame
-            (= H*W of the image-feature map; typically 64*64 for 1024 input).
-        slot_tag_by_frame: frame_id -> [Nk] long tensor with values in
-            {0: insert-bank, 1: recent-clean-bank, 2: other (cond+ptrs)}.
-            Nk = total key count = HW*num_bank_slots + num_obj_ptr_tokens.
+        fg_mask_by_frame: frame_id -> 1-D bool tensor of length Nq (= HW of
+            the image-feature grid, typically 64*64=4096 at 1024-res).
+        slot_tag_by_frame: frame_id -> 1-D long tensor of length Nk with
+            values in {0: insert, 1: recent-clean, 2: other}. Nk must
+            equal the ACTUAL memory concat length at this frame (= sum of
+            bank-slot HW contributions + num_obj_ptr_tokens).
         """
+        for fid, m in fg_mask_by_frame.items():
+            if m.dim() != 1:
+                raise ValueError(
+                    f"fg_mask[{fid}] must be 1-D, got shape {tuple(m.shape)}")
+        for fid, t in slot_tag_by_frame.items():
+            if t.dim() != 1:
+                raise ValueError(
+                    f"slot_tag[{fid}] must be 1-D, got shape {tuple(t.shape)}")
         self.fg_mask_by_frame = fg_mask_by_frame
         self.slot_tag_by_frame = slot_tag_by_frame
 
     def reset(self) -> None:
-        """Clear collected P_u state (call between optimization steps)."""
         self.P_u_by_frame = {}
 
     # -- context manager ----------------------------------------------------
     def __enter__(self) -> "MemAttnProbe":
         for layer_idx in self.layer_indices:
             layer = self.memory_attention.layers[layer_idx]
-            attn = layer.cross_attn_image  # Attention or RoPEAttention
+            attn = layer.cross_attn_image
             self._attn_modules[layer_idx] = attn
             self._saved_forwards[layer_idx] = attn.forward
-
-            # Build a patched forward bound to this attn instance + layer_idx.
-            patched = self._make_patched_forward(layer_idx, attn)
-            # Bind to the module instance (replacing the bound method).
-            attn.forward = patched
+            attn.forward = self._make_patched_forward(layer_idx, attn)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -152,214 +146,311 @@ class MemAttnProbe:
 
     # -- patched forward ----------------------------------------------------
     def _make_patched_forward(self, layer_idx: int, attn_module: nn.Module):
-        """Return a patched forward(q, k, v, [num_k_exclude_rope=0]) for attn_module.
+        """Wrap `attn.forward` so the main path is unchanged and a side
+        channel computes P_u for the current frame.
 
-        Replicates `Attention.forward` / `RoPEAttention.forward` up to and
-        including the q/k/v projections + head separation + RoPE (if
-        applicable), then replaces the fused SDPA with explicit
-        softmax(q k^T / sqrt(d)) @ v. The explicit softmax yields a
-        differentiable weights tensor [B, H, Nq, Nk] which is reduced in
-        place to a 3-bin P_u for the current frame using the registered
-        fg_mask + slot_tag. The reduction stays in the autograd graph.
+        We call the saved original forward to get `out` (numerically
+        identical to upstream). Then, using the same internal projections,
+        we compute a side-channel softmax on foreground queries only and
+        reduce to a 3-bin P_u.
         """
-        # Import lazily to avoid hard dependency on sam2 at module import time.
         from sam2.modeling.sam.transformer import RoPEAttention, apply_rotary_enc
 
         is_rope = isinstance(attn_module, RoPEAttention)
+        saved_forward = attn_module.forward  # captured before patch
         probe_self = self
 
         if is_rope:
             def patched_forward(q_in: Tensor, k_in: Tensor, v_in: Tensor,
                                 num_k_exclude_rope: int = 0) -> Tensor:
-                # Projections
-                q = attn_module.q_proj(q_in)
-                k = attn_module.k_proj(k_in)
-                v = attn_module.v_proj(v_in)
-                # Heads: [B, H, N, d_head]
-                q = attn_module._separate_heads(q, attn_module.num_heads)
-                k = attn_module._separate_heads(k, attn_module.num_heads)
-                v = attn_module._separate_heads(v, attn_module.num_heads)
-
-                # RoPE
-                w_sz = h_sz = math.sqrt(q.shape[-2])
-                attn_module.freqs_cis = attn_module.freqs_cis.to(q.device)
-                if attn_module.freqs_cis.shape[0] != q.shape[-2]:
-                    attn_module.freqs_cis = attn_module.compute_cis(
-                        end_x=w_sz, end_y=h_sz).to(q.device)
-                if q.shape[-2] != k.shape[-2]:
-                    assert attn_module.rope_k_repeat
-
-                num_k_rope = k.size(-2) - num_k_exclude_rope
-                q, k[:, :, :num_k_rope] = apply_rotary_enc(
-                    q, k[:, :, :num_k_rope],
-                    freqs_cis=attn_module.freqs_cis,
-                    repeat_freqs_k=attn_module.rope_k_repeat,
-                )
-                # Explicit attention with differentiable weights.
-                out = _explicit_attention_and_reduce(
-                    q, k, v, layer_idx, probe_self,
-                )
-                out = attn_module._recombine_heads(out)
-                out = attn_module.out_proj(out)
+                # Main path: unchanged.
+                out = saved_forward(q_in, k_in, v_in,
+                                    num_k_exclude_rope=num_k_exclude_rope)
+                # Side channel for P_u (conditional).
+                if probe_self.current_frame_id is not None:
+                    probe_self._compute_P_u_rope(
+                        layer_idx, attn_module,
+                        q_in, k_in, num_k_exclude_rope,
+                        apply_rotary_enc,
+                    )
                 return out
         else:
             def patched_forward(q_in: Tensor, k_in: Tensor, v_in: Tensor) -> Tensor:
-                q = attn_module.q_proj(q_in)
-                k = attn_module.k_proj(k_in)
-                v = attn_module.v_proj(v_in)
-                q = attn_module._separate_heads(q, attn_module.num_heads)
-                k = attn_module._separate_heads(k, attn_module.num_heads)
-                v = attn_module._separate_heads(v, attn_module.num_heads)
-                out = _explicit_attention_and_reduce(
-                    q, k, v, layer_idx, probe_self,
-                )
-                out = attn_module._recombine_heads(out)
-                out = attn_module.out_proj(out)
+                out = saved_forward(q_in, k_in, v_in)
+                if probe_self.current_frame_id is not None:
+                    probe_self._compute_P_u_plain(layer_idx, attn_module, q_in, k_in)
                 return out
 
         return patched_forward
 
+    # -- side-channel P_u computation ---------------------------------------
+    def _compute_P_u_plain(
+        self,
+        layer_idx: int,
+        attn_module: nn.Module,
+        q_in: Tensor,
+        k_in: Tensor,
+    ) -> None:
+        frame_id = self.current_frame_id
+        fg_mask = self.fg_mask_by_frame.get(frame_id)
+        slot_tag = self.slot_tag_by_frame.get(frame_id)
+        if fg_mask is None or slot_tag is None:
+            return
 
-def _explicit_attention_and_reduce(
-    q: Tensor,  # [B, H, Nq, d_head]
-    k: Tensor,  # [B, H, Nk, d_head]
-    v: Tensor,  # [B, H, Nk, d_head]
-    layer_idx: int,
-    probe: MemAttnProbe,
-) -> Tensor:
-    """Explicit softmax attention + in-place 3-bin P_u reduction.
+        q = attn_module.q_proj(q_in)
+        k = attn_module.k_proj(k_in)
+        q = attn_module._separate_heads(q, attn_module.num_heads)
+        k = attn_module._separate_heads(k, attn_module.num_heads)
+        self._reduce_to_P_u(layer_idx, q, k, fg_mask, slot_tag)
 
-    Returns: out = weights @ v, shape [B, H, Nq, d_head].
-    Side effect: populates probe.P_u_by_frame[frame_id][layer_idx] = [3] tensor.
+    def _compute_P_u_rope(
+        self,
+        layer_idx: int,
+        attn_module: nn.Module,
+        q_in: Tensor,
+        k_in: Tensor,
+        num_k_exclude_rope: int,
+        apply_rotary_enc,
+    ) -> None:
+        frame_id = self.current_frame_id
+        fg_mask = self.fg_mask_by_frame.get(frame_id)
+        slot_tag = self.slot_tag_by_frame.get(frame_id)
+        if fg_mask is None or slot_tag is None:
+            return
 
-    The [3] tensor sums attention mass over all heads and all foreground
-    queries, normalized so the three bins sum to 1 (they partition the keys).
-    """
-    d_k = q.size(-1)
-    scale = 1.0 / math.sqrt(d_k)
-    scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # [B, H, Nq, Nk]
-    weights = F.softmax(scores, dim=-1)  # [B, H, Nq, Nk]; differentiable
-
-    frame_id = probe.current_frame_id
-    if frame_id is not None:
-        fg_mask = probe.fg_mask_by_frame.get(frame_id)
-        slot_tag = probe.slot_tag_by_frame.get(frame_id)
-        if fg_mask is not None and slot_tag is not None:
-            # weights: [B, H, Nq, Nk]
-            # Average over heads first.
-            w_mean_h = weights.mean(dim=1)  # [B, Nq, Nk]
-            # Restrict to foreground queries.
-            fg_mask = fg_mask.to(w_mean_h.device)
-            if fg_mask.dtype != torch.bool:
-                fg_mask = fg_mask.bool()
-            if fg_mask.shape[-1] != w_mean_h.shape[1]:
-                raise ValueError(
-                    f"fg_mask length {fg_mask.shape[-1]} != Nq {w_mean_h.shape[1]} "
-                    f"at frame {frame_id} layer {layer_idx}")
-            w_fg = w_mean_h[:, fg_mask, :]  # [B, Nq_fg, Nk]
-            if w_fg.shape[1] == 0:
-                # No foreground queries for this frame → skip recording.
-                return torch.matmul(weights, v)
-            w_fg_mean = w_fg.mean(dim=1)  # [B, Nk]; mean over fg queries
-            slot_tag = slot_tag.to(w_fg_mean.device)
-            if slot_tag.shape[-1] != w_fg_mean.shape[-1]:
-                raise ValueError(
-                    f"slot_tag length {slot_tag.shape[-1]} != Nk "
-                    f"{w_fg_mean.shape[-1]} at frame {frame_id} layer {layer_idx}")
-            # 3-bin accumulation; scatter-add over Nk by slot category.
-            P = torch.zeros(3, device=w_fg_mean.device, dtype=w_fg_mean.dtype)
-            for b_idx in range(3):
-                mask = (slot_tag == b_idx)
-                if mask.any():
-                    # Sum attention mass in this bin across batch (mean over B).
-                    P = P.clone()  # avoid in-place aliasing across bins
-                    P[b_idx] = w_fg_mean[:, mask].sum(dim=-1).mean(dim=0)
-            # Ensure P sums to ~1 (the three bins partition Nk). Don't renormalize
-            # unless all three bins are defined; otherwise report as-is.
-            if probe.store_frames:
-                probe.P_u_by_frame.setdefault(frame_id, {})[layer_idx] = P
-            else:
-                probe.P_u_by_frame = {frame_id: {layer_idx: P}}
-
-    out = torch.matmul(weights, v)  # [B, H, Nq, d_head]
-    return out
-
-
-# ───────────────────────── Slot-tag builders ────────────────────────────────
-
-
-def build_slot_tag(
-    num_bank_slots: int,
-    hw_per_slot: int,
-    num_obj_ptr_tokens: int,
-    is_insert_per_slot: List[bool],
-    cond_is_first: bool = True,
-    device: Optional[torch.device] = None,
-) -> Tensor:
-    """Build a [Nk] long tensor tagging each key token as 0=ins / 1=recent / 2=other.
-
-    Matches SAM2's memory layout (see sam2_base.py _prepare_memory_conditioned_features):
-        [cond-frame HW tokens | FIFO slot_0 HW | ... | FIFO slot_{N-1} HW | obj_ptr tokens]
-    where cond-frame is at bank-slot index 0 iff `cond_is_first`, otherwise
-    all N slots are FIFO.
-
-    Args:
-        num_bank_slots: total bank slot count including conditioning if present.
-            Equals len(is_insert_per_slot).
-        hw_per_slot: HW spatial tokens per bank slot (same for all slots).
-        num_obj_ptr_tokens: number of obj_ptr tokens appended at end.
-        is_insert_per_slot: bool list of length num_bank_slots; True iff the
-            slot's source frame was one of our inserted frames. The
-            conditioning slot should be False (never our insert).
-        cond_is_first: whether slot 0 is the privileged conditioning frame.
-            If True, slot 0 is tagged as 'other' (bin 2) regardless of
-            is_insert_per_slot[0]; this is defensive because the user should
-            pass False for conditioning anyway.
-
-    Returns:
-        [Nk] long tensor where Nk = num_bank_slots * hw_per_slot + num_obj_ptr_tokens.
-    """
-    if len(is_insert_per_slot) != num_bank_slots:
-        raise ValueError(
-            f"is_insert_per_slot len {len(is_insert_per_slot)} != num_bank_slots "
-            f"{num_bank_slots}")
-    total = num_bank_slots * hw_per_slot + num_obj_ptr_tokens
-    tag = torch.full((total,), 2, dtype=torch.long,
-                     device=device)  # default = other
-    for s in range(num_bank_slots):
-        start = s * hw_per_slot
-        end = start + hw_per_slot
-        if cond_is_first and s == 0:
-            # conditioning stays as 'other'
-            tag[start:end] = 2
-        elif is_insert_per_slot[s]:
-            tag[start:end] = 0  # insert
+        q = attn_module.q_proj(q_in)
+        k = attn_module.k_proj(k_in)
+        q = attn_module._separate_heads(q, attn_module.num_heads)
+        k = attn_module._separate_heads(k, attn_module.num_heads)
+        # Replicate RoPE from RoPEAttention.forward — attn_module.freqs_cis
+        # was updated (possibly in place) by the main-path forward that
+        # already ran; we reuse it as-is so q/k here match the main path.
+        attn_module.freqs_cis = attn_module.freqs_cis.to(q.device)
+        num_k_rope = k.size(-2) - num_k_exclude_rope
+        q, k_rope = apply_rotary_enc(
+            q, k[:, :, :num_k_rope],
+            freqs_cis=attn_module.freqs_cis,
+            repeat_freqs_k=attn_module.rope_k_repeat,
+        )
+        # Reassemble k so the non-rope tail (obj_ptr tokens) is unchanged.
+        if num_k_exclude_rope > 0:
+            k = torch.cat([k_rope, k[:, :, num_k_rope:]], dim=-2)
         else:
-            tag[start:end] = 1  # recent-clean
-    # obj_ptr tokens at the end are already 2 (other) from the default fill.
-    return tag
+            k = k_rope
+        self._reduce_to_P_u(layer_idx, q, k, fg_mask, slot_tag)
+
+    def _reduce_to_P_u(
+        self,
+        layer_idx: int,
+        q: Tensor,       # [B, H, Nq, d_head]
+        k: Tensor,       # [B, H, Nk, d_head]
+        fg_mask: Tensor, # 1-D bool, length Nq
+        slot_tag: Tensor,# 1-D long, length Nk, values in {0,1,2}
+    ) -> None:
+        B, H, Nq, d_head = q.shape
+        Nk = k.size(-2)
+
+        fg_mask = fg_mask.to(q.device)
+        if fg_mask.dtype != torch.bool:
+            fg_mask = fg_mask.bool()
+        if fg_mask.shape[-1] != Nq:
+            raise ValueError(f"fg_mask length {fg_mask.shape[-1]} != Nq {Nq}")
+        if slot_tag.shape[-1] != Nk:
+            raise ValueError(f"slot_tag length {slot_tag.shape[-1]} != Nk {Nk}")
+        if q.shape[-2] != Nq or k.shape[-2] != Nk:
+            raise ValueError(f"unexpected q/k shapes: q {q.shape} k {k.shape}")
+
+        n_fg = int(fg_mask.sum().item())
+        if n_fg == 0:
+            # Record a sentinel so the caller can decide to skip this frame
+            # consistently (Codex R1 IMPORTANT): avoid silent omission.
+            frame_id = self.current_frame_id
+            self.P_u_by_frame.setdefault(frame_id, {})[layer_idx] = None
+            return
+
+        # Side-channel softmax in float32 on foreground queries only.
+        q_fg = q[:, :, fg_mask, :]                    # [B, H, Nq_fg, d_head]
+        q_fg32 = q_fg.to(self.dtype_softmax)
+        k32 = k.to(self.dtype_softmax)                # [B, H, Nk, d_head]
+        scale = 1.0 / math.sqrt(d_head)
+        scores = torch.matmul(q_fg32, k32.transpose(-2, -1)) * scale
+        weights = F.softmax(scores, dim=-1)           # [B, H, Nq_fg, Nk]
+
+        # Average over heads, then over foreground queries.
+        w_mean_h = weights.mean(dim=1)                # [B, Nq_fg, Nk]
+        w_fg_mean = w_mean_h.mean(dim=1)              # [B, Nk]
+
+        # Batch-mean too (B is typically 1; we keep this for robustness).
+        w_mean = w_fg_mean.mean(dim=0)                # [Nk]
+
+        # 3-bin scatter-add: no in-place aliasing risk (Codex R1 IMPORTANT).
+        slot_tag = slot_tag.to(w_mean.device)
+        P = torch.zeros(3, dtype=w_mean.dtype, device=w_mean.device)
+        P = P.scatter_add(0, slot_tag, w_mean)        # differentiable
+
+        # Cast back to the model's active dtype at caller-side loss time if
+        # needed. We keep float32 here for KL-loss stability.
+        frame_id = self.current_frame_id
+        self.P_u_by_frame.setdefault(frame_id, {})[layer_idx] = P
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Slot-tag builder (hooks SAM2's actual memory-concat site)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class MemoryProvenanceHook:
+    """Capture SAM2's ACTUAL memory-concat provenance at each frame.
+
+    This hook intercepts the concat that happens inside
+    `_prepare_memory_conditioned_features` by wrapping the model's
+    `memory_attention.__call__`. At call time, `memory` has already been
+    built, so its layout IS the ground-truth provenance. The hook uses a
+    per-call closure state populated by the caller immediately before the
+    SAM2 per-frame forward to map (cond frame-indices, recent frame-indices,
+    hw_per_slot, num_obj_ptr_tokens) → slot_tag.
+
+    The caller registers, BEFORE each frame's forward:
+        hook.declare(
+            cond_frame_modified_ids=[0],        # list of modified-seq indices
+            recent_frame_modified_ids=[1,2,3,4,5,6],
+            hw_per_slot=4096,
+            num_obj_ptr_tokens=16,
+            insert_modified_id_set={6, 12, 14},
+        )
+    and after the forward, reads the constructed tag via
+    `hook.last_slot_tag_for(frame_id)`.
+
+    This avoids the Codex R1 CRITICAL #2 pitfall: we never assume "cond is
+    always slot 0" or a fixed num_maskmem.
+    """
+
+    def __init__(self):
+        self._declared: Dict[int, dict] = {}
+        self._last_tag_by_frame: Dict[int, Tensor] = {}
+
+    def declare(self, frame_id: int, **kwargs) -> None:
+        """Declare the planned memory layout for frame_id before its forward."""
+        required = {
+            "cond_frame_modified_ids",
+            "recent_frame_modified_ids",
+            "hw_per_slot",
+            "num_obj_ptr_tokens",
+            "insert_modified_id_set",
+        }
+        missing = required - set(kwargs.keys())
+        if missing:
+            raise ValueError(f"declare() missing keys: {missing}")
+        self._declared[frame_id] = kwargs
+
+    def build_tag_for_frame(
+        self,
+        frame_id: int,
+        device: Optional[torch.device] = None,
+    ) -> Tensor:
+        """Construct slot_tag of length Nk for frame_id based on declared layout.
+
+        Frame-concat order in SAM2 (verified against sam2_base.py):
+            to_cat_memory = [
+                *maskmem from selected conditioning frames (in order),
+                *maskmem from selected recent non-cond frames (in order),
+                obj_ptr tokens (appended at end),
+            ]
+        Each maskmem contributes `hw_per_slot` tokens.
+        Slot-tag values:
+            0: source frame is one of our inserts
+            1: source frame is a clean-prefix frame (recent or cond, if clean)
+            2: other (obj_ptr tokens; conditioning frame if desired)
+        """
+        decl = self._declared.get(frame_id)
+        if decl is None:
+            raise ValueError(f"No declaration for frame_id {frame_id}")
+        hw = decl["hw_per_slot"]
+        n_ptrs = decl["num_obj_ptr_tokens"]
+        cond_ids = list(decl["cond_frame_modified_ids"])
+        recent_ids = list(decl["recent_frame_modified_ids"])
+        insert_set = set(decl["insert_modified_id_set"])
+
+        n_slots = len(cond_ids) + len(recent_ids)
+        Nk = n_slots * hw + n_ptrs
+        tag = torch.full((Nk,), 2, dtype=torch.long, device=device)  # default: other
+
+        # Conditioning frames first.
+        cursor = 0
+        for mid in cond_ids:
+            end = cursor + hw
+            if mid in insert_set:
+                tag[cursor:end] = 0  # insert
+            else:
+                tag[cursor:end] = 2  # conditioning treated as 'other'
+            cursor = end
+        # Recent non-cond frames next.
+        for mid in recent_ids:
+            end = cursor + hw
+            if mid in insert_set:
+                tag[cursor:end] = 0
+            else:
+                tag[cursor:end] = 1  # recent clean
+            cursor = end
+        # Remaining (obj_ptr tokens) stay 2.
+        assert cursor == Nk - n_ptrs, (
+            f"Cursor {cursor} != Nk - n_ptrs = {Nk - n_ptrs}")
+
+        self._last_tag_by_frame[frame_id] = tag
+        return tag
+
+    def last_slot_tag_for(self, frame_id: int) -> Tensor:
+        return self._last_tag_by_frame[frame_id]
 
 
 def build_fg_query_mask(
     true_region_mask: Tensor,  # [H, W] bool or {0,1}
-    q_token_hw: tuple,         # (H_q, W_q) of the query token grid
+    q_token_hw: tuple,         # (H_q, W_q) of the memory-attention query grid
 ) -> Tensor:
-    """Downsample a true-region mask at image resolution to the query-token grid.
+    """Downsample a full-resolution target-region mask to the query-token grid.
 
-    Args:
-        true_region_mask: [H, W] on any device; foreground region `C_u` after
-            erode/flow-warp.
-        q_token_hw: (H_q, W_q) of the memory-attention query feature map.
-
-    Returns:
-        [H_q*W_q] bool tensor, flattened in row-major order matching SAM2's
-        `.flatten(2).permute(2, 0, 1)` convention on feature maps.
+    SAM2 flattens image features with `.flatten(2).permute(2, 0, 1)`, yielding
+    row-major [H_q * W_q] order. We replicate that here after
+    nearest-neighbor downsampling.
     """
     if true_region_mask.dim() != 2:
         raise ValueError(
-            f"true_region_mask must be 2D [H,W], got shape {true_region_mask.shape}")
+            f"true_region_mask must be 2D [H,W], got {true_region_mask.shape}")
     H_q, W_q = q_token_hw
     m = true_region_mask.float().unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
     m_down = F.interpolate(m, size=(H_q, W_q), mode="nearest").squeeze()
     fg = (m_down > 0.5).view(-1)
     return fg
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# L_stale helper (safe KL with epsilon clamp)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def l_stale_from_P_u_list(
+    P_u_list: List[Tensor],    # list of [3] tensors (one per frame in V)
+    Q: Tensor,                 # [3] target distribution
+    eps: float = 1e-6,
+) -> Tensor:
+    """Compute L_stale = (1/|V|) sum_u KL(Q || P_u), with epsilon clamp.
+
+    P_u that are None (e.g. empty foreground on that frame) are SKIPPED,
+    and the denominator is the number of valid frames. If ALL frames are
+    skipped, returns a zero-value tensor that does NOT backprop (caller
+    should notice the |V|=0 situation via the returned scalar being exactly 0
+    in fp32, or via logging the skip count outside this function).
+    """
+    valid = [P for P in P_u_list if P is not None]
+    if len(valid) == 0:
+        return torch.zeros((), device=Q.device, dtype=Q.dtype)
+    # Clamp + renormalize each P_u to prevent log(0) in KL.
+    KLs = []
+    for P in valid:
+        P_clamped = P.clamp(min=eps)
+        P_norm = P_clamped / P_clamped.sum()
+        # KL(Q || P) = sum_i Q_i * log(Q_i / P_i); we ignore Q_i=0 terms.
+        q_nz = (Q > 0)
+        kl = (Q[q_nz] * (Q[q_nz].clamp(min=eps).log() - P_norm[q_nz].log())).sum()
+        KLs.append(kl)
+    return torch.stack(KLs).mean()
