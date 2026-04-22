@@ -1,0 +1,37 @@
+{
+  "round": 3,
+  "threadId": "019db065-8a48-7732-9ce3-f34cc23fc680",
+  "status": "in_progress",
+  "difficulty": "medium",
+  "topic": "insert_fidelity",
+  "last_score": 6.5,
+  "ceiling_score": 7.0,
+  "last_verdict": "Almost — score 6.5/10 with 'two attack regimes' framing promoted from failure to mechanistic finding. Reviewer sets final experiment: DAVIS-10 with always-hi-fi vs gated-hi-fi (hi-fi only when NOT is_natural_distractor). Paper framing must be regime-aware Pareto, NOT universal fidelity fix.",
+  "pending_experiments": [
+    "hifi_all_10clip_screen_hifi_all_GPU0",
+    "hifi_gated_10clip_screen_hifi_gated_GPU1"
+  ],
+  "round_summary": {
+    "r1_review_score": 7.0,
+    "r1_pilot_A_hard_clamp_3clip": {
+      "cows_drop": 0.032, "dog_drop": 0.978, "bmx_drop": 0.433,
+      "insert_lpips_mean": 0.143,
+      "verdict": "cows collapsed - hard clamp removes global adversarial field"
+    },
+    "r2_pilot_B_inpaint_f_prev_3clip": {
+      "cows_drop": 0.068, "dog_drop": 0.592, "bmx_drop": 0.438,
+      "insert_lpips_mean": 0.148,
+      "verdict": "inpaint restores redirect signal but does not help attack; rejected"
+    },
+    "r2_review_score": 6.0,
+    "r3_pilot_C_spatial_eps_3clip": {
+      "cows_drop": 0.049, "dog_drop": 0.967, "bmx_drop": 0.435,
+      "insert_lpips_mean": 0.144,
+      "verdict": "eps_outside=2/255 does not rescue cows - attack needs full 8/255 budget frame-wide"
+    },
+    "r3_review_score": 6.5,
+    "r3_mechanism_finding": "two_attack_regimes: appearance-paste (non-distractor, hi-fi helps) vs distractor-hijack (natural-distractor, needs distributed perturbation)"
+  },
+  "final_design": "pending_full_davis10_gated_results",
+  "timestamp": "2026-04-21T23:27:00"
+}
