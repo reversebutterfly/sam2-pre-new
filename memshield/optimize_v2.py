@@ -126,7 +126,14 @@ class OptimizeConfig:
 
 @dataclass
 class VideoBundle:
-    """Frozen per-video inputs resolved before the PGD loop starts."""
+    """Frozen per-video inputs resolved before the PGD loop starts.
+
+    Numpy arrays below are the "source of truth" inputs from upstream
+    (decoy search, ProPainter, clean SAM2 forward). The `_cache_*` fields
+    are populated lazily by `_ensure_device_cache()` with torch tensors
+    on `cfg.device` so the hot inner loop does not re-materialize from
+    numpy every PGD step (Codex R5 IMPORTANT #4).
+    """
     frames_orig: np.ndarray                # [T_orig, H, W, 3] uint8
     masks_gt: np.ndarray                   # [T_orig, H, W]   uint8 {0,1}
     schedule: ScheduleV2
@@ -139,6 +146,14 @@ class VideoBundle:
     ROI_ins: List[np.ndarray] = field(default_factory=list) # dilated(D ∪ C)
     # Per-eval-frame foreground-query regions (clean SAM2 prediction, eroded):
     C_u: List[np.ndarray] = field(default_factory=list)     # |U| × [H, W] uint8
+
+    # Device-tensor caches — populated once by _ensure_device_cache(),
+    # reused across all PGD steps.
+    _cache_frames: Optional[torch.Tensor] = None    # [T, H, W, 3] float
+    _cache_bases: Optional[torch.Tensor] = None     # [K, H, W, 3] float
+    _cache_edit: Optional[torch.Tensor] = None      # [K, H, W, 1] float
+    _cache_device: Optional[torch.device] = None
+    _cache_dtype: Optional[torch.dtype] = None
 
 
 @dataclass
@@ -160,22 +175,34 @@ class Sam2ForwardFn(Protocol):
     """Protocol for SAM2 forward callable used by the optimizer.
 
     Called per PGD step with `mode="attack"` and once at setup with
-    `mode="clean"`. Must return:
+    `mode="clean"`.
 
+    Input contract
+    --------------
+    `modified_video` is the MODIFIED PREFIX only, shape
+    `[T_prefix_mod, H, W, 3]` in `[0, 1]` float. The implementation is
+    responsible for appending the clean suffix `bundle.frames_orig[
+    cfg.T_prefix_orig : cfg.T_prefix_orig + cfg.eval_window_size]` before
+    running SAM2 — the optimizer does not modify the suffix.
+
+    Output contract
+    ---------------
         {
-            "insert_logits": List[Tensor[H, W]],
-                # One logit (pre-sigmoid) map per inserted frame, in
+            "insert_logits": List[Tensor[H, W]],  # len == cfg.K_ins
+                # Logit (pre-sigmoid) maps, one per inserted frame, in
                 # schedule.slots order. For Stage 1 L_loss.
-            "eval_logits":   List[Tensor[H, W]],
-                # One per eval frame u ∈ U. For Stage 2/3 L_rec.
-            "P_u_list":      List[Optional[Tensor[3]]],
+            "eval_logits":   List[Tensor[H, W]],  # len == cfg.eval_window_size
+                # One per eval frame u ∈ U, in original-time order
+                # (u = T_prefix_orig .. T_prefix_orig + eval_window_size - 1).
+                # For Stage 2/3 L_rec.
+            "P_u_list":      List[Optional[Tensor[3]]],  # len == cfg.stale_window_size
                 # One per stale frame v ∈ V (first stale_window_size
                 # frames after the last insert). Shape [3] = [A_ins,
-                # A_recent, A_other]. None = probe did not fire for
-                # that frame. For Stage 2/3 L_stale.
+                # A_recent, A_other]. None = probe did not fire for that
+                # frame. For Stage 2/3 L_stale.
             "pred_masks":    Optional[List[Tensor[H, W]]],
-                # Optional — only used when mode="clean" to populate
-                # bundle.C_u.
+                # Only populated when mode="clean"; caller uses this to
+                # build `bundle.C_u`.
         }
 
     All returned tensors must be on the same device as `modified_video`
@@ -191,6 +218,52 @@ class Sam2ForwardFn(Protocol):
     ) -> Dict[str, object]: ...
 
 
+def _compute_lpips_per_insert(
+    state: PGDState,
+    bundle: VideoBundle,
+    cfg: OptimizeConfig,
+    lpips_fn: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]],
+) -> List[torch.Tensor]:
+    """Fresh LPIPS evaluation. MUST be called inside each forward/backward
+    pair — graphs are freed on backward, so reusing an old LPIPS tensor
+    across Stage-3 substeps causes a "backward through freed graph" error.
+
+    Contract for `lpips_fn`:
+        Input: two tensors each of shape `[H, W, 3]` in `[0, 1]`.
+        Output: scalar torch.Tensor (LPIPS distance).
+    If callers have a standard `[B, 3, H, W]`-in-`[-1, 1]` LPIPS model,
+    they should wrap it with a small adapter before passing here.
+
+    `f_prev` uses the CLEAN preceding original (not `frames_orig + δ`):
+    keeps the fidelity constraint honest (Codex R5 IMPORTANT #1).
+    Raises if a schedule slot has `o_after == -1` (should be unreachable
+    given Chunk 2 enforcement, but we guard explicitly).
+    """
+    if lpips_fn is None:
+        return []
+    device = state.nu.device
+    dtype = state.nu.dtype
+    _ensure_device_cache(bundle, device, dtype)
+
+    bases = bundle._cache_bases          # [K, H, W, 3]
+    edit = bundle._cache_edit            # [K, H, W, 1]
+    frames_t = bundle._cache_frames      # [T_orig, H, W, 3]
+
+    vals: List[torch.Tensor] = []
+    for k, slot in enumerate(bundle.schedule.slots):
+        if slot.o_after < 0:
+            raise RuntimeError(
+                f"slot {k} has o_after=-1; first-position inserts not "
+                "supported by optimize_unified_v2 LPIPS path."
+            )
+        # CLEAN f_prev — no δ term, so LPIPS measures drift from the
+        # original prefix frame, not a moving attacked one.
+        f_prev = frames_t[slot.o_after]
+        x_ins = (bases[k] + state.nu[k] * edit[k]).clamp(0.0, 1.0)
+        vals.append(lpips_fn(x_ins, f_prev))
+    return vals
+
+
 # ---------------------------------------------------------------------------
 # Frame assembly (differentiable)
 # ---------------------------------------------------------------------------
@@ -201,6 +274,29 @@ def _to_device_tensor(arr: np.ndarray, device: torch.device,
     """numpy uint8 [..., 3] -> float tensor [..., 3] in [0,1]."""
     t = torch.from_numpy(arr).to(device=device, dtype=dtype) / 255.0
     return t
+
+
+def _ensure_device_cache(bundle: VideoBundle, device: torch.device,
+                         dtype: torch.dtype) -> None:
+    """Populate bundle._cache_* with device tensors (once per bundle).
+
+    Called lazily on first forward so the hot inner loop does not
+    re-materialize tensors from numpy every step. If device or dtype
+    changes, the cache is rebuilt.
+    """
+    if (bundle._cache_frames is not None
+            and bundle._cache_device == device
+            and bundle._cache_dtype == dtype):
+        return
+    bundle._cache_frames = _to_device_tensor(bundle.frames_orig, device, dtype)
+    bundle._cache_bases = torch.stack([
+        _to_device_tensor(b, device, dtype) for b in bundle.insert_bases
+    ], dim=0)
+    bundle._cache_edit = torch.stack([
+        torch.from_numpy(m).to(device=device, dtype=dtype) for m in bundle.edit_masks
+    ], dim=0).unsqueeze(-1)
+    bundle._cache_device = device
+    bundle._cache_dtype = dtype
 
 
 def build_modified_video(
@@ -219,18 +315,16 @@ def build_modified_video(
         * else (m is an original o):        modified[m] = frames_orig[o] + δ[o]
 
     ν is masked to the edit region (outside = 0). δ is L∞-clamped upstream
-    by `clamp_delta_`.
+    by `clamp_delta_`. Device tensors are cached on bundle for reuse
+    across PGD steps.
     """
     device = state.nu.device
     dtype = state.nu.dtype
+    _ensure_device_cache(bundle, device, dtype)
 
-    frames_t = _to_device_tensor(bundle.frames_orig, device, dtype)   # [T, H, W, 3]
-    insert_bases_t = torch.stack([
-        _to_device_tensor(b, device, dtype) for b in bundle.insert_bases
-    ], dim=0)                                                         # [K, H, W, 3]
-    edit_masks_t = torch.stack([
-        torch.from_numpy(m).to(device=device, dtype=dtype) for m in bundle.edit_masks
-    ], dim=0).unsqueeze(-1)                                           # [K, H, W, 1]
+    frames_t = bundle._cache_frames                                    # [T, H, W, 3]
+    insert_bases_t = bundle._cache_bases                               # [K, H, W, 3]
+    edit_masks_t = bundle._cache_edit                                  # [K, H, W, 1]
 
     nu_masked = state.nu * edit_masks_t                                # gradient lives on edit region
     attacked_inserts = (insert_bases_t + nu_masked).clamp(0.0, 1.0)    # [K, H, W, 3]
@@ -520,78 +614,77 @@ def optimize_unified_v2(
                         requires_grad=True)
     state = PGDState(nu=nu, delta=delta, mu_nu=cfg.mu_nu_initial, step=0)
 
-    # 4. Loop.
+    # 4. Loop. LPIPS is computed fresh inside each forward/backward pair
+    # (Codex R5 CRITICAL #1) so the autograd graph is never backpropped
+    # twice. We also bookkeep a detached `last_max_lpips` across substeps
+    # for the Lagrange update at step boundaries.
+    last_max_lpips: Optional[float] = None
+    mode = "attack"
+
+    def _one_forward_backward(
+        stage_fn, gate_loss=None, gate_rec=None, do_nu=False, do_delta=False,
+        is_stage1=False, is_stage2=False,
+    ) -> Dict[str, float]:
+        nonlocal last_max_lpips
+        modified_video = build_modified_video(bundle, state, cfg)
+        fwd_local = sam2_forward_fn(modified_video=modified_video, mode=mode,
+                                    cfg=cfg, bundle=bundle)
+        lpips_vals = _compute_lpips_per_insert(state, bundle, cfg, lpips_fn)
+
+        if is_stage1:
+            total_local, diag_local = _compute_stage1_loss(
+                fwd_local, bundle, state, cfg,
+                lpips_values=lpips_vals or None,
+            )
+            _step_nu(state, total_local, cfg)
+        elif is_stage2:
+            total_local, diag_local = _compute_stage2_3_loss(
+                fwd_local, bundle, state, cfg, gate_loss=0.0, gate_rec=1.0,
+                lpips_values=lpips_vals or None,
+            )
+            _step_delta(state, total_local, cfg)
+        else:
+            total_local, diag_local = _compute_stage2_3_loss(
+                fwd_local, bundle, state, cfg,
+                gate_loss=gate_loss, gate_rec=gate_rec,
+                lpips_values=lpips_vals or None,
+            )
+            _step_joint(state, total_local, cfg, do_nu=do_nu, do_delta=do_delta)
+
+        if lpips_vals:
+            last_max_lpips = max(float(lp.detach()) for lp in lpips_vals)
+        return diag_local
+
     for step in range(1, cfg.n_steps + 1):
         state.step = step
-        modified_video = build_modified_video(bundle, state, cfg)
-        mode = "attack"
-        fwd = sam2_forward_fn(modified_video=modified_video, mode=mode,
-                              cfg=cfg, bundle=bundle)
 
-        # Compute LPIPS per insert if provided.
-        lpips_values: List[torch.Tensor] = []
-        if lpips_fn is not None:
-            for k, slot in enumerate(bundle.schedule.slots):
-                base = _to_device_tensor(bundle.insert_bases[k], device, dtype)
-                # f_prev_k: the attacked original frame just before the insert.
-                o_prev = slot.o_after
-                f_prev = _to_device_tensor(
-                    bundle.frames_orig[o_prev], device, dtype,
-                ) + state.delta[o_prev]
-                f_prev = f_prev.clamp(0.0, 1.0)
-                x_ins = (base + state.nu[k] * torch.from_numpy(
-                    bundle.edit_masks[k]
-                ).to(device=device, dtype=dtype).unsqueeze(-1)).clamp(0.0, 1.0)
-                # lpips_fn takes (a, b) each as [H, W, 3] in [0, 1] OR
-                # [B, 3, H, W]; adapt to the latter for standard lpips libs.
-                lp = lpips_fn(x_ins, f_prev)
-                lpips_values.append(lp)
-
-        # Dispatch to stage.
         if step <= cfg.stage1_end:
-            total, diag = _compute_stage1_loss(
-                fwd, bundle, state, cfg, lpips_values=lpips_values or None,
-            )
-            _step_nu(state, total, cfg)
+            diag = _one_forward_backward(None, is_stage1=True)
             stage = 1
         elif step <= cfg.stage2_end:
-            total, diag = _compute_stage2_3_loss(
-                fwd, bundle, state, cfg, gate_loss=0.0, gate_rec=1.0,
-                lpips_values=lpips_values or None,
-            )
-            _step_delta(state, total, cfg)
+            diag = _one_forward_backward(None, is_stage2=True)
             stage = 2
         else:
-            # Stage 3: full L, 2:1 δ:ν. Do `ratio` δ-only substeps with
-            # nu frozen, then one joint step with ν+δ.
             stage = 3
             for _sub in range(cfg.stage3_delta_per_nu_ratio):
-                modified_video = build_modified_video(bundle, state, cfg)
-                fwd = sam2_forward_fn(modified_video=modified_video,
-                                      mode=mode, cfg=cfg, bundle=bundle)
-                total, diag = _compute_stage2_3_loss(
-                    fwd, bundle, state, cfg, gate_loss=1.0, gate_rec=1.0,
-                    lpips_values=lpips_values or None,
+                diag = _one_forward_backward(
+                    None, gate_loss=1.0, gate_rec=1.0,
+                    do_nu=False, do_delta=True,
                 )
-                _step_joint(state, total, cfg, do_nu=False, do_delta=True)
-            modified_video = build_modified_video(bundle, state, cfg)
-            fwd = sam2_forward_fn(modified_video=modified_video,
-                                  mode=mode, cfg=cfg, bundle=bundle)
-            total, diag = _compute_stage2_3_loss(
-                fwd, bundle, state, cfg, gate_loss=1.0, gate_rec=1.0,
-                lpips_values=lpips_values or None,
+            diag = _one_forward_backward(
+                None, gate_loss=1.0, gate_rec=1.0,
+                do_nu=True, do_delta=True,
             )
-            _step_joint(state, total, cfg, do_nu=True, do_delta=True)
 
         diag["stage"] = stage
         diag["step"] = step
         state.history.append(diag)
 
-        # Periodic Lagrange update using current LPIPS max.
-        if step % cfg.lagrange_update_every == 0 and lpips_values:
-            max_lp = max(float(lp.detach()) for lp in lpips_values)
+        # Periodic Lagrange update using most recent max LPIPS (detached).
+        if (step % cfg.lagrange_update_every == 0
+                and last_max_lpips is not None):
             state.mu_nu = LV.update_lagrange_mu(
-                state.mu_nu, observed=max_lp, target=cfg.lpips_budget,
+                state.mu_nu, observed=last_max_lpips, target=cfg.lpips_budget,
                 grow=cfg.mu_nu_grow,
             )
 
@@ -757,6 +850,35 @@ def _smoke() -> None:
 
     print(f"  12-step smoke PASS  nu_L1={nu_norm:.4f}  delta_L1={delta_norm:.4f}")
     print(f"  schedule: {diag['schedule']}")
+
+    # -- LPIPS-enabled smoke (Codex R5 MINOR #5) --
+    # Exercises Stage-3 multiple-backward path with a differentiable
+    # surrogate LPIPS (squared L2). Would have caught the "backward
+    # through freed graph" bug in the original Chunk 5a.
+    torch.manual_seed(1)
+    def dummy_lpips(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        # a, b each [H, W, 3] in [0, 1] per the protocol.
+        return ((a - b) ** 2).mean()
+
+    frames2 = np.random.randint(0, 256, (T_orig, H, W, 3), dtype=np.uint8)
+    masks2 = masks.copy()
+    final2, diag2 = optimize_unified_v2(
+        frames_orig=frames2, masks_gt=masks2,
+        sam2_forward_fn=dummy_sam2_forward_fn, cfg=cfg,
+        insert_bases=insert_bases, edit_masks=edit_masks,
+        decoy_offset=(0, 24), D_ins=D_ins, C_ins=C_ins, ROI_ins=ROI_ins,
+        C_u=C_u, lpips_fn=dummy_lpips,
+    )
+    assert final2.shape == final.shape
+    assert len(diag2["history"]) == cfg.n_steps
+    # Lagrange should have updated at step 4 and 8.
+    assert diag2["mu_nu_final"] == cfg.mu_nu_initial or \
+        diag2["mu_nu_final"] >= cfg.mu_nu_initial   # grew or held
+    # Stage 3 took 3 forward/backward per logical step (2 substeps + 1
+    # joint) and none of them crashed with "backward through freed graph".
+    s3 = [h for h in diag2["history"] if h["stage"] == 3]
+    assert len(s3) == cfg.n_steps - cfg.stage2_end
+    print(f"  LPIPS-enabled smoke PASS  mu_nu_final={diag2['mu_nu_final']:.2f}")
 
 
 if __name__ == "__main__":
