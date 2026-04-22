@@ -112,7 +112,8 @@ class ProPainterConfig:
     device: str = "cuda:0"
     neighbor_length: int = 10
     ref_stride: int = 10
-    half_precision: bool = True
+    half_precision: bool = False  # opt in after one clean comparison run
+
 
     def resolve(self) -> "ProPainterConfig":
         """Fill in defaults from env / home dir and return a copy."""
@@ -135,25 +136,39 @@ class ProPainterConfig:
 
 
 def is_propainter_available(config: Optional[ProPainterConfig] = None) -> bool:
-    """Return True if ProPainter's repo and main checkpoint both exist.
+    """Return True if ProPainter's repo and ALL three checkpoints exist.
 
     Does NOT import ProPainter (that would trigger heavy GPU deps at import
     time and fail on missing mmcv/basicsr even when we only want to probe).
+    We require all three checkpoints (main / RAFT / recurrent-flow) because
+    `_load_propainter` unconditionally instantiates all three; reporting
+    True without the recurrent-flow weight would let the first real call
+    die with an opaque checkpoint-load error.
     """
     cfg = (config or ProPainterConfig()).resolve()
     if not os.path.isdir(cfg.root):
         return False
     if not os.path.isfile(cfg.checkpoint):
         return False
-    # Raft weight is strictly required; recurrent-flow is nice-to-have but
-    # ProPainter's default inference path will also use it.
     if not os.path.isfile(cfg.raft_checkpoint):
         return False
-    # The core module must at least be importable as a directory of py files.
-    core_dir = os.path.join(cfg.root, "model")
-    if not os.path.isdir(core_dir):
+    if not os.path.isfile(cfg.recurrent_flow_checkpoint):
+        return False
+    if not os.path.isdir(os.path.join(cfg.root, "model")):
         return False
     return True
+
+
+# Pinned ProPainter source for reproducibility. Update these together if
+# we ever re-install: commit, checkpoint URLs, and SHA256 go in 3b log.
+PROPAINTER_COMMIT = "v0.1.0"   # latest tagged release (update in 3b after
+                               # we verify the tag resolves on the Pro 6000)
+PROPAINTER_WEIGHT_SHAS: Dict[str, str] = {
+    # Fill in during 3b with `sha256sum weights/*.pth` output, e.g.:
+    #   "ProPainter.pth": "<64-hex>",
+    #   "raft-things.pth": "<64-hex>",
+    #   "recurrent_flow_completion.pth": "<64-hex>",
+}
 
 
 def _install_instructions(cfg: ProPainterConfig) -> str:
@@ -162,11 +177,17 @@ def _install_instructions(cfg: ProPainterConfig) -> str:
         f"    repo:       {cfg.root}\n"
         f"    checkpoint: {cfg.checkpoint}\n"
         f"    raft:       {cfg.raft_checkpoint}\n"
+        f"    rec. flow:  {cfg.recurrent_flow_checkpoint}\n"
         "\n"
-        "Install (on Pro 6000, once user has approved):\n"
+        "Install (on Pro 6000, once user has approved). Pinned to "
+        f"{PROPAINTER_COMMIT} for reproducibility:\n"
         "    cd ~\n"
         "    git clone https://github.com/sczhou/ProPainter\n"
-        "    cd ~/ProPainter && bash scripts/download_weights.sh\n"
+        f"    cd ~/ProPainter && git checkout {PROPAINTER_COMMIT}\n"
+        "    bash scripts/download_weights.sh\n"
+        "    # After download, record SHA256 of each .pth and update\n"
+        "    # PROPAINTER_WEIGHT_SHAS in memshield/propainter_base.py:\n"
+        "    sha256sum weights/*.pth\n"
         "    conda activate memshield\n"
         "    pip install av einops imageio imageio-ffmpeg scipy \\\n"
         "                scikit-image opencv-contrib-python matplotlib\n"
@@ -181,19 +202,32 @@ def _install_instructions(cfg: ProPainterConfig) -> str:
 # ---------------------------------------------------------------------------
 
 
-# Lazy-loaded singletons so the model is built exactly once per process.
-_PROPAINTER_STATE: Dict[str, object] = {"inpainter": None, "raft": None,
-                                         "flow_complete": None}
+# Lazy-loaded cache keyed by resolved config so (a) a different device /
+# precision / root builds a fresh instance instead of silently reusing the
+# first one, and (b) a single config re-used across calls costs only one
+# load. Key is a tuple of the load-relevant fields.
+_PROPAINTER_CACHE: Dict[Tuple, Dict[str, object]] = {}
 
 
-def _load_propainter(cfg: ProPainterConfig) -> None:
+def _cfg_key(cfg: ProPainterConfig) -> Tuple:
+    """Tuple of config fields that affect how the models are built."""
+    return (
+        cfg.root, cfg.checkpoint, cfg.raft_checkpoint,
+        cfg.recurrent_flow_checkpoint, cfg.device, cfg.half_precision,
+    )
+
+
+def _load_propainter(cfg: ProPainterConfig) -> Dict[str, object]:
     """Import and instantiate ProPainter. Raises InstallationError if absent.
 
-    This is deferred to first-call so the rest of the codebase can import
-    memshield.propainter_base without triggering the import cascade.
+    Returns a dict `{"raft":..., "flow_complete":..., "inpainter":...}`.
+    Cached by `_cfg_key(cfg)` so repeated calls with the same config are
+    cheap and different configs build their own instances.
     """
-    if _PROPAINTER_STATE["inpainter"] is not None:
-        return
+    key = _cfg_key(cfg)
+    cached = _PROPAINTER_CACHE.get(key)
+    if cached is not None:
+        return cached
 
     if not is_propainter_available(cfg):
         raise InstallationError(_install_instructions(cfg))
@@ -201,16 +235,9 @@ def _load_propainter(cfg: ProPainterConfig) -> None:
     import sys
     import torch  # type: ignore
 
-    # Ensure the ProPainter repo is on sys.path so `from model.propainter
-    # import InpaintGenerator` works. ProPainter doesn't ship a pip package.
     if cfg.root not in sys.path:
         sys.path.insert(0, cfg.root)
 
-    # The following imports are placeholders for the real module layout
-    # inside sczhou/ProPainter. Actual classes:
-    #     model.propainter.InpaintGenerator      (main inpainter)
-    #     RAFT                                   (flow estimator, repo-local)
-    #     model.recurrent_flow_completion.RecurrentFlowCompleteNet
     try:
         from model.propainter import InpaintGenerator                 # type: ignore
         from model.modules.flow_comp_raft import RAFT_bi              # type: ignore
@@ -225,7 +252,6 @@ def _load_propainter(cfg: ProPainterConfig) -> None:
         ) from exc
 
     device = torch.device(cfg.device)
-    dtype = torch.float16 if cfg.half_precision else torch.float32
 
     raft = RAFT_bi(cfg.raft_checkpoint, device)
     flow_complete = RecurrentFlowCompleteNet(cfg.recurrent_flow_checkpoint)
@@ -238,38 +264,64 @@ def _load_propainter(cfg: ProPainterConfig) -> None:
             + list(inpainter.parameters()):
         p.requires_grad_(False)
 
-    _PROPAINTER_STATE["raft"] = raft
-    _PROPAINTER_STATE["flow_complete"] = flow_complete
-    _PROPAINTER_STATE["inpainter"] = inpainter
+    bundle = {"raft": raft, "flow_complete": flow_complete,
+              "inpainter": inpainter, "cfg": cfg}
+    _PROPAINTER_CACHE[key] = bundle
+    return bundle
 
 
 def _propainter_fill(
-    frame_prev: np.ndarray,
-    frame_after: np.ndarray,
-    mask_fill: np.ndarray,
+    frames: "np.ndarray | list",
+    masks: "np.ndarray | list",
+    target_idx: int,
     cfg: ProPainterConfig,
 ) -> np.ndarray:
-    """Use ProPainter to synthesize the missing content between two keyframes.
+    """Run ProPainter on a video clip and return the filled target frame.
 
-    We feed a two-frame "video" [frame_prev, frame_after] with `mask_fill`
-    marking the region to inpaint on both frames, letting the model produce
-    a temporally coherent reconstruction; we return the predicted frame_prev
-    with the mask-region filled as the insert base.
+    Sequence-based contract (matches ProPainter's intended inference API).
 
-    NOTE: This is a specification stub. The actual wiring to ProPainter's
-    InpaintGenerator.forward signature depends on tensor layout and the
-    neighbor/ref-stride protocol their inference loop uses; we will bind
-    it concretely once ProPainter is installed and we can inspect the
-    module's .forward. Until then this raises InstallationError on first
-    call; `create_insert_base(strategy="propainter", ...)` will therefore
-    also raise, as desired.
+    Args:
+        frames: Length-T sequence of `[H, W, 3]` uint8 RGB frames. Arranged
+            as `np.ndarray[T, H, W, 3]` or a Python list of per-frame
+            arrays. The "insert slot" frame can be any placeholder (zeros,
+            copy of a neighbor, whatever — it gets masked out and ignored).
+        masks: Length-T sequence of `[H, W]` uint8 fill masks, one per
+            frame. A value of 1 marks a pixel to be inpainted, 0 to keep.
+            For the middle-slot design: `masks[i] = ones` only at
+            `i == target_idx`, zero elsewhere.
+        target_idx: Index into `frames` whose filled version is returned.
+        cfg: Resolved ProPainterConfig.
+
+    Returns:
+        The filled version of `frames[target_idx]` as `[H, W, 3]` uint8.
+
+    Raises:
+        InstallationError if ProPainter is not installed.
+        NotImplementedError until Chunk 3b wires the actual forward call.
+
+    Design note (from Codex R3, 2026-04-22): the original stub took
+    `(frame_prev, frame_after, mask_fill)` for a "two-frame video" — that
+    is a poor fit for ProPainter's recurrent flow-completion module which
+    expects a neighbor window (default length 10) and per-frame masks.
+    The recommended formulation for MemoryShield is a 3-frame clip
+    `[frame_prev, insert_slot, frame_after]` with `masks = [0, 1, 0]` and
+    `target_idx = 1`, letting ProPainter fill a single center slot from
+    its two clean neighbors. Chunks 3b / 5 can extend the clip to the
+    entire clean prefix if the 3-frame design is insufficient.
     """
     _load_propainter(cfg)  # raises InstallationError if not installed
+
+    T = len(frames)
+    if not (0 <= target_idx < T):
+        raise ValueError(f"target_idx={target_idx} out of range for T={T}")
+    if len(masks) != T:
+        raise ValueError(f"len(masks)={len(masks)} != T={T}")
+
     raise NotImplementedError(
         "ProPainter forward-wiring is specified but not yet implemented; "
-        "this is pending Chunk 3b (actual Pro-6000 installation + smoke "
-        "test). The rest of the call chain from create_insert_base() is "
-        "complete and already raises a clear install error upstream."
+        "this is pending Chunk 3b (Pro-6000 installation + inspection of "
+        "InpaintGenerator.forward signature). The call chain from "
+        "create_insert_base() already raises this cleanly upstream."
     )
 
 
@@ -281,39 +333,41 @@ def create_insert_base_propainter(
     decoy_offset: Tuple[int, int],
     seam_dilate_px: int = 5,
     safety_margin: int = 8,
+    feather_px: int = 3,
     config: Optional[ProPainterConfig] = None,
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """ProPainter-based insert base.
+    """ProPainter-based insert base (3-frame middle-slot design).
 
-    Pipeline (same spirit as create_decoy_base_frame_hifi but with
-    flow-guided inpainting instead of per-frame Poisson blending):
+    Pipeline (3-frame clip formulation per Codex R3 recommendation):
 
     1. Compute paste region = shifted copy of mask_after by decoy_offset.
        If paste region violates border safety, return None (caller tries
        another offset).
-    2. Build a two-frame video [frame_prev, frame_after] and a fill mask
-       covering the union of:
-           - the true object region in frame_prev (mask_prev, dilated)
-             so ProPainter removes the true object ("object deletion"
-             signal for memory redirect)
-           - the paste region in frame_prev (so ProPainter also fills in
-             the decoy location with temporally-coherent content)
-    3. Run ProPainter to get a temporally-consistent fill for frame_prev.
-    4. Composite the object crop (from frame_after) onto the inpainted
-       background at the decoy location. Use ProPainter's output INSTEAD
-       of cv2.seamlessClone to avoid Poisson-blending artifacts.
-    5. Edit support mask = dilated(paste_region) ∪ dilated(mask_prev).
+    2. Build a length-3 "video" `[frame_prev, placeholder, frame_after]`
+       with per-frame masks `[0, 1, 0]` — ProPainter sees two clean
+       neighbors and is asked to fill exactly the middle slot.
+    3. Call _propainter_fill(frames, masks, target_idx=1, cfg) to get an
+       inpainted middle frame. This is what ProPainter is built for
+       (flow-guided recurrent fill from a neighbor window).
+    4. On the returned middle frame, alpha-composite the object crop
+       (from frame_after[y0:y1, x0:x1]) at the decoy center with a
+       `feather_px`-pixel soft alpha to avoid a hard seam.
+    5. If the user wants additional true-object suppression signal in
+       frame_prev's position, we also modify the crop's edge blending
+       using `prev_mask_bin` as support in the edit_mask return.
+    6. edit_mask = dilated(paste_region) ∪ dilated(mask_prev). This is
+       the region PGD is allowed to perturb downstream.
 
     Args match `decoy.create_decoy_base_frame_hifi` so it can serve as a
-    drop-in replacement. The only extra arg is `config`; default reads
-    PROPAINTER_ROOT env or ~/ProPainter.
+    drop-in replacement; extra kwargs: `feather_px`, `config`.
 
     Returns:
         (base_frame_uint8, edit_mask_uint8) on success; None on
-        border-safety / install / model failures.
+        border-safety failure.
 
     Raises:
-        InstallationError if ProPainter is selected but not installed.
+        InstallationError: when ProPainter is not installed.
+        NotImplementedError: until Chunk 3b wires the actual forward.
     """
     cfg = (config or ProPainterConfig()).resolve()
     H, W = frame_prev.shape[:2]
@@ -334,32 +388,53 @@ def create_insert_base_propainter(
     ):
         return None
 
-    # Region to ask ProPainter to fill: true-obj (prev) + paste (decoy loc).
     prev_mask = mask_prev if mask_prev is not None else mask_after
     prev_mask_bin = (prev_mask > 0).astype(np.uint8)
     paste_region = _decoy.shift_mask(mask_ref, dy, dx)
-    fill_mask = ((prev_mask_bin > 0) | (paste_region > 0)).astype(np.uint8)
+    # Middle-frame fill region: true-obj (at prev position) + paste location.
+    middle_mask = ((prev_mask_bin > 0) | (paste_region > 0)).astype(np.uint8)
 
-    # Inpaint frame_prev (gives a clean, temporally-consistent background).
-    filled_prev = _propainter_fill(frame_prev, frame_after, fill_mask, cfg)
+    # Build 3-frame clip; placeholder can be the average of neighbors — it
+    # gets masked out completely and never influences the output.
+    placeholder = ((frame_prev.astype(np.int32) + frame_after.astype(np.int32))
+                   // 2).astype(np.uint8)
+    frames = np.stack([frame_prev, placeholder, frame_after], axis=0)
+    masks = np.stack([
+        np.zeros((H, W), dtype=np.uint8),
+        middle_mask,
+        np.zeros((H, W), dtype=np.uint8),
+    ], axis=0)
 
-    # Composite object crop onto inpainted background at decoy location.
+    filled_middle = _propainter_fill(frames, masks, target_idx=1, cfg=cfg)
+
+    # Alpha-composite object crop onto inpainted middle frame with feathered
+    # edge so there's no hard seam where the crop meets the fill.
+    import cv2  # local import — module-top stays light
     obj_crop = frame_after[y0:y1, x0:x1]
-    mask_crop = mask_ref[y0:y1, x0:x1]
+    mask_crop = mask_ref[y0:y1, x0:x1].astype(np.float32)
+    if feather_px > 0:
+        ker_f = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * feather_px + 1, 2 * feather_px + 1)
+        )
+        mask_crop_soft = cv2.GaussianBlur(
+            cv2.dilate(mask_crop, ker_f, iterations=1),
+            (2 * feather_px + 1, 2 * feather_px + 1), 0.0,
+        )
+        mask_crop_soft = np.clip(mask_crop_soft, 0.0, 1.0)
+    else:
+        mask_crop_soft = mask_crop
+
     paste_h, paste_w = mask_crop.shape
     half_h, half_w = paste_h // 2, paste_w // 2
     py0, py1 = cy_obj - half_h, cy_obj - half_h + paste_h
     px0, px1 = cx_obj - half_w, cx_obj - half_w + paste_w
-    base = filled_prev.copy()
-    # Soft alpha composite using mask_crop (same dtype as result).
-    alpha = mask_crop.astype(np.float32)[..., None]
+    base = filled_middle.copy()
+    alpha = mask_crop_soft[..., None]
     base[py0:py1, px0:px1] = (
         alpha * obj_crop.astype(np.float32)
         + (1.0 - alpha) * base[py0:py1, px0:px1].astype(np.float32)
     ).clip(0, 255).astype(np.uint8)
 
-    # Edit support mask
-    import cv2  # local to keep module-top clean
     if seam_dilate_px > 0:
         ker = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (2 * seam_dilate_px + 1, 2 * seam_dilate_px + 1)
@@ -367,8 +442,7 @@ def create_insert_base_propainter(
         paste_dil = cv2.dilate(paste_region, ker, iterations=1)
         prev_dil = cv2.dilate(prev_mask_bin, ker, iterations=1)
     else:
-        paste_dil = paste_region
-        prev_dil = prev_mask_bin
+        paste_dil, prev_dil = paste_region, prev_mask_bin
     edit_mask = ((paste_dil > 0) | (prev_dil > 0)).astype(np.uint8)
 
     return base, edit_mask
