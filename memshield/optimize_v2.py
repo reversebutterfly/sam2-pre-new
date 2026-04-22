@@ -133,9 +133,15 @@ class VideoBundle:
     are populated lazily by `_ensure_device_cache()` with torch tensors
     on `cfg.device` so the hot inner loop does not re-materialize from
     numpy every PGD step (Codex R5 IMPORTANT #4).
+
+    `frames_orig` is the FULL clean video (prefix + eval suffix), length
+    `cfg.T_prefix_orig + cfg.eval_window_size`. The optimizer only
+    perturbs the first `cfg.T_prefix_orig` frames via `state.delta`; the
+    suffix is read-only and is used by the SAM2 forward impl to evaluate
+    recovery (Codex R6 MINOR on unified contract).
     """
-    frames_orig: np.ndarray                # [T_orig, H, W, 3] uint8
-    masks_gt: np.ndarray                   # [T_orig, H, W]   uint8 {0,1}
+    frames_orig: np.ndarray                # [T_full, H, W, 3] uint8
+    masks_gt: np.ndarray                   # [T_full, H, W]   uint8 {0,1}
     schedule: ScheduleV2
     insert_bases: List[np.ndarray]         # K × [H, W, 3] uint8
     edit_masks: List[np.ndarray]           # K × [H, W] uint8
@@ -333,12 +339,21 @@ def build_modified_video(
     T_mod = bundle.schedule.T_prefix_mod
     H, W = frames_t.shape[1], frames_t.shape[2]
     # Build row-by-row; unavoidable with dynamic insert positions.
+    # Index maps are cached on the bundle — they depend only on the
+    # schedule which is frozen per-video (Codex R6 MINOR).
+    if getattr(bundle, "_cache_idx_maps", None) is None:
+        bundle._cache_idx_maps = build_index_maps_v2(bundle.schedule)      # type: ignore[attr-defined]
+        bundle._cache_mod_to_k = {                                         # type: ignore[attr-defined]
+            s.m_k: k for k, s in enumerate(bundle.schedule.slots)
+        }
+        bundle._cache_insert_mods = set(                                   # type: ignore[attr-defined]
+            bundle._cache_idx_maps["insert_mod_indices"]
+        )
     out_rows: List[torch.Tensor] = []
-    idx_maps = build_index_maps_v2(bundle.schedule)
+    idx_maps = bundle._cache_idx_maps                                      # type: ignore[attr-defined]
     mod_to_orig = idx_maps["mod_to_orig"]
-    insert_mods = set(idx_maps["insert_mod_indices"])
-    # Map each insert's modified index back to its slot index (0..K-1).
-    mod_to_k = {s.m_k: k for k, s in enumerate(bundle.schedule.slots)}
+    insert_mods = bundle._cache_insert_mods                                # type: ignore[attr-defined]
+    mod_to_k = bundle._cache_mod_to_k                                      # type: ignore[attr-defined]
 
     for m in range(T_mod):
         if m in insert_mods:
@@ -622,7 +637,7 @@ def optimize_unified_v2(
     mode = "attack"
 
     def _one_forward_backward(
-        stage_fn, gate_loss=None, gate_rec=None, do_nu=False, do_delta=False,
+        gate_loss=None, gate_rec=None, do_nu=False, do_delta=False,
         is_stage1=False, is_stage2=False,
     ) -> Dict[str, float]:
         nonlocal last_max_lpips
@@ -659,20 +674,20 @@ def optimize_unified_v2(
         state.step = step
 
         if step <= cfg.stage1_end:
-            diag = _one_forward_backward(None, is_stage1=True)
+            diag = _one_forward_backward(is_stage1=True)
             stage = 1
         elif step <= cfg.stage2_end:
-            diag = _one_forward_backward(None, is_stage2=True)
+            diag = _one_forward_backward(is_stage2=True)
             stage = 2
         else:
             stage = 3
             for _sub in range(cfg.stage3_delta_per_nu_ratio):
                 diag = _one_forward_backward(
-                    None, gate_loss=1.0, gate_rec=1.0,
+                    gate_loss=1.0, gate_rec=1.0,
                     do_nu=False, do_delta=True,
                 )
             diag = _one_forward_backward(
-                None, gate_loss=1.0, gate_rec=1.0,
+                gate_loss=1.0, gate_rec=1.0,
                 do_nu=True, do_delta=True,
             )
 
@@ -792,9 +807,10 @@ def _smoke() -> None:
       * diagnostics are populated
     """
     torch.manual_seed(0)
-    T_orig, H, W, K = 15, 48, 64, 3
-    frames = np.random.randint(0, 256, (T_orig, H, W, 3), dtype=np.uint8)
-    masks = np.zeros((T_orig, H, W), dtype=np.uint8)
+    T_prefix, eval_len, H, W, K = 15, 7, 48, 64, 3
+    T_full = T_prefix + eval_len
+    frames = np.random.randint(0, 256, (T_full, H, W, 3), dtype=np.uint8)
+    masks = np.zeros((T_full, H, W), dtype=np.uint8)
     masks[:, 10:20, 20:40] = 1
 
     # Mock insert bases + edit masks + semantic regions.
@@ -816,8 +832,9 @@ def _smoke() -> None:
     # Short run so the smoke test is fast.
     cfg = OptimizeConfig(
         n_steps=12, stage1_end=4, stage2_end=8, log_every=1,
-        lagrange_update_every=4, T_prefix_orig=T_orig, K_ins=K,
+        lagrange_update_every=4, T_prefix_orig=T_prefix, K_ins=K,
         device="cpu", stage3_delta_per_nu_ratio=1,
+        eval_window_size=eval_len, stale_window_size=3,
     )
 
     final, diag = optimize_unified_v2(
@@ -831,7 +848,7 @@ def _smoke() -> None:
     assert final.shape == (cfg.T_prefix_orig + cfg.K_ins, H, W, 3), final.shape
     assert final.dtype == np.uint8
     history = diag["history"]
-    assert len(history) == cfg.n_steps
+    assert len(history) == cfg.n_steps, (len(history), cfg.n_steps)
     stages = [h["stage"] for h in history]
     assert stages[:4] == [1, 1, 1, 1]
     assert stages[4:8] == [2, 2, 2, 2]
@@ -860,7 +877,7 @@ def _smoke() -> None:
         # a, b each [H, W, 3] in [0, 1] per the protocol.
         return ((a - b) ** 2).mean()
 
-    frames2 = np.random.randint(0, 256, (T_orig, H, W, 3), dtype=np.uint8)
+    frames2 = np.random.randint(0, 256, (T_full, H, W, 3), dtype=np.uint8)
     masks2 = masks.copy()
     final2, diag2 = optimize_unified_v2(
         frames_orig=frames2, masks_gt=masks2,
@@ -879,6 +896,30 @@ def _smoke() -> None:
     s3 = [h for h in diag2["history"] if h["stage"] == 3]
     assert len(s3) == cfg.n_steps - cfg.stage2_end
     print(f"  LPIPS-enabled smoke PASS  mu_nu_final={diag2['mu_nu_final']:.2f}")
+
+    # -- Stage 3 ratio=2 smoke (Codex R6 MINOR #2) --
+    # Exercises the proposal's default "2:1 delta:nu" Stage-3 schedule.
+    torch.manual_seed(2)
+    cfg3 = OptimizeConfig(
+        n_steps=10, stage1_end=2, stage2_end=5, log_every=1,
+        lagrange_update_every=4, T_prefix_orig=T_prefix, K_ins=K,
+        device="cpu", stage3_delta_per_nu_ratio=2,
+        eval_window_size=eval_len, stale_window_size=3,
+    )
+    final3, diag3 = optimize_unified_v2(
+        frames_orig=frames, masks_gt=masks,
+        sam2_forward_fn=dummy_sam2_forward_fn, cfg=cfg3,
+        insert_bases=insert_bases, edit_masks=edit_masks,
+        decoy_offset=(0, 24), D_ins=D_ins, C_ins=C_ins, ROI_ins=ROI_ins,
+        C_u=C_u, lpips_fn=dummy_lpips,
+    )
+    # Each Stage-3 logical step with ratio=2 does 3 forward/backward pairs.
+    # n_steps=10, stage1=2, stage2=3, stage3=5 logical -> 2 + 3 + 5*3 = 20
+    # but `history` has one entry per logical step, so len == n_steps.
+    assert len(diag3["history"]) == cfg3.n_steps
+    s3_count = sum(1 for h in diag3["history"] if h["stage"] == 3)
+    assert s3_count == cfg3.n_steps - cfg3.stage2_end, s3_count
+    print(f"  Stage3 ratio=2 smoke PASS  mu_nu_final={diag3['mu_nu_final']:.2f}")
 
 
 if __name__ == "__main__":
