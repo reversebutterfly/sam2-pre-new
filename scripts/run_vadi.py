@@ -557,15 +557,23 @@ def run_vadi_for_clip(
     decoy_offset = compute_decoy_offset(clean_out.pseudo_masks[0], frame_0_u8)
     decoy_masks = build_decoy_trajectory(clean_out.pseudo_masks, decoy_offset)
 
-    # Stage 5: remap to processed-space.
+    # Stage 5: remap to processed-space. Keep tensors on the same device
+    # as x_clean so vadi_loss's masked means don't trip a CPU/CUDA split
+    # (pred_logits from forward_fn are on the model device; m_hat and
+    # confidence weight must match).
     m_hat_true_by_t = remap_masks_to_processed_space(
         clean_out.pseudo_masks, W_attacked)
     m_hat_decoy_by_t = remap_masks_to_processed_space(
         decoy_masks, W_attacked)
-    m_hat_true_by_t_t = {t: torch.from_numpy(m).float()
-                         for t, m in m_hat_true_by_t.items()}
-    m_hat_decoy_by_t_t = {t: torch.from_numpy(m).float()
-                          for t, m in m_hat_decoy_by_t.items()}
+    target_device = x_clean.device
+    m_hat_true_by_t_t = {
+        t: torch.from_numpy(m).float().to(target_device)
+        for t, m in m_hat_true_by_t.items()
+    }
+    m_hat_decoy_by_t_t = {
+        t: torch.from_numpy(m).float().to(target_device)
+        for t, m in m_hat_decoy_by_t.items()
+    }
 
     # Stage 6: VADIInputs.
     T_proc = x_clean.shape[0] + len(W_attacked)
