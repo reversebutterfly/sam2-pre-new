@@ -368,6 +368,23 @@ class VADIForwardFn:
       - Returns float32 tensors even under bf16 autocast — downstream
         losses expect fp32 stability.
 
+    Gradient checkpointing (default ON):
+      SAM2.1 Tiny's Hiera backbone retains per-frame activations for the
+      entire T_proc-length autograd graph, costing ~1.4 GB/frame on DAVIS
+      480p at 1024-res input. On a 60-frame clip with K=1 insert this
+      already pushes a 96 GB Blackwell GPU to OOM. With
+      `use_gradient_checkpointing=True` we wrap `predictor.forward_image`
+      in `torch.utils.checkpoint.checkpoint(..., use_reentrant=False)`
+      per frame — the Hiera internal activations are freed after forward
+      and recomputed during backward. Expected ~8-10× VRAM reduction at
+      the cost of ~30% more forward-pass compute during backward. The
+      dict output (backbone_fpn + vision_pos_enc) survives checkpointing
+      fine on PyTorch ≥ 1.11 with `use_reentrant=False`.
+
+      Set `use_gradient_checkpointing=False` if OOM is NOT the bottleneck
+      (e.g., short clip + single GPU with plenty of headroom) and you
+      want the extra 30% wall-clock.
+
     Frame-0 caveat (SAM2.1 mask-input shortcut):
       SAM2.1 tiny's config sets `use_mask_input_as_output_without_sam=True`.
       For the conditioning frame (fid=0, `is_init_cond_frame=True`), this
@@ -395,6 +412,7 @@ class VADIForwardFn:
         device: torch.device,
         *,
         autocast_dtype: Optional[torch.dtype] = torch.bfloat16,
+        use_gradient_checkpointing: bool = True,
     ) -> None:
         # Video / mask resolution must match — if `prompt_mask` and later
         # `processed` disagree on H×W we would silently bilinear-resize into
@@ -418,6 +436,7 @@ class VADIForwardFn:
         self.video_W = int(video_W)
         self.image_size = int(predictor.image_size)
         self.autocast_dtype = autocast_dtype
+        self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
         self._img_mean = torch.tensor(
             IMAGENET_MEAN, device=device, dtype=torch.float32,
         ).view(1, 3, 1, 1)
@@ -485,7 +504,19 @@ class VADIForwardFn:
                 img_norm = _to_sam2_input(
                     frame, self.image_size, self._img_mean, self._img_std,
                 )
-                backbone_out = self.predictor.forward_image(img_norm)
+                # Gradient checkpointing: free Hiera internal activations
+                # after forward; re-run on backward. Cuts per-frame autograd
+                # footprint by ~10× at ~30% extra compute. `use_reentrant=False`
+                # is required for dict outputs (backbone_fpn + vision_pos_enc)
+                # and plays nicely with bf16 autocast.
+                if self.use_gradient_checkpointing and img_norm.requires_grad:
+                    from torch.utils.checkpoint import checkpoint as _ckpt
+                    backbone_out = _ckpt(
+                        self.predictor.forward_image, img_norm,
+                        use_reentrant=False,
+                    )
+                else:
+                    backbone_out = self.predictor.forward_image(img_norm)
                 _, vision_feats, vision_pos, feat_sizes = \
                     self.predictor._prepare_backbone_features(backbone_out)
 

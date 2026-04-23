@@ -128,3 +128,19 @@ bash wifi.sh       # or: bash wifi-run
 - **监督**：GT-free，使用 clean-SAM2 pseudo-labels + 置信加权。
 - **任何 refinement / experiment 都必须遵守**：保留 insert 为核心机制，不能被 reviewer / Codex 建议"删掉 insert 简化为 pure δ"。如果 reviewer 这么建议，pushback 并引用此约束。
 
+## Design Philosophy (2026-04-23)
+
+**仅在正确性瓶颈场景下**：方法有效性 > 代码复用。
+
+- **"正确性瓶颈"** = 指当前方法/实验设计在**科学 / 正确性**层面有问题（例如：eval 不对应论文 claim、attack 机制的理论假设已被证伪、数据监督 target 有歧义、loss function 与希望优化的目标不一致等）。
+- 正确性瓶颈时：**不要默认选择"最小改动、最大复用现有代码"的方案**。先问："如果从零设计，什么方案最直接解决这个问题？" 再评估需要付出多大改动成本。
+- **敢于提出与前面失败方案本质不同的方法**。如果 v1/v2/v3 都失败了，v4 不应该只是 v3 的 "加 epsilon" 微调 —— 应该考虑：是不是某个底层假设要换？是不是整个数据流要重构？是不是该换个攻击面？
+- 前面失败方案的代码"沉没成本"不是保留它们的理由。sunk cost is not a technical argument.
+
+**不适用**（就打补丁/最小改动即可）：
+- **OOM / 显存瓶颈** — 这是工程问题，gradient checkpointing / early-stop / 截断等补丁都是合理工具，不需要为此推翻方法。
+- **速度 / 吞吐瓶颈** — 同上，工程优化不是方法重设计的触发条件。
+- **代码维护性 / 技术债** — 跟方法正确性无关。
+
+这条写进 CLAUDE.md 是因为 VADI 项目里有过 v1→v2→v3→v4 的方法迭代路径，每次重设计都是因为**正确性/有效性**问题（v2 bank-poisoning 被 B2 证伪、v3 pure-δ 用户拒绝）。这种场景下不要因为"改动小"就保留失败方案的残骸。
+
