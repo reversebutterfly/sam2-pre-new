@@ -1,74 +1,164 @@
-# Round 3 Refinement (final polish before ready-check)
+# Round 3 Refinement (VADI)
 
-## Problem Anchor
-[Unchanged — see PROBLEM_ANCHOR_2026-04-22.md]
+## Problem Anchor (verbatim)
 
-## Anchor / Simplicity Check
-- Anchor: preserved.
-- Dominant contribution: unchanged (2-phase preprocessor against SAM2-family self-healing).
-- Remaining changes are reproducibility polish, NOT new mechanisms.
+(see `PROBLEM_ANCHOR_2026-04-23_v4-insert.md`)
 
-## Changes
+## Anchor Check
 
-### I1. Schedule claim re-named + offset sweep added
-- **Old name**: "FIFO-resonant schedule"
-- **New precise name**: **"Write-aligned seed-plus-boundary schedule"** — K_ins-1 inserts placed on multiples of `num_maskmem - 1` (the FIFO period), plus one force-placed boundary insert adjacent to eval start.
-- **Validation tightened**: Claim 4 now tests TWO comparisons (both matched on K_ins, prefix length, last-insert modified-index):
-  - 4a: resonance `m = {6, 12, 14}` vs off-resonance `m = {4, 8, 14}` (period 6 vs 4)
-  - 4b: offset sweep with canonical shape — `m ∈ {5, 11, 14}` / `{6, 12, 14}` / `{7, 13, 14}` — shows the mechanism depends on FIFO-period alignment, not just "put inserts somewhere."
-- Claim now reads: "the write-aligned seed-plus-boundary schedule (period = num_maskmem − 1, K_ins − 1 early inserts + 1 boundary insert) dominates non-aligned schedules at matched budget and matched last-insert recency."
+Preserved. No drift.
 
-### I2. Resolution-invariant confidence lock
-$$ L_\text{conf} = \text{softplus}(\text{logmeanexp}(g_u) - \tau_\text{conf}) $$
-where `logmeanexp(g_u) = logsumexp(g_u) - log(HW)`. `τ_conf` now interpretable as a logit ceiling in natural units, invariant to spatial resolution.
+## Simplicity Check
 
-### I3. CVaR domains made explicit (masked statistics)
-All CVaR terms now defined over masked sets, not over full frame with 1[·] contamination.
+No new components. R3 fixes are precision on existing elements (denominators, decomposition signs, absolute gaps, phantom positions).
 
-**Phase 1 insert-side suppression**:
-$$ \text{SuppressCore}_{\text{ins}_k} = \text{softplus}\big( \text{CVaR}_{0.5}\big( \{g_{\text{ins}_k}(p) : p \in C_{\text{ins}_k}\} \big) + m \big) $$
+## Changes Made
 
-**Phase 2 clean-suffix suppression**:
-$$ \text{Suppress}_u = \text{CVaR}_{0.5}\big( \{g_u(p) : p \in C_u\} \big)^+ $$
+### F11 — Primary denominator = 10, infeasible = failure
 
-All `g_u` are **logit maps** (pre-sigmoid). Masked CVaR_0.5 = median-gated top half inside the region, not contaminated by zeros outside.
+```
+n_success := count of clips meeting ALL causal criteria WITH all fidelity constraints satisfied
+n_infeasible := count of clips where S_feas is empty
+n_feasible_but_fail := count of clips with S_feas non-empty but causal criteria not met
 
-### M1. Q rationale line added + ablation fallback
-Q = [0.6, 0.2, 0.2] chosen so that (i) insert slots exceed recent-clean with margin (0.6 vs 0.2), (ii) `other` has non-negligible target preventing collapse of bank attention onto any single slot type. This is a regularization target, not a learned distribution. If training proves noisy, fall back to margin form:
-$$ L_\text{stale}^\text{margin} = \text{softplus}(\gamma + A^\text{recent} - A^\text{ins}) + \lambda \cdot A^\text{other} $$
-One-line sensitivity ablation can be added: test Q ∈ {[0.5, 0.25, 0.25], [0.6, 0.2, 0.2], [0.7, 0.15, 0.15]} on 3 clips, report stability of attack result.
+Primary headline: n_success / 10 (infeasible counts as failure)
+Report also: n_infeasible / 10, n_feasible_but_fail / 10, feasible-only mean J-drop (diagnostic)
+```
 
-## Final Loss (polished)
+Headline claim in paper is AGAINST THE FULL DAVIS-10 DENOMINATOR. Infeasible = failure.
 
-$$
-\boxed{\; L(\nu, \delta) = L_\text{loss} + \lambda_r L_\text{rec} + \lambda_f L_\text{fid} \;}
-$$
+### F12 — Phantom insertion positions for δ-only baselines
 
-**Phase 1**:
-$$ L_\text{loss} = \frac{1}{K_\text{ins}} \sum_k \Big[ \text{BCE}_\text{ROI}(g_{\text{ins}_k}, \mathbb{1}[D_{\text{ins}_k}]) + \alpha \cdot \text{softplus}\big(\text{CVaR}_{0.5}(\{g_{\text{ins}_k}(p) : p \in C_{\text{ins}_k}\}) + m\big) \Big] $$
+```
+For "top-δ-only (K_ins=0)":
+  W_phantom = top-K positions from rank-sum scorer (same as "Ours")
+  S_δ = ∪_k NbrSet(W_phantom_k) ∪ {0}
+  No inserts placed. δ optimized on S_δ.
 
-**Phase 2**:
-$$ L_\text{rec} = \frac{1}{|U|} \sum_u \Big[ \alpha_\text{supp} \cdot \text{CVaR}_{0.5}(\{g_u(p) : p \in C_u\})^+ + \alpha_\text{conf} \cdot \text{softplus}\big(\text{logmeanexp}(g_u) - \tau_\text{conf}\big) \Big] + \beta \cdot L_\text{stale} $$
+For "random-δ-only (K_ins=0)":
+  W_phantom = K random non-adjacent positions (5 draws, paired bootstrap)
+  S_δ = ∪_k NbrSet(W_phantom_k) ∪ {0}
+  No inserts placed.
+```
 
-**L_stale** (3-bin, with margin fallback):
-$$ L_\text{stale} = \frac{1}{|V|} \sum_u \text{KL}(Q \| P_u), \quad Q = [0.6, 0.2, 0.2] $$
+This matches local-δ support between full method and ablation.
 
-**L_fid**:
-$$ L_\text{fid} = \mu_\nu (\text{LPIPS}(x_{\text{ins}_k}, f_{\text{prev}_k}) - 0.10)^+ + \mu_s \Delta E_\text{seam} $$
+### F13 — Signed anti-suppression decomposition
 
-δ hard-L∞-clamped per step.
+**Before**: `|Δmu_decoy| / |Δmu_true| ≥ 2`
 
-## Final Schedule
+**After**:
+```
+Δmu_true_t  = mu_true_t(attacked)  − mu_true_t(clean)     per t ∈ (inserts ∪ NbrSet)
+Δmu_decoy_t = mu_decoy_t(attacked) − mu_decoy_t(clean)    same t
 
-Canonical (paper): `m = {6, 12, 14}` → inserts after original {5, 10, 11}.
-Off-resonance ablation: `m = {4, 8, 14}` → {3, 6, 11}.
-Offset sweep: `m = {5,11,14} / {6,12,14} / {7,13,14}` for extra robustness.
+Aggregated (mean over t):
+  Δmu_true  = mean_t Δmu_true_t
+  Δmu_decoy = mean_t Δmu_decoy_t
 
-## Everything else unchanged from round-2-refinement.md
-- PGD stages 1-40 ν-only → 41-80 δ-only → 81-200 joint
-- δ L∞ = 4/255 (f0: 2/255), ν LPIPS ≤ 0.10
-- 3 clocks explicit, A_u extraction spec'd
-- ROI-BCE on D_box ∪ C_box dilated 10px
-- RAFT only, SSIM reported not optimized
-- Whole-suffix f15..end reporting
-- Mandatory SAM2Long transfer
+Report both separately.
+
+Anti-implicit-suppression guarantee:
+  Δmu_decoy > 0
+  Δmu_decoy ≥ 2 · max(0, -Δmu_true)
+```
+
+First condition: decoy is actually rising. Second: if true-suppression happens (-Δmu_true > 0), decoy rise is at least 2× that amount. This ensures the contrastive margin wins via decoy elevation, not true collapse alone.
+
+### F14 — Absolute + ratio gaps for placement
+
+```
+Placement causality (replaces ratio-only):
+  ours ≥ max(2.0 · random_mean,  random_mean + 0.05)
+  ours ≥ max(3.0 · bottom,       bottom      + 0.05)
+
+Insert presence (already absolute):
+  ours ≥ top-δ-only + 0.10
+
+ν optimization (already absolute):
+  ours ≥ top-base-insert+δ + 0.05
+```
+
+Ratios alone unstable when denominators are near zero; absolute guards prevent false positives.
+
+### F15 — Summary of all causal claims (consolidated)
+
+Paper's pre-committed success bar (≥ 7/10 feasible clips, primary denominator all 10):
+
+| Claim | Condition |
+|---|---|
+| Headline J-drop | J-drop(ours) ≥ 0.35 |
+| Placement vs random | ours ≥ max(2·rand, rand+0.05) |
+| Placement vs bottom | ours ≥ max(3·bot, bot+0.05) |
+| Insert presence | ours ≥ top-δ-only + 0.10 |
+| ν optimization | ours ≥ top-base-insert+δ + 0.05 |
+| Decoy-not-suppression | Δmu_decoy > 0 AND Δmu_decoy ≥ 2·max(0, -Δmu_true) |
+| Mechanism attribution (Hiera) | R2 restoration ≥ +0.20 |
+| Mechanism attribution (bank) | R3 restoration ≤ +0.02 |
+
+## Revised Proposal (round-3)
+
+### Problem Anchor
+(verbatim, unchanged)
+
+### Method Thesis
+
+Vulnerability-aware insertion for SAM2 dataset protection: rank-sum 3-signal scorer picks top-K non-adjacent positions from clean-SAM2 signals; insert content (ν, LPIPS-TV bound) + local δ on insert neighborhoods are jointly optimized under a contrastive decoy-margin loss (no suppression, no object_score). Causal isolation via 10-config matched-budget study; mechanism attribution via restoration counterfactuals.
+
+### Contribution Focus
+
+- **C1 (dominant)**: vulnerability-aware insertion with full causal isolation — placement (top/random/bottom), insert presence (vs δ-only), and insert optimization (vs base-insert) — achieving J-drop ≥ 0.35 at fidelity triad on DAVIS-10, with signed decoy-vs-suppression decomposition.
+- **C2 (supporting)**: restoration-counterfactual attribution confirming damage lives in current-frame Hiera pathway at insert positions.
+- **Non-contributions**: as before.
+
+### Complexity Budget
+
+Unchanged.
+
+### System Overview
+
+```
+Offline (GT-free):
+  clean_SAM2 forward → m̂_true_t, confidence_t, H_t
+  Rank-sum 3-signal scorer → W = top-K non-adjacent
+  decoy_offset geometric; m̂_decoy_t = shift_mask(m̂_true_t)
+
+Per-video PGD (100 steps, 3 stages):
+  δ supported on S_δ = ∪_k NbrSet(W_k) ∪ {0}
+  base_insert_k = 0.5·x_{W_k-1} + 0.5·x_{W_k}
+  insert_k = clamp(base_insert_k + ν_k) ∘ fake_quant
+  x'_t = clamp(x_t + δ_t) ∘ fake_quant for t ∈ S_δ; else x_t
+  processed = interleave(x', insert_k at W)
+  
+  Forward → pred_logits_t per processed-time frame
+  mu_true_t  = confidence-weighted mean(pred_logits_t on m̂_true_t)
+  mu_decoy_t = confidence-weighted mean(pred_logits_t on m̂_decoy_t)
+  
+  L_margin_insert   = Σ_k softplus(mu_true_{W_k} − mu_decoy_{W_k} + 0.75)
+  L_margin_neighbor = Σ_{t ∈ NbrSet\inserts} 0.5·softplus(mu_true_t − mu_decoy_t + 0.75)
+  L_fid_orig = Σ_{t ∈ S_δ, t≥1} max(0, LPIPS(x'_t, x_t) − 0.20)
+  L_fid_ins  = Σ_k max(0, LPIPS(insert_k, base_insert_k) − 0.35)
+  L_fid_TV   = Σ_k max(0, TV(insert_k) − 1.2·TV(base_insert_k))
+  L_fid_f0   = max(0, 1 − SSIM(x'_0, x_0) − 0.02)
+  
+  L = L_margin_insert + L_margin_neighbor + λ(step)·(L_fid_orig + L_fid_ins + L_fid_TV) + λ_0·L_fid_f0
+  
+  PGD step; clip δ_0 ε=2/255, δ_{t≥1, t∈S_δ} ε=4/255; ν unbounded by ε
+  log: mu_true_trace_t, mu_decoy_trace_t, surrogate_J_drop, per-frame LPIPS, f0 SSIM
+  
+  S_feas = {steps : L_fid_orig=L_fid_ins=L_fid_TV=L_fid_f0 = 0}
+  If S_feas empty → clip = INFEASIBLE (failure in primary denominator)
+  Else → (δ*, ν*) = argmax surrogate_J_drop over S_feas
+```
+
+### Pilot Gate (unchanged)
+
+3 clips × 4 configs. GO if (a) Δ_top ≥ 0.05 on 2/3 AND (b) J-drop(K=3 top) ≥ 0.20 on 2/3, AND pilot anti-suppression check: `Δmu_decoy > 0 AND Δmu_decoy ≥ 2·max(0,-Δmu_true)` on ≥ 2/3.
+
+### Validation (round-2 10-row main table unchanged in content; add F11 reporting)
+
+Main headline: J-drop (primary denominator = **ALL 10** DAVIS-10 clips, infeasible = failure). Plus side-table: n_infeasible / 10, feasible-only mean.
+
+### Compute
+
+Unchanged ~20 GPU-hours.

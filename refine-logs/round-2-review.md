@@ -1,56 +1,101 @@
-# Round 2 Review — 2026-04-22
+# Round 2 Review (VADI)
 
-- **Overall**: 7.9 / 10 (up from 6.6)
-- **Verdict**: REVISE (need ≥ 9 for READY)
-- **Drift Warning**: NONE
+**Reviewer**: gpt-5.4 @ xhigh reasoning
+**Thread**: `019db8a1-7059-76b1-9958-ba5edc222de5`
+**Date**: 2026-04-23
 
-## Dimension scores
+## Parsed Scores
 
-| Dim | R1 | R2 | Δ |
-|---|---|---|---|
-| Problem Fidelity | 8 | **9** | +1 |
-| Method Specificity | 6 | **7** | +1 |
-| Contribution Quality | 6 | **8** | +2 |
-| Frontier Leverage | 8 | **9** | +1 |
-| Feasibility | 6 | **7** | +1 |
-| Validation Focus | 6 | **7** | +1 |
-| Venue Readiness | 6 | **7** | +1 |
+| Dimension | Score |
+|---|---:|
+| Problem Fidelity | 9.0 |
+| Method Specificity | 8.0 |
+| Contribution Quality | 7.4 |
+| Frontier Leverage | 7.3 |
+| Feasibility | 6.8 |
+| Validation Focus | 8.2 |
+| Venue Readiness | 6.6 |
+| **Weighted Overall** | **7.7 / 10** |
 
-## Reviewer's status verdict
+## Verdict
 
-- Problem Anchor: preserved
-- Dominant contribution: materially sharper
-- Method simplicity: improved
-- Frontier leverage: still appropriate
+**REVISE / PILOT-READY, not READY.** "If the pilot shows top-K optimized inserts beat random/bottom and beat matched local-δ-only controls, the proposal can move into 8.3-8.7. READY only after empirical evidence confirms insert-specific causal mechanism."
 
-## CRITICAL action items remaining
+## Drift Warning
 
-### C1. Sign error in low-confidence lock
-`softplus(-τ_conf - max(g_u))` rewards HIGH `max(g_u)` — OPPOSITE of intent. Fix: `softplus(max(g_u) - τ_conf)` with `τ_conf` as a logit ceiling. Also replace `max` (easily satisfied by 1-pixel spike) with `topk-mean` or `logsumexp`.
+**NONE.** Only "hidden drift risk": success may come from local δ placement rather than optimized inserts. That is a **causal identification issue**, not a constraint violation.
 
-### C2. Three clocks formalization
-`p_k = 6k + r` + "force one at prefix boundary" + "after originals ≈ {5,11,12}" does NOT form one reproducible schedule. Need: schedule defined on **write count in modified sequence**, algorithmically mapped to original-frame positions. Three clocks to name: (i) original-frame index, (ii) modified-sequence index, (iii) memory-write index.
+## P0 Action Items
 
-## IMPORTANT action items
+### F8 — Causality isolation controls (Venue Readiness, P0)
+Top-K placement advantage may come from **LOCAL δ at vulnerable frames**, not inserts. Add:
+- **top-δ-only**: δ at top-K vulnerability neighborhoods, **no inserts**
+- **random-δ-only**: δ at random-K neighborhoods, no inserts
+- **top-base-insert+δ**: insert at top-K, but insert is **unoptimized midframe** (no ν); δ optimized
 
-### I1. `L_stale` → 3-bin distribution
-2-way ratio `log(A_clean_recent / A_insert_memory)` ignores where rest of attention goes. Use 3-bin `{insert, recent-clean, other}` + KL / cross-entropy target favoring insert.
+These three + existing top-K optimized (ours) disentangle:
+- inserts vs δ at same positions (ours vs top-δ-only)
+- insert OPTIMIZATION vs insert presence (ours vs top-base-insert+δ)
+- placement of δ (top-δ-only vs random-δ-only)
 
-### I2. Off-resonance deconfound
-Period 4 vs 6 changes resonance AND last-insert-to-eval-start distance. Match K_ins + prefix length + last-insert-to-first-eval distance across schedules; vary only write periodicity.
+### F9 — Hard feasibility acceptance (Feasibility, P0)
+Final selection must enforce LPIPS feasibility as **hard acceptance**, not rely on hinge penalties alone. If no PGD step satisfies all fidelity constraints simultaneously, the clip is flagged as "fidelity-infeasible at stated budget" and excluded (or reported separately).
 
-### I3. Whole-suffix metrics
-Optimize `L_rec` on f15..f21 window is fine for compute, but REPORTED rebound / post-loss AUC must be on f15..end, else claim is "delayed recovery" not "no recovery."
+### F10 — Log mu_true and mu_decoy separately
+Even with contrastive margin loss, if success comes only from **collapsing mu_true** (while mu_decoy stays flat), reviewers call it "implicit suppression". Log both per-frame trajectories; report at final:
+- `Δmu_true = mu_true(attacked) − mu_true(clean)` — should be ≤ 0 but moderate
+- `Δmu_decoy = mu_decoy(attacked) − mu_decoy(clean)` — should be ≫ |Δmu_true|
 
-## MINOR
-
-### M1. Specify `A_u` extraction
-One sentence fixing layer/head aggregation + query set definition (e.g. "foreground queries = pixels inside flow-warped eroded clean mask C_u; attention averaged across all memory-attention heads in the final decoder block").
+For true "decoy wins" behavior, `Δmu_decoy` must be much larger in magnitude than `|Δmu_true|`.
 
 ## Simplifications
 
-- Replace full-frame `BCE(g_ins, 1[D_ins])` with ROI loss on decoy box + target box (no background supervision mass).
-- Fidelity story collapses to: δ L∞ clamp + ν LPIPS + seam-band penalty. Drop SSIM/ΔE from optimization (keep as reported metrics only if not binding).
-- Pick ONE flow stack (RAFT OR Unimatch).
+- **Scorer math**: rank-based robust-z via IQR is mathematically more elaborate than necessary. Replace with **rank-sum**:
+  ```
+  rank_conf_m = rank(r_conf_m) among m ∈ {1..T-1}       # 1..T-1
+  (similarly rank_mask, rank_feat)
+  v_m = rank_conf_m + rank_mask_m + rank_feat_m          # simple sum of ranks
+  W = argtop-K non-adjacent
+  ```
+  Same robustness; less paper noise.
 
-## Modernization: NONE.
+## Specific Q&A (from R2)
+
+1. **Anti-suppression**: "substantially fixed. Removing L_obj right. Log mu_true / mu_decoy separately to preempt implicit-suppression critique."
+2. **Scorer**: "Yes, much more principled. Describe simply as robust rank aggregation. Robust-z formula may be more elaborate than necessary."
+3. **Local δ**: "Greatly reduces dense-δ confound but doesn't fully prove inserts dominate. Need matched δ-only-by-position controls." → fix F8
+4. **Top vs random vs bottom**: "Strong for placement causality. NOT by itself strong for insertion causality. Add optimized-vs-base-insert AND with-vs-without-insert controls." → fix F8
+5. **LPIPS-bound ν**: "Clean and better than hard ε. Final selection must enforce feasibility as hard acceptance." → fix F9
+6. **Pilot + NO-GO**: "Acceptable and reviewer-positive. Thresholds reasonable for pilot, not for final claims. Full claim needs DAVIS-10 evidence with CIs and absolute gaps."
+
+## Raw Response
+
+<details>
+<summary>Click</summary>
+
+Revised weighted score: **7.7 / 10, PILOT-READY but not READY**.
+
+| Dim | Score |
+|---|---:|
+| Problem Fidelity | 9.0 |
+| Method Specificity | 8.0 |
+| Contribution Quality | 7.4 |
+| Frontier Leverage | 7.3 |
+| Feasibility | 6.8 |
+| Validation Focus | 8.2 |
+| Venue Readiness | 6.6 |
+
+Sub-7 issues:
+- Feasibility: K=3 top ≥ 0.20 J-drop on 2/3 pilot clips uncertain. Pilot as hard gate.
+- Venue Readiness: top placement may help because LOCAL δ is at fragile frames. Add matched controls: top-local-δ-only, random-local-δ-only, top-base-insert+δ.
+
+Anti-suppression: fixed. Log mu_true / mu_decoy separately.
+Scorer: principled, simplify (rank aggregation, not robust-z).
+Local δ: reduces confound but doesn't prove inserts dominate. Need δ-only-by-position controls.
+Top/rand/bottom: strong for placement, not insertion. Add "with insert vs no insert" at matched positions.
+LPIPS-bound ν: clean. Final selection = hard feasibility acceptance.
+Pilot: acceptable. Thresholds OK for pilot, not final.
+
+Verdict: REVISE / PILOT-READY. READY only after empirical evidence.
+
+</details>

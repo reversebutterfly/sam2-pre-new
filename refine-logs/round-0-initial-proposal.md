@@ -1,193 +1,241 @@
-# Research Proposal: MemoryShield — A Two-Phase Preprocessor for Protecting Video Data from Promptable Foundation-Model Segmenters
+# Research Proposal: Vulnerability-Aware Decoy Insertion for SAM2 Dataset Protection
 
-## Problem Anchor (verbatim — see PROBLEM_ANCHOR_2026-04-22.md)
+**Title**: VADI — Vulnerability-Aware Decoy Insertion for Per-Video SAM2 Dataset Protection.
 
-- **Bottom-line problem**: User-controlled preprocessor that takes a clean video + first-frame mask of a target to protect, and outputs a modified video which causes any downstream SAM2-style promptable VOS model to lose the target and not recover, while remaining visually acceptable.
-- **Must-solve bottleneck**: streaming memory banks self-heal from single-frame perturbations; single-component attacks fail under SAM2's memory-rollover dynamics.
-- **Non-goals**: UAP / backdoor / runtime hook / maximal attack; all of these violate the threat model or the fidelity constraint.
-- **Constraints**: white-box architecture knowledge, per-video PGD, pixels-only output, insert LPIPS ≤ 0.15 (goal 0.10), SSIM ≥ 0.95 on attacked originals, DAVIS-2017 val, 30-clip or DAVIS-10 subset.
-- **Success condition**: attacked eval-window J-drop ≥ 0.55 AND no-recovery (monotone drop after loss) AND fidelity triad met AND each of the two phases shown necessary via ablation (≥ 40% relative loss if either removed) AND transfer to SAM2Long.
+## Problem Anchor
+
+(verbatim from `refine-logs/PROBLEM_ANCHOR_2026-04-23_v4-insert.md`)
+
+- **Bottom-line**: clean video + first-frame mask → processed video that (a) degrades SAM2 target segmentation across the whole processed video and (b) remains visually faithful. Processed video contains K_ins synthetic insert frames + δ-perturbed originals.
+- **Must-solve bottleneck**: prior insertion attacks placed inserts at FIFO-canonical positions (motivation falsified by B2) and used LPIPS-expensive ProPainter decoy content. Missing: **principled insert placement via vulnerability analysis of the clean video**, content optimized for **current-frame Hiera pathway corruption**, amplified by δ on neighboring originals. No bank poisoning, no suppression.
+- **Non-goals**: clean-suffix eval; defeat FIFO self-healing; UAP; runtime hook; pure-δ or pure-suppression method (user directive: insert+modify ONLY; no suppression).
+- **Constraints**: white-box SAM2.1-Tiny; per-video PGD; K_ins ∈ {1,2,3} at heuristic-scored positions; two-tier fidelity (f0 ε=2/255, originals ε=4/255 + LPIPS≤0.20, inserts LPIPS≤0.35 vs temporal interpolation); GT-free supervision; DAVIS-10.
+- **Success**: (1) mean J&F drop ≥ 0.35; (2) fidelity triad met; (3) **vulnerability-scorer causality**: top-K positions give ≥ 2× the J-drop of random-K at matched budget; (4) restoration attribution: damage concentrates in current-frame Hiera pathway at insert positions.
 
 ## Technical Gap
 
-Current generation of **memory-based VOS foundation models** (SAM2, SAM2Long, XMem-family) maintain a streaming FIFO of recent-frame feature maps plus a privileged conditioning-frame memory (f0). At each new frame, memory-attention cross-attends over the bank + current image features to produce masks, then writes back features. This design is **actively self-healing**:
+Current methods fail at per-video SAM2 dataset protection under the "insert + modify" constraint:
 
-- A single-frame perturbation briefly degrades the mask, but the next clean frame writes a corrected feature into memory, evicting the poisoned slot within `num_maskmem=7` frames.
-- Universal perturbations (UAP-SAM2 "Vanish into Thin Air", NeurIPS 2025) bypass this by degrading EVERY frame globally — but they require perturbing the entire video and are not suited to a preprocessor protecting a specific target with low LPIPS.
-- First-frame-only attacks (one-shot VOS attacks, ACMM 2023) exploit the privileged conditioning memory but are defeated when the downstream pipeline re-prompts or when the memory naturally refreshes.
+- **v4 decoy insertion** (prior internal): placed inserts at canonical FIFO positions motivated by "defeat FIFO self-healing" — B2 causal ablation falsifies this (bank contributes `|ΔJ|<0.01`). Position choice is therefore arbitrary. Also ProPainter-decoy content gave LPIPS 0.67-0.89, and the reported 92.5% J-drop was mostly direct-δ-on-eval, not insertion effect.
+- **v2 clean-suffix eval**: a different regime entirely, empirically falsified (J-drop ≈ 0.001 on 3 runs).
+- **UAP-SAM2**: universal, not per-video, different threat model.
+- **v3 pure-δ + suppression**: user explicitly rejected. Inserts are required.
 
-**The gap**: existing preprocessor-style protection cannot survive self-healing. What is missing is a mechanism that (a) forces a catastrophic loss event AND (b) keeps the memory bank in a post-loss-only steady state so that SAM2 never re-acquires, all within a tight visual-fidelity budget.
+Why naive fixes don't work:
+
+- **Random insertion positions**: no reason to beat canonical; same LPIPS cost, weak signal.
+- **More inserts (K_ins=6,9)**: fidelity budget explodes; and B2 tells us filling the bank has near-zero segmentation effect anyway.
+- **ProPainter decoy quality improvement**: the LPIPS floor is structural (ProPainter inpainting quality), not a tuning issue.
+- **Just "bigger PGD"**: prior R003 with K_ins=3 canonical + 200 steps + LPIPS off gave J-drop 0.0013. The optimizer is not the bottleneck.
+
+**The missing mechanism**: placement of inserts at positions where SAM2 is **already vulnerable on the clean video** (scene transitions, confidence dips, motion discontinuities), with insert content optimized **end-to-end to corrupt SAM2's current-frame Hiera features**, amplified by δ on neighboring originals via **decoy targeting** (not suppression). The principle: **don't fight SAM2's stable regions; tip it over where it was already teetering**.
 
 ## Method Thesis
 
-**One-sentence thesis**: We protect video data by combining two minimal interventions — (i) synthetic frames inserted at FIFO-resonant positions that drive an immediate tracking-loss event by creating mislocated memory entries, and (ii) bounded perturbations on original frames adjacent to each insert that keep the FIFO in a post-loss steady state so the tracker cannot self-heal — yielding a cleanly two-phase protection mechanism that directly targets SAM2's memory-rollover vulnerability.
+**One-sentence thesis**: Vulnerability-aware insertion — use the publisher's access to the clean video to identify where SAM2 is intrinsically unstable, place synthetic frames there whose content is adversarially optimized to corrupt SAM2's current-frame pathway when processed, and amplify with decoy-targeted δ on adjacent originals, under a two-tier fidelity budget calibrated to the natural DAVIS LPIPS floor.
 
-- **Why this is the smallest adequate intervention**: single-component baselines (insert-only or perturb-only) fail by construction under FIFO self-healing; two components are the minimum because one must induce loss and the other must prevent recovery. Adding more would be contribution sprawl.
-- **Why timely in foundation-model era**: SAM2 is THE current reference for video-segmentation foundation models. Its streaming memory is the new architectural primitive that prior VOS attacks (MaskTrack / STM era) did not address. Protection methods must target the memory-bank vulnerability to remain relevant.
+**Why this is the smallest adequate intervention under user constraint**: exactly 2 trainable tensors (δ per-frame, ν per-insert). Insertion positions from a **heuristic scorer** (no learned network). No ProPainter, no diffusion prior, no learned scheduler. Under the user's "must use insert+modify" constraint, this is the most minimal realization.
+
+**Why this route is timely**: SAM2.1 is foundation-scale promptable VOS being adopted broadly. Dataset protection with embedded synthetic frames is a natural threat model for publishers. The frontier move is using **clean-SAM2's own vulnerability structure** as an attack signal — i.e., attack where the model is already weak. This is closer to recent "feature attribution-guided attacks" in adversarial-ML than to old UAP-style approaches.
 
 ## Contribution Focus
 
-- **Dominant contribution**: a **two-phase preprocessor-style protection mechanism** against SAM2-style VOS foundation models, with formal characterization of the loss-induction and recovery-prevention roles and their composition. Both behaviors are empirically **necessary** (ablation) and **sufficient together** (no further modules needed).
-- **Optional supporting contribution**: a **memory-staleness regularization term** `L_stale` that operationalizes recovery-prevention by penalizing memory-attention mass on clean-anchor slots.
-- **Explicit non-contributions**: no new SAM2 architecture, no new generator (use off-the-shelf inpainter), no UAP / transfer / backdoor claims, no runtime hook, no learned scheduler.
+- **Dominant contribution (C1)**: vulnerability-aware insertion method for per-video SAM2 dataset protection achieving mean J&F drop ≥ 0.35 on DAVIS-10 at fidelity triad, with a causal demonstration that heuristic vulnerability scoring beats random placement by ≥ 2× at matched budget.
+- **Supporting contribution (C2)**: restoration-counterfactual attribution showing the J-drop concentrates in SAM2's current-frame Hiera pathway at insert positions (not in the bank), validating that "insert-as-current-frame-attack" is the operative mechanism — consistent with the B2 causal-diagnosis finding.
+- **Non-contributions**: no new generator (inserts are simple temporal-interpolation base + ν); no new SAM2 variant; no UAP; no runtime hook; no bank poisoning; no FIFO-self-healing claim; no learned components beyond δ,ν; no LLM/diffusion/RL.
 
 ## Proposed Method
 
 ### Complexity Budget
 
-- **Frozen / reused**: SAM2.1 Hiera-Tiny (attack surrogate), LPIPS(AlexNet) for fidelity, RAFT/Unimatch optical-flow (frozen), ProPainter video inpainter (frozen, for insert-content base).
-- **New trainable components** (≤ 2 per skill rule):
-  1. Per-video adversarial perturbation `δ_orig` on original frames (per-video PGD over pixels, no learned model)
-  2. Per-video insert-content tensor `ν_k` (per-video PGD over pixels on top of ProPainter base)
-- **Tempting additions intentionally not used**:
-  - NO learned scheduler (fixed FIFO-resonant positions are sufficient)
-  - NO learned generator (ProPainter used frozen)
-  - NO auxiliary teacher model (prior work falsified independent value)
-  - NO bilevel virtual-state optimization (unnecessary under anchor; two-phase story does not require tensor-level state control)
+- **Frozen/reused**: SAM2.1-Tiny, `SAM2VideoAdapter` (Chunk 5b-ii), LPIPS(alex), `fake_uint8_quantize` (STE), `DropNonCondBankHook` + new swap hooks.
+- **New trainable tensors (2)**:
+  - `δ ∈ R^{T × H × W × 3}` — per-frame perturbation on originals, two-tier ε budget.
+  - `ν ∈ R^{K × H × W × 3}` — per-insert content perturbation on top of temporal-midframe base.
+- **New non-trainable infrastructure**: heuristic vulnerability scorer (pure algorithmic, no learned weights); three restoration swap hooks (inference-only).
+- **Intentionally not used**: ProPainter (replaced by temporal midframe), L_stale, L_suppress, learned scheduler, LLM/diffusion/RL.
 
 ### System Overview
 
 ```
-Clean video x_0:T + first-frame mask m_0
-   │
-   ├── Phase 1 (LOSS INDUCTION — inserted frames)
-   │   ├── Pick K_ins = 3 insert positions at FIFO-resonant offsets {after f3, after f7, after f11}
-   │   ├── Build insert base per slot: ProPainter-inpaint object out of f_prev,
-   │   │   paste object crop at a spatially displaced "decoy" location
-   │   └── Per-video PGD on pixel tensor ν_k within LPIPS ≤ 0.10 vs f_prev
-   │
-   ├── Phase 2 (RECOVERY PREVENTION — original-frame perturbations)
-   │   ├── Attack window = first N_pref = 15 original frames (f0..f14)
-   │   └── Per-video PGD on δ_orig within L∞ ≤ 4/255 (f0: 2/255)
-   │
-   ├── Joint optimization stage: alternating-freeze PGD on (ν, δ) minimizing a
-   │   shared two-phase objective (see losses below)
-   │
-   └── Output: modified video x_0:T' = attacked originals interleaved with inserts
+(Offline publisher analysis, one-time, GT-free)
+  Run clean SAM2 on x_0..x_{T-1} with m_0 prompt
+  → m̂_true_t   = sigmoid(pred_logits)                           ∈ [0,1]^{H×W}
+  → s_t        = object_score_logits_t                          ∈ R
+  → H_t        = Hiera encoder output                           (cached for restoration hooks)
+  → confidence = sigmoid(s_t) * mean(m̂_true_t > 0.5)            ∈ [0,1]
+
+(Vulnerability scoring, heuristic, no learned parameters)
+  For each candidate insertion position m ∈ {1, 2, ..., T-1} (insert between orig t=m-1 and t=m):
+    v_conf_m     = |confidence_m - confidence_{m-1}|              # confidence drop/jump
+    v_mask_m     = 1 - IoU(m̂_true_{m-1}, m̂_true_m)                # mask discontinuity
+    v_feat_m     = ||H_{m-1} - H_m||_2 / (mean(||H||) + eps)      # feature discontinuity (normalized)
+    v_motion_m   = optical_flow_magnitude_change(m-1, m)          # motion discontinuity
+    v_m          = α·v_conf + β·v_mask + γ·v_feat + δ·v_motion
+    (α,β,γ,δ chosen so each term ∈ [0,1] and equally weighted; tune α-δ on pilot if needed)
+
+  Select insertion positions W = argtop-K_ins of {v_m}, with non-adjacency constraint
+  (|m_i - m_j| ≥ 2 to avoid clustering). K_ins ∈ {1, 2, 3}.
+
+(Decoy target construction)
+  For each insert position m_k: decoy_offset_k = argmax over shifts {(dy,dx)} the distance from m̂_true_{m_k}
+    subject to border safety (decoy must fit in frame).
+  m̂_decoy_t = shift_mask(m̂_true_t, decoy_offset)   for t near each insert
+
+(Per-video PGD — 100 steps, 3 stages)
+  Initialize δ = 0, ν = 0
+  base_insert_k = 0.5·(x_{m_k-1} + x_{m_k}) + small_motion_predicted_delta    # temporal midframe
+  
+  For step = 1..100:
+    Build processed video by interleaving:
+      x'_t      = clip(x_t + δ_t) ∘ fake_quant                  # perturbed originals
+      insert_k  = clip(base_insert_k + ν_k) ∘ fake_quant        # optimized inserts
+    
+    SAM2 forward via SAM2VideoAdapter(processed, m_0) → pred_logits per processed-time frame
+    
+    L_decoy_insert = Σ_k softplus(-mean(pred_logits_{m_k} · m̂_decoy_{m_k}) + 0.5)   # insert frame: pull to decoy
+    L_decoy_neighbor = Σ_{t ∈ NbrSet} 0.5 · softplus(-mean(pred_logits_t · m̂_decoy_t) + 0.5)
+                                                        # neighbor frames soft-pull to decoy
+    L_obj        = Σ_{t in processed, t≠0} softplus(object_score_logits_t + 0.5)
+    L_fid_orig   = Σ_{t≥1} max(0, LPIPS(x'_t, x_t) - 0.20)
+    L_fid_ins    = Σ_k max(0, LPIPS(insert_k, base_insert_k) - 0.35)
+    L_fid_f0     = max(0, 1 - SSIM(x'_0, x_0) - 0.02)
+    
+    L = L_decoy_insert + L_decoy_neighbor + 0.3·L_obj 
+      + λ(step)·(L_fid_orig + L_fid_ins) + λ_0·L_fid_f0
+    
+    δ, ν ← (δ, ν) - η·sign(∇ L)
+    clip δ_0 to ±2/255, δ_{t≥1} to ±4/255, ν_k to ±8/255 (inserts get wider ε since content is synthetic)
+    log surrogate_J_drop, per-frame LPIPS, f0 SSIM
+  
+  Return (δ*, ν*) at argmax surrogate_J_drop over fidelity-feasible steps
+
+NbrSet for each insert m_k: {m_k - 2, m_k - 1, m_k + 1, m_k + 2} clipped to [1, T-1]
 ```
 
 ### Core Mechanism
 
-**Input**: clean frames `x_0..x_{T-1}`, binary mask `m_0`. **Output**: modified video. **Eval**: J&F on frames f15..end under SAM2.
+**Input → output**:
+- Input: x_0..x_{T-1} (clean video), m_0 (prompt mask).
+- Output: processed_video of length T + K_ins (originals + inserts interleaved at W positions), uint8.
 
-**Architecture / policy**: per-video PGD only — no learned cross-video model. Surrogate = SAM2 open checkpoint, white-box gradients.
+**Policy**:
+- **Position selection**: heuristic v_m scorer (no learned weights). Top-K_ins non-adjacent.
+- **Content optimization**: (δ, ν) jointly via PGD with decoy targeting + fidelity hinges.
+- **Return state**: Pareto-best over feasible steps (no augmented-Lagrangian μ pathology).
 
-**Training signal** (per-video loss). Let `g_u(x)` = SAM2 output logits for frame u under modified video x. Let `C_u` = true-object region from clean SAM2 run, `D_u` = displaced decoy region (from m_0 shifted by per-video decoy offset chosen at video start).
+**Training signal**:
+- Primary: `L_decoy_insert` + `L_decoy_neighbor` (pull SAM2 toward decoy at and near inserts).
+- Secondary: `L_obj` (suppress object confidence).
+- Constraint: fidelity hinges on (originals, inserts, f0).
+- **Zero GT use**: all targets (m̂_true, m̂_decoy, confidence, features) derived from clean-SAM2 pseudo-labels, not DAVIS annotations.
 
-$$
-\mathcal{L}(\nu, \delta) = \mathcal{L}_{\text{loss}} + \lambda_r \mathcal{L}_{\text{rec}} + \lambda_f \mathcal{L}_{\text{fid}}
-$$
-
-**Phase 1 — `L_loss`** (drives SAM2 to mislocalize on insert frames themselves):
-
-$$
-\mathcal{L}_{\text{loss}} = \frac{1}{K_{\text{ins}}} \sum_{k=1}^{K_{\text{ins}}} \Big[ \text{BCE}(g_{\text{ins}_k}, \mathbb{1}[D_{\text{ins}_k}]) + \alpha \cdot \text{softplus}(\text{CVaR}_{0.5}(g_{\text{ins}_k} \cdot \mathbb{1}[C_{\text{ins}_k}]) + m) \Big]
-$$
-
-First term: push mask to decoy region. Second term: soft CVaR (median-gated) on top half of logits inside true region, pushing them below margin m. Soft CVaR validated stable in prior loop (vs hard top-k which caused clip-specific collapse).
-
-**Phase 2 — `L_rec`** (measured on CLEAN post-prefix eval frames while optimizing δ on prefix):
-
-$$
-\mathcal{L}_{\text{rec}} = \frac{1}{|U|} \sum_{u \in U} \Big[ \text{BCE}(g_u, \mathbb{1}[D_u]) + \alpha \cdot \text{softplus}(\text{CVaR}_{0.5}(g_u \cdot \mathbb{1}[C_u]) + m) \Big] + \beta \cdot \mathcal{L}_{\text{stale}}
-$$
-
-where `U` = eval window f15..f15+H-1 with H=7.
-
-**The NEW piece — `L_stale`** (memory-staleness; keeps wrong memory alive):
-
-$$
-\mathcal{L}_{\text{stale}} = \frac{1}{|V|} \sum_{u \in V} \log \frac{A_u^{\text{clean-recent}}}{A_u^{\text{insert-memory}} + \epsilon}
-$$
-
-`V` = first 3 clean frames after each insert. `A_u^{·}` = fraction of memory-attention mass from foreground queries landing on each slot type. **This is the only non-trivial new loss term** — everything else in Phase 2 mirrors Phase 1 on different frames.
-
-**Fidelity**: `L_fid = L_fid_ins + L_fid_orig` with LPIPS bound on inserts (≤ 0.10), SSIM ≥ 0.97 on attacked originals, + Lab ΔE on insert edit-mask seam band.
-
-**Why this is the main novelty**: the specific combination — insert-only loss-induction + prefix PGD with memory-staleness regularization — is what defeats FIFO self-healing. Neither component in isolation is new; their COMPOSITION targeted at FIFO streaming memory IS new and verifiable via necessity ablations.
-
-### Optional Supporting Component: position policy
-
-Fixed inserts at `{f3, f7, f11}` (FIFO-resonant: period ≤ `num_maskmem - 1 = 6`, so at any eval time u ≥ 15 the bank always contains at least one insert). Decoy offset at video start = 1-of-8 direction maximizing background coverage + color-similarity to target. Original-frame schedule: f0 ε=2/255, f1..f14 ε=4/255. No learned scheduler.
+**Why this is the main novelty**:
+1. **Vulnerability-aware placement** replaces the falsified canonical-FIFO placement. Positions are chosen because SAM2 is naturally weak there.
+2. **Insert-as-current-frame attack**: B2 proved bank is non-causal; we place inserts so that when SAM2 processes them, their bad Hiera features directly corrupt the causal pathway.
+3. **Decoy (no suppression)**: respects user directive. Pulls SAM2 toward a specific wrong location rather than making pred_logits generically negative.
 
 ### Modern Primitive Usage
 
-- **ProPainter** (CVPR 2024, flow-guided video inpainter) used FROZEN as insert-content base generator. Role: generates a plausible `f_prev`-with-object-removed-and-relocated starting point so PGD only has to do ε-ball refinement rather than attack-from-scratch. Replaces our old Poisson seamless-clone base which had LPIPS floor ≈ 0.10.
-- **RAFT / Unimatch** (frozen) for optical-flow into ProPainter.
-- **LPIPS (AlexNet)** as perceptual fidelity metric.
-- **NOT used**: LLMs, VLMs, video diffusion (too expensive for per-video PGD), RL-trained scheduler, learned generator — all add mass without addressing the anchor.
+- **SAM2.1** is the attacked model AND the pseudo-label source. Natural foundation-model usage.
+- **LPIPS(alex)** for fidelity (standard).
+- **Optical flow** for motion-discontinuity scoring (pretrained RAFT if available; otherwise finite-difference).
+- **Explicit non-uses**: no LLM, no diffusion prior, no RL. Position selection is heuristic because (a) K_ins is tiny (≤3), (b) the vulnerability signal is geometric/per-frame and doesn't need learning to be useful at this scale.
 
-### Integration into Preprocessor Pipeline
+### Integration
 
-Run at **publish-time** (offline, per-video). User supplies video + first-frame mask; preprocessor runs ProPainter once (seconds) to produce `K_ins=3` insert bases, then runs per-video PGD (~200 steps, ~2-6 GPU-min on single RTX Pro 6000) to refine `(ν, δ)`, then emits modified video. No SAM2 runtime interaction. Deployment binary: SAM2 surrogate checkpoint + ProPainter + preprocessor code.
+- Reuse `memshield/sam2_forward_adapter.py::SAM2VideoAdapter` for differentiable forward.
+- Reuse `memshield/losses.py::decoy_target_loss` (5-region form) simplified to just (decoy positive term + background suppress term).
+- Reuse `memshield/propainter_base.py::find_decoy_region` + `shift_mask` for decoy offset selection.
+- Drop ProPainter insert-base generator. Replace with simple temporal midframe + ν.
+- Extend `memshield/ablation_hook.py` with `SwapF0MemoryHook`, `SwapHieraFeaturesHook`, `SwapBankHook` for restoration attribution.
+- New driver `scripts/run_vadi.py`.
+- New module `memshield/vulnerability_scorer.py` implementing v_m heuristic.
 
 ### Training Plan
 
-Per-video PGD only — no cross-video training.
-
-1. Run clean SAM2 once → `C_u` for u=1..T, `D_u` via decoy-offset shift.
-2. ProPainter forward → insert bases for 3 slots.
-3. Initialize `δ_orig = 0, ν_k = 0`.
-4. **Stage 1** (steps 1-40): perturb-only warmup; optimize δ with only L_rec (no inserts applied yet).
-5. **Stage 2** (steps 41-80): insert-only warmup; optimize ν with only L_loss.
-6. **Stage 3** (steps 81-200): joint optimization with full two-phase loss, alternating 2:1 δ:ν updates.
-7. Project to fidelity constraints every step (L∞ clamp for δ, small-step LPIPS projection for ν).
+- Per-video PGD, 100 steps total, stages 30/40/30:
+  1. `N_1 = 30`: attack-only (λ=0).
+  2. `N_2 = 40`: fidelity regularization (λ starts 10, grows 2× per 10 steps when violated).
+  3. `N_3 = 30`: Pareto-best tracking.
+- Step size η = 1/255 (stages 1-2), 0.5/255 (stage 3).
+- ε_∞ budgets: δ_0=2/255, δ_{t≥1}=4/255, ν_k=8/255 (inserts get wider budget because their content is entirely synthetic — the fidelity metric for inserts is LPIPS vs the temporal-midframe BASE, not vs a "specific source frame").
+- F_orig = 0.20, F_ins = 0.35, f0 SSIM ≥ 0.98.
+- Windowing: T ≤ 40 full backward. If T > 40, sliding 30-frame backward window.
+- **Pilot gate (mandatory)**: 1 clip (dog, T=22 or 60), measure wall-clock, memory, surrogate J-drop, fidelity feasibility, top-K vs random-K vulnerability check.
 
 ### Failure Modes and Diagnostics
 
-- **F1: FIFO self-heal still wins** (phase-2 too weak). Diagnostic: per-frame J rises back after f20. Fallback: increase β on L_stale, or extend prefix to 22 frames (still FIFO-compatible).
-- **F2: insert too visible** (LPIPS > 0.10). Diagnostic: per-frame LPIPS on inserts at end of PGD. Fallback: lower ε_ins, accept lower attack strength.
-- **F3: decoy direction off-scene** (object at border). Diagnostic: shifted mask falls off image. Fallback: next-best offset direction OR "suppression" mode (Phase 1 blanks out mask).
-- **F4: natural-distractor clip** (same-class instance present, e.g. cows). Diagnostic: `is_natural_distractor=True` at video start via color-sim test. Fallback: disable explicit decoy; Phase 1 becomes "suppress current"; Phase 2 carries recovery-prevention burden.
+| Failure mode | Detection | Fallback |
+|---|---|---|
+| Vulnerability scorer selects useless positions (v_m ≈ uniform) | Top-K vs random-K pilot experiment: no J-drop gap | Fall back to canonical positions; flag that vulnerability signal is weak on this clip |
+| Temporal midframe base is too blurry (ν can't rescue it) | LPIPS(insert, interpolated_neighbors) high even at ν=0 | Use ν init = random-gaussian (0, 0.02) and larger α_decoy |
+| F_ins=0.35 infeasible | Stage-3 Pareto frontier empty | Per-clip adapt F_ins to `1.3 × natural_adjacent_LPIPS_mean` |
+| δ amplification swamps fidelity | L_fid_orig grows without L_decoy_insert growing | Reduce neighbor weight from 0.5 to 0.3; prioritize insert frames over neighbors |
+| Restoration attribution fails: R2 (clean Hiera at inserts) does NOT recover J | Mechanism is not current-frame pathway — damage distributed | Report honestly; proposal has a pilot-branch narrative for this outcome |
+| PGD oscillation at stage 3 entry | L_decoy_insert bounces step-to-step | Pareto-best checkpoint selection handles by construction; else reduce η |
 
 ### Novelty and Elegance Argument
 
-**Closest work**:
-- **UAP-SAM2** "Vanish into Thin Air" (NeurIPS 2025): universal SAM2 attack via dual semantic deviation. **Delta**: we are per-instance preprocessor for SPECIFIC target, not universal; combine insertion + prefix perturbation (UAP-SAM2 does perturbation only on all frames); formalize self-healing mechanism and our response.
-- **Chen et al. WACV 2021** "Appending Adversarial Frames for Universal Video Attack": appends dummy frames for classification. **Delta**: target streaming VOS memory (not classification); inserts are targeted scene-edit in the middle (not appended dummy); coupled with prefix perturbations.
-- **One-shot VOS attacks** (ACMM 2023): perturb first frame only. **Delta**: 15-frame prefix + insertion targeting streaming memory; necessity proof for each phase.
-- **BadVSFM** (arXiv 2025): backdoor at training time. **Delta**: inference-time only, no training compromise.
+Closest work:
+- **UAP-SAM2 (NeurIPS 2025)**: universal inference-time noise. Different threat model.
+- **Adversarial patch attacks** (image domain): place a patch at a strategic location. Closest analogue but for static images, not video VOS; no notion of "vulnerability window" in time.
+- **Video adversarial attacks on trackers**: generally target ALL frames uniformly. No principled placement.
+- **Internal v4 decoy insertion**: placed inserts at canonical positions (motivation falsified); used ProPainter (expensive).
 
-**Elegance**: two-component system, each with one clean role. Each role justified by the bottleneck (FIFO self-healing). No other modules needed. Main technical novelty beyond the combination is `L_stale` making Phase 2 actively counter self-healing, and FIFO-resonant scheduling giving Phase 1 persistent presence in the bank.
+Exact novelties:
+1. **Vulnerability-aware placement** using clean-SAM2's own tracking-quality signal as attack guidance. This is foundation-model-native.
+2. **Insert-as-current-frame attack**: re-interprets insertion as corrupting the causal pathway (B2-informed) rather than as a bank-poisoning tool.
+3. **Two-tier + insert-specific fidelity budget** that correctly treats insert frames as content-vs-interpolation comparisons, not as comparisons to a non-existent source frame.
+4. **GT-free optimization and selection** via clean-SAM2 pseudo-labels + confidence weighting.
+
+Why this is focused: two trainable tensors (δ, ν); one heuristic scorer; one paper thesis (vulnerability-aware insertion); one supporting attribution (restoration). No parallel contributions.
 
 ## Claim-Driven Validation Sketch
 
-### Claim 1 (DOMINANT): Two-phase protection defeats FIFO self-healing
+### Claim 1 (dominant, C1): Vulnerability-aware insertion achieves J-drop ≥ 0.35 at fidelity triad on DAVIS-10.
 
-- **Minimal experiment**: 4-condition ablation on DAVIS-10 hard subset
-  - baseline (clean)
-  - Phase-1-only (inserts, no prefix perturbation)
-  - Phase-2-only (prefix perturbation, no inserts)
-  - Full (both)
-- **Baselines / ablations**: insert-only / perturb-only vs full
-- **Metric**: mean SAM2 J-drop on eval window (f15..end), + per-frame J trajectory
-- **Expected evidence**: Full drop > 0.60; Phase-1-only drop < 0.30 (bank self-heals); Phase-2-only drop < 0.30 (no loss event). Necessity confirmed if either single-phase < 50% of full.
+- **Minimal experiment**: DAVIS-10 subset (dog, cows, bmx-trees, blackswan, breakdance, car-shadow, breakdance-flare, bear, judo, camel). Per-clip VADI run with stated budgets.
+- **Main table**:
+  1. Clean (baseline J&F)
+  2. **Ours** (K_ins=3, top-3 vulnerability positions)
+  3. **Ours K_ins=1** (ablation: how much does scale matter?)
+  4. **Random-position baseline** (K_ins=3, 3 random non-adjacent positions, same PGD)
+  5. **Canonical-schedule baseline** (K_ins=3, {6,12,14}-style FIFO-canonical)
+  6. **δ-only (no inserts)** (K_ins=0; pure per-video perturbation)
+  7. **UAP-SAM2 per-clip** (universal attack as external baseline)
+  8. **SAM2Long transfer** (ours, on SAM2Long)
+- **Metric**: mean J&F drop on full processed video (f0 excluded). Fidelity triad per-frame.
+- **Expected evidence**: Ours ≥ 0.35 J-drop with fidelity met on ≥ 7/10 clips. Top-K vulnerability beats random-K by ≥ 2× J-drop (C1 causal claim). Beats canonical-FIFO by ≥ 30% J-drop. Beats δ-only by ≥ 0.10 J-drop (inserts add value).
 
-### Claim 2 (SUPPORTING): `L_stale` is necessary for no-recovery
+### Claim 2 (supporting, C2): The attack's damage lives in SAM2's current-frame Hiera pathway at insert positions.
 
-- **Minimal experiment**: Full vs Full-without-L_stale on DAVIS-10
-- **Metric**: per-frame J trajectory; mean J at f20, f25, f30 (late eval)
-- **Expected evidence**: Full keeps J monotone-down; Full-no-L_stale shows J rising back toward clean by f25+.
+- **Experiment**: restoration counterfactuals on ours DAVIS-10:
+  - **R1** attacked + clean f0 memory
+  - **R2** attacked + clean Hiera at insert positions ONLY
+  - **R2b** attacked + clean Hiera at ALL frames
+  - **R3** attacked + clean bank
+  - **B-control** drop non-cond bank on attacked
+- **Metric**: `ΔJ_restore(c) = J(attacked + swap) − J(attacked)`. Positive = restoration works.
+- **Expected**: `ΔJ(R2) ≥ +0.20` (Hiera-at-inserts restores most damage), `ΔJ(R2b) ≥ ΔJ(R2)` (replacing all Hiera restores more — upper bound), `ΔJ(R1) ~ +0.10` (f0 is secondary), `ΔJ(R3) ≤ +0.02`, `ΔJ(B-ctrl) ≤ +0.02`.
 
-### Optional Claim 3 (TRANSFER): Mechanism transfers to SAM2Long
-
-- **Minimal experiment**: SAM2Long (num_pathway=3) on attacked videos from Claim 1
-- **Metric**: SAM2Long J-drop; retention = SAM2Long-drop / SAM2-drop
-- **Expected evidence**: SAM2Long J-drop ≥ 0.30, retention ≥ 0.40, confirming attack targets memory architecture shared across variants.
+### (Appendix) Claim 3: Cross-variant transfer on SAM2Long.
 
 ## Experiment Handoff Inputs
 
-- **Must-prove claims**: (1) two-phase composition is necessary; (2) `L_stale` is necessary for Phase 2; (3) transfer to SAM2Long.
-- **Must-run ablations**: insert-only / perturb-only / no-L_stale / Poisson-base vs ProPainter-base.
-- **Critical datasets**: DAVIS-10 hard subset (blackswan, breakdance, bmx-trees, bike-packing, camel, car-roundabout, cows, dance-twirl, dog, car-shadow). Full DAVIS-30 for final numbers.
-- **Critical metrics**: J&F on eval window, per-frame J trajectory, insert/orig LPIPS, SAM2Long transfer.
-- **Highest-risk assumptions**: (a) ProPainter base is good enough LPIPS floor under ε-ball PGD; (b) `L_stale` gradients through memory-attention are stable; (c) eval window long enough to show recovery-vs-no-recovery.
+- **Must-prove**: C1 (J-drop ≥ 0.35, top-K beats random-K by 2×) and C2 (Hiera-at-inserts attribution).
+- **Must-run ablations**: random-K placement, canonical-FIFO placement, δ-only, K_ins sweep (0/1/2/3), restoration R1/R2/R2b/R3, UAP-SAM2 baseline, SAM2Long transfer.
+- **Datasets/metrics**: DAVIS-2017 val; mean J&F; per-frame LPIPS (original and insert); f0 SSIM; ΔJ_restore.
+- **Highest-risk assumptions**:
+  1. Vulnerability scorer is actually predictive of where insertion works (falsifiable via top-K vs random-K).
+  2. F_ins=0.35 is feasible at ν ε=8/255 (pilot-checkable).
+  3. Mean J&F drop ≥ 0.35 at fidelity triad is reachable.
 
-## Compute & Timeline Estimate
+## Compute & Timeline
 
-- Per-video PGD: ~6 GPU-min × 30 clips = ~3 GPU-hours full DAVIS
-- ProPainter forward: ~5 sec × 3 slots × 30 clips = 7 GPU-min
-- Ablation suite: 5 conditions × DAVIS-10 = ~5 GPU-hours
-- SAM2Long eval: ~15 min × 30 clips = ~7 GPU-hours
-- **Total paper evidence**: ≤ 1 GPU-day on single Pro 6000.
-- Timeline: 2 weeks method + 1 week ablations + 1 week paper writing.
+- **Pilot**: 1 clip (dog), ~1 GPU-hour. Validates time, memory, feasibility, top-K vs random-K gap.
+- **DAVIS-10 C1 primary** (8 configs above × 10 clips): ~3-4 GPU-hours.
+- **Restoration C2** (4 configs × 10 clips): ~0.5 GPU-hour.
+- **SAM2Long install + transfer**: 2-3 GPU-hours.
+- **Appendix** (DAVIS-30, prompt-robustness, SAM2.1-Base): 5-8 GPU-hours.
+- **Total**: ~15 GPU-hours on one Pro 6000; 3-4 focused days from PILOT-PASS.

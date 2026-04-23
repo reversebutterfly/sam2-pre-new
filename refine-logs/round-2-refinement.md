@@ -1,160 +1,205 @@
-# Round 2 Refinement
+# Round 2 Refinement (VADI)
 
-## Problem Anchor (verbatim)
-[Unchanged from PROBLEM_ANCHOR_2026-04-22.md; see round-0 + round-1 for full text.]
+## Problem Anchor (verbatim, unchanged)
+
+(see `PROBLEM_ANCHOR_2026-04-23_v4-insert.md`)
 
 ## Anchor Check
-Preserved. All fixes target mechanism precision, not scope.
+
+- Preserved. Codex R2 confirmed no drift. "Hidden drift risk" (placement vs insert attribution) is a causal-ID issue addressed via F8 controls.
 
 ## Simplicity Check
-- Dominant contribution unchanged: 2-phase preprocessor. Phase 1 = loss event (inserts + ROI decoy-target supervision). Phase 2 = recovery prevention (prefix perturbation + L_stale internal regularizer).
-- Components removed: full-frame BCE on inserts (→ ROI only); dual flow option (→ RAFT only); SSIM / ΔE in optimization loss (→ reported metrics only, if not binding).
-- Components merged / fixed: L_stale now 3-bin categorical KL (not 2-way ratio).
-- No new contribution added.
+
+- Dominant contribution tighter: **vulnerability-aware insert placement + LPIPS-bound insert optimization** where causality is **isolated via matched δ-only / base-insert controls**, not just top/random/bottom.
+- Simplifications applied: scorer math (rank-sum, not robust-z); explicit mu_true / mu_decoy logging.
 
 ## Changes Made
 
-### C1 — Low-confidence lock sign error fixed (CRITICAL)
-- **Was**: `softplus(-τ_conf - max(g_u))` → this rewards HIGH max logit (wrong direction).
-- **Now**: `softplus(logsumexp(g_u) - τ_conf)` with `τ_conf` a logit ceiling. `logsumexp` instead of `max` so a single-pixel spike cannot satisfy the term trivially; `logsumexp` is a smooth upper bound on max.
-- **Reasoning**: penalizes high logit mass anywhere in the frame, forcing SAM2's confidence down globally → "no salient foreground" behavior.
+### F8 — Isolation controls (CRITICAL venue-readiness fix)
 
-### C2 — Three clocks formalized (CRITICAL)
-Three clocks made explicit:
+Added 3 controls to main table to prove **inserts (optimized) matter, not just "local δ at vulnerable positions"**:
 
-- **Clock O** — original-frame index `o ∈ {0, 1, ..., T-1}` (clean input).
-- **Clock M** — modified-sequence index `m ∈ {0, 1, ..., T + K_ins - 1}` (output video after insertions).
-- **Clock W** — memory-write index `w` (monotone count of non-cond memory writes SAM2 performs when processing the modified sequence; cond frame f0 is write 0, first FIFO write is w = 1, etc.).
+| # | Config | Purpose | What it isolates |
+|---|---|---|---|
+| 1 | Clean | baseline | — |
+| 2 | Ours K=1 top | mechanistic centerpiece | full method |
+| 3 | Ours K=3 top | stronger variant | scale |
+| 4 | K=1 random (5 draws) | placement causality 1 | insert+δ at random vulnerability-irrelevant positions |
+| 5 | K=3 random (5 draws) | placement causality 1 | same, K=3 |
+| 6 | K=3 bottom | placement causality 2 | inserts at LOWEST vulnerability → should be weakest |
+| 7 | **top-δ-only (K_ins=0)** | **insert causality 1** | δ at top vulnerability neighborhoods, NO inserts |
+| 8 | **random-δ-only (K_ins=0)** | **insert causality 2 (placement control)** | δ at random neighborhoods, NO inserts |
+| 9 | **top-base-insert+δ (unoptimized ν=0)** | **insert-optimization causality** | top-K midframe insert with no ν, δ optimized around |
+| 10 | Canonical {6,12,14} | legacy comparison | — |
 
-**Insert schedule defined on Clock W**:
-> Place inserts at write positions `w_k = (num_maskmem - 1) · k` for `k = 1, 2, ..., K_ins`, with one insert shifted by `w_K ← min(w_K, W_total - 1)` to force the final insert to be the last write before eval.
+Ours (row 2/3) is strongest if ALL the following hold:
+- **beat 4/5** (placement matters): top ≥ 2× random J-drop.
+- **beat 6** (bottom is weakest): top ≥ 3× bottom J-drop.
+- **beat 7** (inserts matter): ours J-drop ≥ top-δ-only J-drop + 0.10.
+- **beat 9** (ν optimization matters): ours J-drop ≥ top-base-insert+δ J-drop + 0.05.
 
-For `num_maskmem = 7`, `K_ins = 3`: `w_k ∈ {6, 12, ...}` mapped to `W_total` that the modified sequence produces. Clock-M positions are derived by forward-simulating SAM2 write behavior: before inserting at write `w_k`, we know the corresponding modified-index `m_k` because every frame in the modified sequence triggers one write. Thus `m_k = w_k`. Clock-O positions come from the reverse insertion map: `o_k = m_k - (number of inserts before position m_k)`.
+If ours does NOT beat 7 → insert's causal role is NOT established (δ at vulnerable positions is sufficient). That would move the paper's framing from "vulnerability-aware insertion" to "vulnerability-aware local perturbation" (not the user's preferred direction; honest finding regardless).
 
-Explicit for 15-frame prefix (`T_prefix = 15`), `K_ins = 3`:
-- `m_1 = 6, m_2 = 12, m_3 = 13` (w_3 forced to last-write)
-- Insertions occur BETWEEN original frames: insert #1 is modified-index 6 → between clock-O f5 and f6; insert #2 is modified-index 12 → between O f10 and f11; insert #3 is modified-index 13 → between O f10 and f11 (two inserts between same original pair) ... this is wrong.
+### F9 — Hard feasibility acceptance
 
-**Corrected mapping rule**:
-- Write `w_k` corresponds to modified-sequence frame `m_k = w_k` (since each frame produces one write after cond).
-- If insertion happens AT modified-index `m_k`, the number of inserts at or before `m_k` determines the original frame: `o_k = m_k - |{k' ≤ k : m_{k'} ≤ m_k}|`.
+**Before**: L_fid hinge penalties. Final selection = argmax surrogate_J_drop over "fidelity-feasible steps".
 
-Cleanly: insert-k is placed such that it lands at modified-index `m_k`. Between originals, so the insert displaces everything after. For `{m_1, m_2, m_3} = {6, 12, 13}` we get inserts placed AFTER original `{o_1 = 5, o_2 = 10, o_3 = 10}` — two inserts between f10 and f11.
+**After**: feasibility is HARD:
+```
+After PGD loop, filter step_history to only steps where ALL hinges = 0:
+  S_feas = { step : L_fid_orig[step] = L_fid_ins[step] = L_fid_TV[step] = L_fid_f0[step] = 0 }
 
-If the paper prefers inserts all between different originals, shift: `m = {6, 12, 14}` → inserts after `{o = 5, o = 10, o = 11}`. This is the canonical schedule; published in the paper in these exact three clocks.
+If S_feas is empty:
+  Flag clip as "fidelity-infeasible at (ε, F_orig, F_ins)". Report its attainable LPIPS/SSIM pair.
+  Do NOT include this clip in the main DAVIS-10 success count. Report as "n infeasible / 10".
 
-- **Reasoning**: schedule claim and experiment are now reproducible from `num_maskmem` + `T_prefix` + `K_ins` alone, no hand-tuned `r`.
-- **Impact**: off-resonance ablation (I2) can be defined precisely in the same clock system.
+Else:
+  (δ*, ν*) = step with argmax surrogate_J_drop over S_feas.
+```
 
-### I1 — L_stale reformulated as 3-bin categorical KL (IMPORTANT)
-- **Was**: $\log(A^{\text{clean-recent}} / A^{\text{insert-memory}})$ — 2-way ratio.
-- **Now**: build distribution `P_u = [A_u^\text{ins}, A_u^\text{recent}, A_u^\text{other}]` (normalized over all bank slots + conditioning + image-feature fallback). Target distribution `Q = [q_\text{ins}, q_\text{recent}, q_\text{other}]` with `q_\text{ins} = 0.6, q_\text{recent} = 0.2, q_\text{other} = 0.2`.
+This prevents a "best infeasible δ" from silently being reported as a success.
 
-$$ L_\text{stale} = \frac{1}{|V|} \sum_{u \in V} \text{KL}(Q \| P_u) $$
+### F10 — Log mu_true, mu_decoy separately
 
-- **Reasoning**: 3-bin explicitly favors insert slots over clean-recent AND tracks where rest of attention flows (prevents attention collapse to unrelated slots from looking like success).
-- **Impact**: L_stale now a proper categorical target, not a raw ratio.
+Per-step diagnostic log includes:
+```
+mu_true_trace_t  = mu_true_t(step) for t ∈ NbrSet∪inserts
+mu_decoy_trace_t = mu_decoy_t(step) for same
+```
 
-### I2 — Off-resonance deconfounded (IMPORTANT)
-- **Was**: period-4 vs period-6 changes resonance AND last-insert-to-eval distance (confounded).
-- **Now**: the ablation matches:
-  - `K_ins = 3` (same)
-  - `T_prefix = 15` (same)
-  - **Last-insert modified-index `m_{K_ins}` = 14** (same, so distance to first eval `m = 15` is identical)
-  - Only the spacing of earlier inserts varies:
-    - **Resonance condition**: `m_k = 6 · k`, shift last to 14 → `{6, 12, 14}` → write periodicity = num_maskmem - 1
-    - **Off-resonance condition**: `m_k = 4 · k`, shift last to 14 → `{4, 8, 14}` → write periodicity = 4 (breaks FIFO-period logic)
-- **Reasoning**: recency is equalized; the only difference is whether the earlier 2 inserts sit at FIFO-resonant multiples.
-- **Impact**: Claim 4 (FIFO resonance matters) becomes a clean mechanism test.
+Final paper reports:
+```
+Δmu_true  = mean_t [ mu_true_t(attacked) − mu_true_t(clean) ]
+Δmu_decoy = mean_t [ mu_decoy_t(attacked) − mu_decoy_t(clean) ]
+Ratio = |Δmu_decoy| / |Δmu_true|
+```
 
-### I3 — Whole-suffix reporting metrics (IMPORTANT)
-- **Optimization** `L_rec` stays on f15..f21 (compute).
-- **Reported** rebound + post-loss AUC computed on f15..end (full suffix, may be 50-100 frames).
-- Add **long-horizon J trajectory** plot in paper showing attack persists through end of video.
-- **Reasoning**: claim of "no recovery" (not "delayed recovery") requires whole-suffix evidence.
+Expected: `Δmu_decoy >> 0, Δmu_true ≤ 0 but |Δmu_true| small`. Ratio ≥ 2 confirms true decoy behavior, not implicit suppression.
 
-### M1 — A_u extraction specified (MINOR)
-- **Query set**: foreground queries = pixel positions inside `erode(C_u, 2)` after optical-flow warp from f0 mask.
-- **Attention aggregation**: average across all memory-attention heads in the FINAL memory-attention block of SAM2 (closest to mask decoder).
-- **Slot types**:
-  - `insert` slots: any bank entry whose source modified-index `m_k` coincides with an inserted frame
-  - `recent-clean` slots: any bank entry from a modified-index corresponding to an original prefix frame (f0..f14)
-  - `other`: remaining attention to conditioning frame + image-feature fallback
-- **Reasoning**: reproducible measurement; no hidden hyperparameters.
+### Scorer math simplification (Codex simplification)
 
-### Simplifications applied
-- **S1**: L_loss ROI restriction. Was `BCE(g_ins, 1[D_ins])` over full frame. Now `ROI-BCE`: BCE computed only on pixels inside the union of the decoy box `D_box` and the original-target box `C_box`, both dilated by 10 pixels. Background mass removed.
-- **S2**: Flow stack simplified to RAFT only (drop Unimatch).
-- **S3**: Fidelity optimization stack collapsed to: δ L∞ clamp (hard) + ν LPIPS soft penalty + seam-band ΔE. SSIM kept as **reported metric only** (drop from loss).
+**Before**: rank-based robust-z via IQR.
 
-## Revised Proposal (final form this round)
+**After** (rank-sum):
+```
+For m ∈ {1, ..., T-1}:
+  rank_conf_m = rank(r_conf_m among all m)    # 1 = smallest, T-1 = largest
+  rank_mask_m = rank(r_mask_m)
+  rank_feat_m = rank(r_feat_m)
 
-### Title
-**MemoryShield: A Two-Phase Preprocessor for Protecting Video Data from SAM2-Family Streaming Promptable Segmenters**
+v_m = rank_conf_m + rank_mask_m + rank_feat_m
+
+W = argtop-K of v_m with |m_i − m_j| ≥ 2 (non-adjacency).
+```
+
+Equivalent robustness (rank-based) with simpler math.
+
+### F7 pilot thresholds tightened per Codex feedback
+
+Codex said "pilot thresholds reasonable for pilot, not for final claims". Minor adjustment to pilot GO condition:
+
+**Before**: GO if `Δ_top ≥ 0.05 OR Δ_insert ≥ 0.05 on ≥ 2/3` AND `J-drop(C) ≥ 0.20 on ≥ 2/3`.
+
+**After**: GO if **BOTH**: (a) `Δ_top := J-drop(A) − J-drop(B) ≥ 0.05` on ≥ 2/3 clips; (b) `J-drop(C, K=3 top) ≥ 0.20` on ≥ 2/3 clips. (AND instead of OR — more conservative.)
+
+If only one condition holds, proceed cautiously with scope-narrowed claims.
+
+## Revised Proposal (round-2, full)
 
 ### Problem Anchor
-[Unchanged, see PROBLEM_ANCHOR_2026-04-22.md]
+(see `PROBLEM_ANCHOR_2026-04-23_v4-insert.md`)
 
-### Method
+### Method Thesis
 
-**Per-video PGD objective**:
-$$ L(\nu, \delta) = L_\text{loss} + \lambda_r L_\text{rec} + \lambda_f L_\text{fid} $$
+**Vulnerability-aware insertion** for SAM2 dataset protection: rank-sum 3-signal scorer → top-K non-adjacent placement → LPIPS-TV-bound insert content optimization (ν) + local δ on insert neighborhoods → contrastive decoy-margin loss (no suppression, no object_score margin). K=1 is the mechanistic centerpiece.
 
-**Phase 1 — L_loss (inserts only, ROI)**:
-$$ L_\text{loss} = \frac{1}{K_\text{ins}} \sum_k \Big[ \text{BCE}_{\text{ROI}}(g_{\text{ins}_k}, 1[D_{\text{ins}_k}]) + \alpha \cdot \text{softplus}(\text{CVaR}_{0.5}(g_{\text{ins}_k} \cdot 1[C_{\text{ins}_k}]) + m) \Big] $$
+### Contribution Focus
 
-ROI = union of `D_box` and `C_box` dilated by 10 px.
+- **C1 (dominant)**: vulnerability-aware insertion with **causal isolation of both placement AND insert optimization** via a 10-config matched-budget ablation study, achieving J-drop ≥ 0.35 at fidelity triad on DAVIS-10.
+- **C2 (supporting)**: restoration-counterfactual attribution showing damage concentrates in current-frame Hiera pathway at insert positions.
+- **Non-contributions**: no new generator, no UAP, no runtime hook, no bank poisoning, no learned net, no LLM/RL/diffusion, no suppression, no object_score penalty.
 
-**Phase 2 — L_rec (clean post-prefix eval frames u ∈ U = f15..f21)**:
-$$ L_\text{rec} = \frac{1}{|U|} \sum_u \Big[ \alpha_\text{supp} \cdot \text{CVaR}_{0.5}(g_u \cdot 1[C_u])^+ + \alpha_\text{conf} \cdot \text{softplus}(\text{logsumexp}(g_u) - \tau_\text{conf}) \Big] + \beta \cdot L_\text{stale} $$
+### Complexity Budget
 
-**L_stale (3-bin categorical KL)**:
-$$ L_\text{stale} = \frac{1}{|V|} \sum_{u \in V} \text{KL}(Q \| P_u), \quad P_u = [A_u^\text{ins}, A_u^\text{recent}, A_u^\text{other}], \quad Q = [0.6, 0.2, 0.2] $$
+Unchanged. 2 trainable (δ local-support, ν LPIPS-bound). Non-trainable rank-sum scorer. 3 inference-only swap hooks.
 
-V = first 3 clean post-last-insert frames.
+### System Overview
 
-**L_fid**:
-$$ L_\text{fid} = \mu_\nu \cdot (\text{LPIPS}(x_{\text{ins}_k}, f_{\text{prev}_k}) - 0.10)^+ + \mu_s \cdot \Delta E_\text{seam} $$
+```
+Offline (GT-free):
+  Clean SAM2 → m̂_true_t, confidence_t, H_t
+  Rank-sum scorer → W = top-K non-adjacent positions
+  decoy_offset geometric; m̂_decoy_t = shift_mask(m̂_true_t)
 
-δ hard-clamped to L∞ ball every step (not in L_fid). SSIM is reported, not optimized.
+Per-video PGD (100 steps, 3 stages):
+  δ supported on S_δ = ∪_k NbrSet(m_k) ∪ {0} (NbrSet = m±1, m±2; T_δ ≈ 12-13 frames)
+  base_insert_k = 0.5·x_{m_k-1} + 0.5·x_{m_k}
+  insert_k = clamp(base_insert_k + ν_k) ∘ fake_quantize
+  x'_t = clamp(x_t + δ_t) ∘ fake_quantize  (for t ∈ S_δ; else x_t)
+  processed = interleave(x', insert_k at W)
+  
+  SAM2 forward → pred_logits_t per processed-time frame
+  
+  mu_true_t  = confidence-weighted mean of pred_logits_t on m̂_true_t
+  mu_decoy_t = confidence-weighted mean of pred_logits_t on m̂_decoy_t
+  
+  L_margin_insert   = Σ_k softplus(mu_true_{m_k} − mu_decoy_{m_k} + 0.75)
+  L_margin_neighbor = Σ_{t ∈ NbrSet\inserts} 0.5 · softplus(mu_true_t − mu_decoy_t + 0.75)
+  L_fid_orig = Σ_{t ∈ S_δ, t≥1} max(0, LPIPS(x'_t, x_t) − 0.20)
+  L_fid_ins  = Σ_k max(0, LPIPS(insert_k, base_insert_k) − 0.35)
+  L_fid_TV   = Σ_k max(0, TV(insert_k) − 1.2 · TV(base_insert_k))
+  L_fid_f0   = max(0, 1 − SSIM(x'_0, x_0) − 0.02)
+  
+  L = L_margin_insert + L_margin_neighbor
+    + λ(step)·(L_fid_orig + L_fid_ins + L_fid_TV) + λ_0·L_fid_f0
+  
+  PGD step on (δ, ν); clip δ_0 to ±2/255, δ_{t≥1, t∈S_δ} to ±4/255; ν unbounded by ε (LPIPS constrains)
+  Log mu_true_trace, mu_decoy_trace, surrogate_J_drop, per-frame LPIPS, f0 SSIM
+  
+  S_feas = {steps where ALL L_fid_* = 0}
+  If empty → clip flagged infeasible
+  Else → (δ*, ν*) = argmax surrogate_J_drop over S_feas
+```
 
-**Schedule (three-clock formalization)**:
-- Clock W (memory writes), Clock M (modified-sequence index), Clock O (original-frame index).
-- Insert positions on Clock W: `w_k = 6 · k` for k=1,2,3, with `w_3 ← w_3 + 2` when prefix ends at w=14 (forces final insert adjacent to eval start).
-- For T_prefix = 15, num_maskmem = 7, K_ins = 3:
-  - Canonical schedule: `m = {6, 12, 14}` → inserts after original frames {5, 10, 11}.
-  - Off-resonance control (same last-insert distance): `m = {4, 8, 14}` → inserts after original {3, 6, 11}.
+### Validation (F8-expanded)
 
-**Training Plan**:
-1. Clean SAM2 run → `C_u` per clock-O frame (flow-warped + erode-2).
-2. Decoy-offset selection at video start.
-3. ProPainter × K_ins → insert bases.
-4. Stage 1 (1-40): ν-only with L_loss.
-5. Stage 2 (41-80): δ-only with L_rec (inserts frozen).
-6. Stage 3 (81-200): joint alternating 2:1 δ:ν with full L.
-7. δ L∞-clamp every step; ν LPIPS penalty via aug-Lagrangian.
-8. Cache clean-suffix image embeddings.
+**Main table** (10 rows):
+| # | Config | ν-opt? | δ-opt? | Positions |
+|---|---|:---:|:---:|---|
+| 1 | Clean | — | — | — |
+| 2 | **Ours K=1 top** | ✓ | ✓ (top nbr) | top-1 |
+| 3 | Ours K=3 top | ✓ | ✓ (top nbr) | top-3 |
+| 4 | K=1 random (×5 draws, paired bootstrap) | ✓ | ✓ (random nbr) | random-1 |
+| 5 | K=3 random (×5 draws) | ✓ | ✓ | random-3 |
+| 6 | K=3 bottom | ✓ | ✓ | bottom-3 |
+| 7 | **top-δ-only K=0** | N/A | ✓ (top nbr) | no inserts |
+| 8 | **random-δ-only K=0** (×5) | N/A | ✓ (random nbr) | no inserts |
+| 9 | **top-base-insert+δ (ν=0)** | ✗ | ✓ (top nbr) | top-3 midframe |
+| 10 | Canonical {6,12,14} | ✓ | ✓ | fixed |
 
-**A_u extraction (fixed)**:
-- Foreground queries = pixel positions inside `erode(flow_warp(C_u), 2)`.
-- Attention = average of all heads in SAM2's FINAL memory-attention block.
-- Slot types:
-  - `insert`: bank entries sourced from modified frames in `{m_k}`
-  - `recent-clean`: bank entries from modified frames corresponding to original prefix (f0..f14)
-  - `other`: conditioning slot + image-feature fallback
+Appendix: UAP-SAM2 per-clip, SAM2Long transfer, SAM2.1-Base transfer, DAVIS-30.
 
-### Validation
+### Success criteria (updated per F8-F10)
 
-**Claim 1 (DOMINANT)**: 4-condition ablation on DAVIS-10 hard — clean / Phase-1-only / Phase-2-only / Full. Metric: mean J-drop (full suffix) + rebound + post-loss AUC. Expect Full ≥ 0.55 J-drop, singles ≤ 50% Full, Full rebound ≤ 0.15.
+Ours = row 2 or 3. Paper's headline claim requires:
+- `J-drop(ours) ≥ 0.35` mean on DAVIS-10 feasibly-selected clips
+- Fidelity triad: all L_fid_* = 0 per S_feas (hard acceptance)
+- **Placement causality**: `J-drop(ours) ≥ 2 × J-drop(K-random)` AND `≥ 3 × J-drop(K-bottom)` on ≥ 7/10 clips
+- **Insert causality**: `J-drop(ours) ≥ J-drop(top-δ-only) + 0.10` on ≥ 7/10 clips
+- **Insert-optimization causality**: `J-drop(ours) ≥ J-drop(top-base-insert+δ) + 0.05` on ≥ 7/10 clips
+- **Decoy vs suppression check**: `|Δmu_decoy| / |Δmu_true| ≥ 2` (decoy truly beats true, not just collapses it)
+- **Mechanism attribution**: R2 (Hiera at inserts) recovers ≥ 0.20; R3 (bank) ≤ 0.02
 
-**Claim 2 (SUPPORTING)**: Full vs Full-no-L_stale on DAVIS-10. Metric: rebound + post-loss AUC + bank-attention breakdown `P_u`. Expect Full keeps `P_u^\text{ins} ≥ 0.5` on V; no-L_stale collapses to `P_u^\text{ins} ≤ 0.2`; rebound gap ≥ 0.2.
+### Pilot Gate (F7-updated)
 
-**Claim 3 (MANDATORY transfer)**: SAM2Long on attacked videos. Expect SAM2Long J-drop ≥ 0.25, retention ≥ 0.40.
+3 clips × 4 configs (K=1 top, K=1 random, K=3 top, δ-only-local-random). ~3-5 GPU-hours.
 
-**Claim 4 (MECHANISM)**: Resonance `m={6,12,14}` vs off-resonance `m={4,8,14}`, fixed K_ins, prefix, last-insert-distance, ε, LPIPS. Expect resonance ≥ off-resonance by ≥ 20pp J-drop.
+**GO** if BOTH: (a) `J-drop(K=1 top) − J-drop(K=1 random) ≥ 0.05` on ≥ 2/3 clips; (b) `J-drop(K=3 top) ≥ 0.20` on ≥ 2/3 clips.
 
-### Compute & Timeline
-~24 GPU-hours total (~1 GPU-day on Pro 6000). 4-week timeline.
+Also check at pilot: `|Δmu_decoy| / |Δmu_true|` ratio. If ratio < 2, the margin loss isn't achieving true decoy behavior — investigate loss weighting.
 
-### Novelty re-statement
-Closest prior: UAP-SAM2 (universal, all-frame); Chen 2021 (video classification, appended dummy); ACMM 2023 (first-frame only); BadVSFM (training-time). MemoryShield is per-instance preprocessor targeting FIFO self-healing via loss-induction + recovery-prevention composition, with FIFO-resonant schedule parameterized by num_maskmem. `L_stale` (3-bin KL on bank-attention mass) is the Phase-2 mechanism that makes recovery-prevention work.
+**NO-GO**: pivot to attack-surface analysis paper (restoration + vulnerability scoring as main tools; not an attack-success paper).
+
+### Compute
+
+Same ~20 GPU-hours total (multi-draw random baselines dominate).

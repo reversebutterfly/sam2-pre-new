@@ -116,3 +116,15 @@ bash wifi.sh       # or: bash wifi-run
 - Commit message 用英文，简要描述当前状态
 - 确保工作区干净后再开始新的代码修改
 - 不要在有未提交更改的情况下开始写新功能
+## Method Design Constraints (project-specific, 2026-04-23)
+
+用户在 research-refine round-ception 后明确定下的攻击方法方向：
+
+- **必须使用 "插帧 + 修改原有帧" 策略**（decoy-style insertion + δ perturbation on originals）。**不使用 pure suppression**。
+- **插入位置必须是"最优插入点"** — 利用对原视频的完整访问，分析 SAM2 在原视频上的 **vulnerability windows**（置信度波动、运动不连续、scene change 等），在那些位置插帧效果最强。不再用 FIFO canonical schedule（{6,12,14}）— 那是 v2/v4 基于"defeat FIFO self-healing"叙事选的，但 B2 已证伪该叙事。
+- **Insert 的作用不是毒化 memory bank**（B2 证明 bank 架构上不关键），而是 **让 SAM2 在处理 insert 那一帧时，其当前帧 Hiera 特征通路受扰动**。Insert 本质是"current-frame pathway attack delivered as a fake frame"。
+- **Eval 设定**：数据集保护 threat model — eval 在处理过的整个视频（包含 insert 帧和 δ 帧），不是 clean-suffix。
+- **保真约束**：f0（mask prompt 帧）两-tier 特保真（ε=2/255, SSIM≥0.98）；其它帧 ε=4/255 + 每帧 LPIPS ≤ F_lpips（floor-grounded，~0.20）。
+- **监督**：GT-free，使用 clean-SAM2 pseudo-labels + 置信加权。
+- **任何 refinement / experiment 都必须遵守**：保留 insert 为核心机制，不能被 reviewer / Codex 建议"删掉 insert 简化为 pure δ"。如果 reviewer 这么建议，pushback 并引用此约束。
+
