@@ -1,0 +1,14 @@
+{
+  "round": 1,
+  "threadId": "019db577-fd37-7e41-8258-4969c4d9c487",
+  "status": "in_progress",
+  "difficulty": "medium",
+  "topic": "memshield_v2_r001_r002_results_analysis",
+  "last_score": 3.0,
+  "last_verdict": "not ready",
+  "pending_experiments": [
+    "fidelity_floor_study_dog_lpips_floors",
+    "r003_k_ins_3_canonical_dog"
+  ],
+  "timestamp": "2026-04-22T22:00:00"
+}
