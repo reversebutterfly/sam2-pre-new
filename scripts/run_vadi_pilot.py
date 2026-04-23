@@ -363,55 +363,77 @@ def run_pilot(
 def build_pilot_adapters(
     checkpoint_path: str, device: torch.device,
 ) -> Tuple[Callable, Callable, Callable, Callable]:
-    """Build (clean_pass_fn_factory, forward_fn_builder_factory, lpips, ssim)
-    for real SAM2 + LPIPS(alex) + SSIM on Pro 6000.
+    """Build `(clean_pass_fn_factory, forward_fn_builder_factory, lpips,
+    ssim)` for real SAM2.1 + LPIPS(alex) + SSIM on Pro 6000.
 
-    This is the ONLY place in the pilot that imports SAM2 / lpips. Called
-    lazily from `main()` when not in `--dry-run` mode, so the script
-    imports cleanly on doc-only hosts.
+    Delegates the heavy SAM2 / LPIPS setup to
+    `memshield.vadi_sam2_wiring.build_sam2_lpips_ssim`; the factories
+    returned here are thin per-clip closures that:
+      - cache the `CleanPassOutput` so all configs for a clip share ONE
+        SAM2 clean pass (3 configs × 3 clips → 3 clean passes, not 9);
+      - build a fresh `VADIForwardFn` per (clip, config) pairing (cheap —
+        only copies prompt mask + normalization constants). The predictor
+        is reused across everything.
 
-    IMPLEMENTATION NOTE (Pro 6000): the real factories wrap
-    `SAM2VideoAdapter` — its current contract returns
-    `{insert_logits, eval_logits, P_u_list, pred_masks}`, keyed by
-    processed-space indices. VADI needs per-frame pred_logits at arbitrary
-    positions in S_δ ∪ W. Contract the Pro-6000 author must honor:
+    Autograd + device contract
+    --------------------------
+    - Predictor parameters frozen via `requires_grad_(False)` in
+      `build_sam2_lpips_ssim`; gradient flows only through
+      `x_processed` → Hiera → memory_attention → mask_decoder.
+    - bf16 autocast is enabled inside VADIForwardFn; outputs are cast
+      back to fp32 before returning so `vadi_loss`'s margin / LPIPS /
+      SSIM terms see stable precision.
+    - `x_clean` is moved to `device` inside the clean-pass helper if
+      needed; PGD leaves (`delta`, `nu`) are allocated on whatever device
+      `x_clean` ends up on after `run_pilot(...)` preps it.
 
-      clean_pass_fn(x_clean, prompt_mask) → CleanPassOutput
-        - pseudo_masks:    list of [H_vid, W_vid] float in [0,1], len=T_clean
-        - confidences:     np.ndarray shape (T_clean,) float
-        - hiera_features:  list of per-frame feature arrays/tensors, len=T_clean
-        Built by running SAM2VideoAdapter in "clean" mode on `x_clean`.
-
-      forward_fn(x_processed, return_at) → dict[int, Tensor]
-        - x_processed:  [T_proc, H_vid, W_vid, 3] in [0,1], REQUIRES_GRAD
-                        (PGD backward path).
-        - return_at:    iterable of processed-space indices (subset of
-                        insert_ids_processed ∪ neighbor_ids_processed).
-        - returns:      {t: pred_logits[H_mask, W_mask]} for every t in
-                        return_at. Must match the shape of the pseudo-masks
-                        in m_hat_true_by_t (no broadcast — vadi_loss enforces
-                        strict shape equality).
-        Autograd must flow: x_processed → SAM2 forward → pred_logits.
-        DO NOT wrap in torch.no_grad(); freeze weights via
-        `requires_grad_(False)` on the SAM2 parameters instead.
-
-      Merging adapter's native output into {t: logits}: run the adapter once
-      with `return_logits_at = return_at`, then union `insert_logits` (keyed
-      by W_k position) + `eval_logits` (keyed by processed-space eval idx)
-      + any additional per-frame hooks needed for neighbor positions. If the
-      landed adapter only exposes insert + eval, the caller must extend it
-      (e.g., a `return_logits_at` parameter on `_track_single_frame`).
-
-    Performance tip: memoize `CleanPassOutput` inside the per-clip closure
-    so the 3 configs-per-clip share one SAM2 clean pass instead of three.
+    Pilot-config fanout
+    -------------------
+    This pilot runs 3 clips × 3 configs (K1_top / K1_random / K3_top).
+    The `δ_only_local_random` config requires a `K_ins=0` phantom path
+    in `run_vadi_for_clip` that is not yet landed — it's a main-table
+    row (7/8), NOT a GO/NO-GO blocker. See `PILOT_CONFIGS` above.
     """
-    # Lazy imports — won't execute until this function is called.
-    # (Self-tests and --dry-run never reach this.)
-    raise NotImplementedError(
-        "build_pilot_adapters: Pro 6000 SAM2 wiring not yet landed in this "
-        "file. Wire SAM2VideoAdapter + memshield.run_pilot_r002.build_lpips_fn "
-        "+ memshield.losses.differentiable_ssim here once on-device. See "
-        "HANDOFF_VADI_PILOT.md §'Environment recap' for the exact conda env.")
+    # Lazy imports — not executed on --dry-run or self-test paths.
+    from memshield.vadi_sam2_wiring import (                          # noqa: WPS433
+        VADIForwardFn, build_sam2_lpips_ssim, clean_pass_vadi,
+    )
+
+    predictor, lpips_fn, ssim_fn = build_sam2_lpips_ssim(
+        checkpoint_path=str(checkpoint_path), device=device,
+    )
+
+    def clean_pass_fn_factory(
+        clip_name: str, x_clean: Tensor, prompt_mask: np.ndarray,
+    ) -> Callable:
+        cache: Dict[str, Any] = {"out": None}
+
+        def clean_pass(x: Tensor, prompt: np.ndarray):
+            if cache["out"] is None:
+                cache["out"] = clean_pass_vadi(
+                    predictor, x, prompt, device,
+                )
+            return cache["out"]
+
+        return clean_pass
+
+    def forward_fn_builder_factory(
+        clip_name: str, x_clean: Tensor, prompt_mask: np.ndarray,
+    ) -> Callable:
+        H_vid = int(x_clean.shape[1])
+        W_vid = int(x_clean.shape[2])
+
+        def forward_fn_builder(
+            x_clean: Tensor, prompt_mask: np.ndarray, W: Sequence[int],
+        ) -> Callable:
+            return VADIForwardFn(
+                predictor=predictor, prompt_mask=prompt_mask,
+                video_H=H_vid, video_W=W_vid, device=device,
+            )
+
+        return forward_fn_builder
+
+    return clean_pass_fn_factory, forward_fn_builder_factory, lpips_fn, ssim_fn
 
 
 # =============================================================================
@@ -455,7 +477,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         clean_fac, fwd_fac, lp, ss = build_pilot_adapters(
             args.checkpoint, device)
-    except NotImplementedError as e:
+    except (NotImplementedError, ImportError) as e:
+        # NotImplementedError: adapter stub (pre-wiring).
+        # ImportError: running on a host without `sam2` / `lpips` installed
+        # (e.g., a Windows dev machine) — pipeline cannot execute and we
+        # return 2 so self-tests and CI stay deterministic.
         print(f"[pilot] cannot run real pipeline: {e}", file=sys.stderr)
         return 2
 
@@ -666,8 +692,25 @@ def _self_test() -> None:
     assert rv == 0
 
     # -- CLI real mode fails gracefully without SAM2 wiring ---------------
-    rv = main(["--davis-root", "/tmp", "--checkpoint", "/tmp/ckpt.pt"])
-    assert rv == 2                                      # NotImplementedError path
+    # On a dev host WITHOUT `sam2`/`lpips` installed, `build_pilot_adapters`
+    # raises ImportError → main() returns 2. On Pro 6000 (or any host with
+    # SAM2 installed), the path reaches real predictor construction and
+    # would fail with FileNotFoundError on the bogus checkpoint path — a
+    # loud failure is correct for real runs. We only assert rv==2 on hosts
+    # that can't run the real pipeline; hosts with SAM2 get a skip message.
+    try:
+        import sam2  # noqa: F401, WPS433
+        sam2_available = True
+    except ImportError:
+        sam2_available = False
+    if not sam2_available:
+        rv = main(["--davis-root", "/tmp", "--checkpoint", "/tmp/ckpt.pt"])
+        assert rv == 2, (
+            f"expected rv=2 on host without SAM2 (ImportError path); "
+            f"got {rv}")
+    else:
+        print("  [self-test skip] SAM2 installed — rv==2 check only "
+              "meaningful on dev hosts without sam2/lpips")
 
     print("scripts.run_vadi_pilot: all self-tests PASSED "
           "(GO/NO-GO logic: GO, fail-cond1, fail-cond2, infeasibility, "
