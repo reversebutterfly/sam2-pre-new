@@ -244,6 +244,106 @@ def clean_pass_vadi(
     )
 
 
+@torch.no_grad()
+def sam2_eval_pseudo_masks(
+    predictor,
+    video: Tensor,
+    prompt_mask: np.ndarray,
+    device: torch.device,
+    *,
+    autocast_dtype: Optional[torch.dtype] = torch.bfloat16,
+) -> List[np.ndarray]:
+    """Lightweight no-grad SAM2 forward for EVALUATION of already-processed
+    video (clean-processed baseline OR exported uint8 attack artifact).
+
+    Differs from `clean_pass_vadi` in that it only returns per-frame
+    HARD-thresholded binary masks at video resolution — no confidence,
+    no hiera features, no CleanPassOutput. Used by
+    `eval_exported_j_drop` in `scripts/run_vadi.py` to re-measure attack
+    effectiveness on delivered bytes (codex R1 Fix 2, 2026-04-23).
+
+    Args:
+        predictor: SAM2 VideoPredictor (same one used elsewhere).
+        video: `[T, H_vid, W_vid, 3]` float in `[0, 1]`. Already
+            interleaved — contains whatever frames the caller wants SAM2
+            to track (originals + inserts, or just originals, or exported
+            uint8 reloaded).
+        prompt_mask: `[H_vid, W_vid]` uint8 binary first-frame prompt.
+        device: predictor's device.
+
+    Returns:
+        `List[np.ndarray]` of length `T`, each element `[H_vid, W_vid]`
+        uint8 binary (foreground = 1) — suitable for jaccard() against
+        a pseudo-ground-truth mask sequence.
+    """
+    if video.dim() != 4 or video.shape[-1] != 3:
+        raise ValueError(
+            f"video must be [T, H, W, 3]; got {tuple(video.shape)}")
+    T, H_vid, W_vid = (
+        int(video.shape[0]), int(video.shape[1]), int(video.shape[2]),
+    )
+    image_size = int(predictor.image_size)
+
+    img_mean = torch.tensor(
+        IMAGENET_MEAN, device=device, dtype=torch.float32,
+    ).view(1, 3, 1, 1)
+    img_std = torch.tensor(
+        IMAGENET_STD, device=device, dtype=torch.float32,
+    ).view(1, 3, 1, 1)
+
+    mask_inputs_f0 = _prepare_first_frame_mask(prompt_mask, image_size, device)
+    v_dev = video.to(device) if video.device != device else video
+
+    obj_output_dict: Dict[str, Dict[int, Dict]] = {
+        "cond_frame_outputs": {},
+        "non_cond_frame_outputs": {},
+    }
+
+    if autocast_dtype is not None and device.type == "cuda":
+        autocast_ctx = torch.amp.autocast(
+            device_type="cuda", dtype=autocast_dtype,
+        )
+    else:
+        from contextlib import nullcontext
+        autocast_ctx = nullcontext()
+
+    out: List[np.ndarray] = []
+    with autocast_ctx:
+        for fid in range(T):
+            frame = v_dev[fid:fid + 1]
+            img_norm = _to_sam2_input(frame, image_size, img_mean, img_std)
+            backbone_out = predictor.forward_image(img_norm)
+            _, vision_feats, vision_pos, feat_sizes = \
+                predictor._prepare_backbone_features(backbone_out)
+
+            is_init = (fid == 0)
+            current_out = predictor.track_step(
+                frame_idx=fid,
+                is_init_cond_frame=is_init,
+                current_vision_feats=vision_feats,
+                current_vision_pos_embeds=vision_pos,
+                feat_sizes=feat_sizes,
+                point_inputs=None,
+                mask_inputs=mask_inputs_f0 if is_init else None,
+                output_dict=obj_output_dict,
+                num_frames=T,
+                track_in_reverse=False,
+                run_mem_encoder=True,
+                prev_sam_mask_logits=None,
+            )
+            if is_init:
+                obj_output_dict["cond_frame_outputs"][fid] = current_out
+            else:
+                obj_output_dict["non_cond_frame_outputs"][fid] = current_out
+
+            pred_vid_logits = _low_res_to_video_res(
+                current_out["pred_masks"], H_vid, W_vid,
+            ).float()
+            hard = (pred_vid_logits.sigmoid() > 0.5).to(torch.uint8)
+            out.append(hard.detach().cpu().numpy())
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Differentiable forward — the PGD-time entry point
 # ---------------------------------------------------------------------------

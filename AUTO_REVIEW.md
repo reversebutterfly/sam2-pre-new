@@ -1613,3 +1613,101 @@ Stop chasing the paper's DAVIS 36.26. The actionable next step is writing, not a
 
 ### Status: LOOP COMPLETE — Stop experiments, start Decoy paper writing.
 - Difficulty: medium
+
+---
+
+# VADI Pre-Pilot Review Loop (2026-04-23 evening)
+
+**Topic**: vadi_pre_pilot_code_fixes
+**Goal**: Before launching the 3-clip × 3-config pilot gate, ensure the code actually measures what the paper claims. Prior review (research-review) flagged HALT; this loop drives fixes + re-review.
+
+## Round 1 (2026-04-23)
+
+### Assessment (Summary)
+- Score: **4/10** (estimated — codex gave HALT verdict without numeric score)
+- Verdict: **HALT** — not ready to launch
+- Reviewer: GPT-5.4 xhigh via Codex MCP (thread `019dbabd-4803-7752-95cc-99f3ac08999c`)
+
+### Key Criticisms (ranked by severity)
+
+1. **(CRITICAL)** `best_surrogate_J_drop` ≠ paper claim: computed on pseudo-mask (clean_SAM2 self-consistency) over `insert_ids ∪ neighbor_ids` only, NOT on exported uint8 artifact + NOT whole-video + NOT against DAVIS GT. Pilot GO gate reads directly from this. The exported re-measure only checks LPIPS/SSIM/TV budgets, never re-runs SAM2.
+2. **(CRITICAL)** `_ordinal_rank` gives later-tied frames higher ranks (`[1.0, 1.0, 1.0] → [1, 2, 3]` per self-test). Flat signals → systematic late-frame bias → "top" wins via "late frame = natural SAM2 degradation" confound, not vulnerability scoring validity.
+3. **(MEDIUM)** Δmu diagnostic uses `last_feasible - first_logged_step`, can pass/fail independently of selected attack.
+4. **(LOW, defer)** K1_random 1-draw × 3 clips too variance-prone for rigorous evidence (OK for cheap kill-switch).
+5. **(LOW, defer)** Contrastive margin can collapse to suppression if `Δmu_decoy ≤ 0`.
+6. **(LOW, defer)** Insert pseudo-target `0.5·mask[c-1] + 0.5·mask[c]` OK for PGD supervision but not for eval.
+
+### Reviewer Raw Response
+
+<details>
+<summary>Click to expand full reviewer response (codex gpt-5.4 xhigh)</summary>
+
+Saved separately in `REVIEW_PRE_PILOT_2026-04-23.md` to keep AUTO_REVIEW.md readable. Key excerpts:
+
+> "The biggest silent failure is evaluator mismatch. The pilot uses best_surrogate_J_drop from vadi_optimize.py:493, computed as 1 - J(attacked, pseudo_mask) only on insert_ids ∪ neighbor_ids. It is not the stated whole-processed-video J(clean) - J(attacked), not recomputed on exported PNGs, and not against DAVIS GT. [...] gates directly on this surrogate. This can produce fake J-drop."
+
+> "Verdict: HALT"
+
+> "Do not launch the pilot as currently coded. Minimum fix before burning the run: [rank ties], [exported re-eval], [DAVIS GT labeling], [5 random draws], [Δmu vs clean baseline]."
+
+</details>
+
+### Actions Required (this round)
+1. **Fix 1**: rank ties → average-rank method in `memshield/vulnerability_scorer.py::_ordinal_rank`.
+2. **Fix 2**: exported-artifact SAM2 re-eval — load PNG sequence, run clean + attacked SAM2, compute whole-video J-drop, persist in `VADIClipOutput`, make pilot gate on it.
+3. **Fix 3**: rename + document — make clear that the surrogate is pseudo-mask self-consistency; exported J-drop is the paper-claim metric.
+
+### Status: Round 1 documented → proceeding to Phase C (implement fixes)
+- Difficulty: medium
+
+## Round 2 (2026-04-23)
+
+### Assessment (Summary)
+- Score: **8/10** (↑ from 4/10)
+- Verdict: **LAUNCH_WITH_FIX → almost ready**
+- Reviewer: GPT-5.4 xhigh via Codex MCP-reply (thread `019dbabd-4803-7752-95cc-99f3ac08999c`)
+
+### Key Changes Since Round 1
+1. **Fix 1 — rank ties (Round 1 HALT-2)**: `_ordinal_rank` uses average tie-break. Codex verified "eliminates the late-frame tie bias; axis/indexing is correct. Residual: if ALL v_scores tie, topk is lex-earliest — early-frame, not late-frame bias, not launch-blocking."
+
+2. **Fix 2 — exported-artifact SAM2 re-eval (Round 1 HALT-1)**: new `sam2_eval_pseudo_masks` in wiring + `eval_exported_j_drop` in run_vadi.py. Codex verified "baseline choice (processed_clean = clean originals + base_inserts, no δ/ν) conceptually right; midframe pseudo-GT acceptable for GT-free pilot with caveat to inspect originals-only/inserts-only breakdown post-run."
+
+3. **Fix 3 — gate metric switch + labeling**: `ClipConfigRecord.gate_metric()` + per-clip/per-config gate_source logging + top-level `gate_metric_sources_observed`. Pilot + DAVIS-10 claims 1/2/3 all moved to gate_metric.
+
+### Reviewer Raw Response (Round 2)
+
+<details>
+<summary>Click to expand full reviewer response</summary>
+
+> 1. `_ordinal_rank` — Yes, the new average-rank implementation eliminates the late-frame tie bias I flagged. The sorted walk is over `sorted_x = x[order]`, then writes back via `ranks[order[i:j]]`, so the axis/indexing is correct. New residual bias: if all final v_scores tie, topk_non_adjacent still tie-breaks lexicographically earliest. That is an early-frame bias, not the dangerous late-frame degradation confound. Not launch-blocking.
+>
+> 2. `eval_exported_j_drop` — The baseline choice is conceptually right for this pilot. Pseudo-GT is acceptable for a GT-free pilot, with caveat: midframe-composed insert masks are ambiguous and may understate insert-frame damage. The originals-only and inserts-only breakdown is important; inspect it after the run. **One small remaining mismatch: attacked video is reloaded exported PNG, but processed_clean is in-memory float. For "delivered bytes" symmetry, quantize/reload or at least uint8-round processed_clean before sam2_eval_fn.**
+>
+> 3. `gate_metric()` fallback — For the Pro 6000 CLI path, sam2_eval_fn is supplied, so fallback should not affect the real pilot. **I'd make real-run behavior stricter: either raise if sam2_eval_fn is None, or add an explicit allow_surrogate_gate=True only used by self-tests.**
+>
+> 4. `gate_metric_sources_observed` — **Not quite enough.** It is derived from per_clip["gate_source"], and that source is based only on K3_top. Condition 1 uses K1_top and K1_random; if those fell back while K3_top did not, the top-level summary could miss it. Fix: log per-config gate source for every record, or at minimum cond1_K1_top_gate_source, cond1_K1_random_gate_source, and cond2_K3_top_gate_source. Build gate_metric_sources_observed from all records.
+>
+> 5. Deferred concerns — Defensible for a pilot kill-switch. K1 random 1-draw is okay if you treat GO as "worth scaling," not evidence. Δmu can remain non-blocking if failure triggers honest narrative caution. Decoy anchor can be deferred because it changes the method; do not add it post-hoc unless the pilot fails the decoy diagnostic and you explicitly reframe.
+>
+> 6. Launch Score — Current state: **almost ready, 8/10**. The two Round 1 HALT issues are materially fixed. I would not call it LAUNCH_AS_IS because the clean baseline should be uint8-symmetrized and the fallback/source logging should cover all configs or be enforced off in real runs. These are small pre-launch fixes, not conceptual blockers.
+>
+> Verdict: **LAUNCH_WITH_FIX, score 8/10**.
+
+</details>
+
+### Actions Taken (Round 2 post-review, 3 codex-R2 small fixes)
+
+1. **uint8 symmetry**: In `eval_exported_j_drop`, `processed_clean` now goes through the same uint8 round-trip quantization (`(v*255+0.5).clamp(0,255).uint8().float()/255`) as the exported side before passing to sam2_eval_fn. Eliminates the "quantization damage in J_baseline" confound.
+
+2. **Per-config gate_source**: Added `ClipConfigRecord.gate_source() → str` returning `"exported_j_drop"` / `"surrogate_pseudo_mask"` / `"infeasible"`. Per-clip dict now logs `cond1_K1_top_gate_source`, `cond1_K1_random_gate_source`, `cond2_K3_top_gate_source` separately. Top-level `gate_metric_sources_observed` now scans `decision.records` (all 9 records for 3×3 pilot), not just per_clip's K3 entry.
+
+3. **Strict real-run enforcement**: `run_pilot` takes new `allow_surrogate_gate: bool = False`. Raises RuntimeError if `sam2_eval_fn is None` and flag is False. Self-tests opt in via `allow_surrogate_gate=True`. `main()` never sets it — real pipeline runs hard-fail if SAM2 eval is missing.
+
+### Results
+- All 8 VADI module self-tests pass on Windows dev host.
+- POSITIVE_THRESHOLD met: score 8/10 ≥ 6, verdict "almost ready" contains "almost" → loop stop condition satisfied.
+- No Round 3 review needed — the 3 R2 fixes are implementation purity, not new correctness risks.
+
+### Status: LOOP COMPLETE — proceed to Pro 6000 re-smoke + pilot launch.
+- Difficulty: medium
+- Final score progression: 4 → 8

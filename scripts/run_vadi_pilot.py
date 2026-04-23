@@ -82,12 +82,22 @@ DIAGNOSTIC_DELTA_MU_RATIO: float = 2.0   # Δmu_decoy ≥ ratio · max(0, -Δmu_
 
 @dataclass
 class ClipConfigRecord:
-    """A single (clip, config) outcome plus the diagnostic Δmu decomposition."""
+    """A single (clip, config) outcome plus the diagnostic Δmu decomposition.
+
+    `best_surrogate_J_drop` is the internal PGD metric (pseudo-mask
+    self-consistency on `insert_ids ∪ neighbor_ids`).
+    `exported_j_drop` is the paper-claim metric (whole-processed-video
+    Jaccard drop of attacked vs clean-processed baseline on the exported
+    uint8 artifact). Codex R1 Fix 2, 2026-04-23: pilot gates on
+    `exported_j_drop` when it is available; falls back to surrogate with
+    an explicit warning if not.
+    """
 
     clip: str
     config: str
     infeasible: bool
     best_surrogate_J_drop: float
+    exported_j_drop: Optional[float]        # None if sam2_eval_fn not supplied
     delta_mu_decoy: float      # mean_t(mu_decoy_best_step − mu_decoy_clean_proxy)
     delta_mu_true: float       # mean_t(mu_true_best_step − mu_true_clean_proxy)
     W_attacked: List[int]
@@ -106,6 +116,7 @@ class ClipConfigRecord:
             return cls(clip=clip, config=out.config_name,
                        infeasible=out.infeasible,
                        best_surrogate_J_drop=out.best_surrogate_J_drop,
+                       exported_j_drop=out.exported_j_drop,
                        delta_mu_decoy=0.0, delta_mu_true=0.0,
                        W_attacked=out.W)
         first = out.step_log_summary[0]
@@ -127,10 +138,42 @@ class ClipConfigRecord:
             clip=clip, config=out.config_name,
             infeasible=out.infeasible,
             best_surrogate_J_drop=out.best_surrogate_J_drop,
+            exported_j_drop=out.exported_j_drop,
             delta_mu_decoy=d_mu_decoy,
             delta_mu_true=d_mu_true,
             W_attacked=out.W,
         )
+
+    def gate_metric(self) -> Optional[float]:
+        """Return the J-drop value the pilot gate should read.
+
+        Priority: `exported_j_drop` (paper-claim metric). If absent —
+        typically because `sam2_eval_fn` was not supplied (e.g., stub
+        self-tests) — fall back to `best_surrogate_J_drop` and tag the
+        record's origin as surrogate in the pilot summary. Infeasible
+        clips return None so the gate condition short-circuits to False.
+        """
+        if self.infeasible:
+            return None
+        if self.exported_j_drop is not None:
+            return self.exported_j_drop
+        return self.best_surrogate_J_drop
+
+    def gate_source(self) -> str:
+        """Declare WHICH metric `gate_metric()` returned.
+
+        One of:
+          - `"exported_j_drop"`: paper-claim metric (preferred).
+          - `"surrogate_pseudo_mask"`: fallback — PGD-internal pseudo-mask
+            self-consistency, used only when `sam2_eval_fn` was not
+            supplied. Real-pipeline runs should NEVER see this.
+          - `"infeasible"`: the clip failed feasibility; no metric used.
+        """
+        if self.infeasible:
+            return "infeasible"
+        if self.exported_j_drop is not None:
+            return "exported_j_drop"
+        return "surrogate_pseudo_mask"
 
 
 @dataclass
@@ -188,17 +231,22 @@ def decide_go_no_go(
         k3_top = by_key.get((clip, "K3_top"))
 
         # Cond 1: top - random ≥ 0.05 (both must be feasible).
+        # Gate on exported_j_drop (paper-claim metric) when available;
+        # fall back to best_surrogate_J_drop only if no sam2_eval_fn was
+        # supplied (stub test path). Codex R1 Fix 2, 2026-04-23.
         delta_j: Optional[float] = None
         c1 = False
-        if k1_top and k1_rand and not k1_top.infeasible and not k1_rand.infeasible:
-            delta_j = (k1_top.best_surrogate_J_drop
-                       - k1_rand.best_surrogate_J_drop)
+        k1_top_m = k1_top.gate_metric() if k1_top else None
+        k1_rand_m = k1_rand.gate_metric() if k1_rand else None
+        if k1_top_m is not None and k1_rand_m is not None:
+            delta_j = k1_top_m - k1_rand_m
             c1 = delta_j >= GO_COND1_MIN_DELTA
 
         # Cond 2: K3_top ≥ 0.20 (must be feasible).
         c2 = False
-        if k3_top and not k3_top.infeasible:
-            c2 = k3_top.best_surrogate_J_drop >= GO_COND2_MIN_J_DROP
+        k3_top_m = k3_top.gate_metric() if k3_top else None
+        if k3_top_m is not None:
+            c2 = k3_top_m >= GO_COND2_MIN_J_DROP
 
         # Diagnostic (on K=3 top): decoy mean up AND dominates any true mean dip.
         d_pass = False
@@ -218,9 +266,26 @@ def decide_go_no_go(
         per_clip[clip] = {
             "cond1_top_minus_random_delta": delta_j,
             "cond1_pass": c1,
-            "cond2_K3_top_J_drop": (
+            # Per-config gate source — cond1 uses K1_top and K1_random,
+            # cond2 uses K3_top. Codex R2 Fix: a clip where K1_top fell back
+            # to surrogate but K3_top did not would be invisible if we only
+            # logged K3_top's source (the prior design). Audit needs all.
+            "cond1_K1_top_gate_source": (
+                k1_top.gate_source() if k1_top else "missing_config"),
+            "cond1_K1_random_gate_source": (
+                k1_rand.gate_source() if k1_rand else "missing_config"),
+            "cond2_K3_top_J_drop_gate": k3_top_m,
+            "cond2_K3_top_J_drop_surrogate": (
                 k3_top.best_surrogate_J_drop if k3_top else None),
+            "cond2_K3_top_J_drop_exported": (
+                k3_top.exported_j_drop if k3_top else None),
+            "cond2_K3_top_gate_source": (
+                k3_top.gate_source() if k3_top else "missing_config"),
             "cond2_pass": c2,
+            # Legacy alias — keep for back-compat with existing pilot_decision.json
+            # consumers. Equals cond2_K3_top_gate_source.
+            "gate_source": (
+                k3_top.gate_source() if k3_top else "missing_config"),
             "diagnostic_delta_mu_decoy": (
                 k3_top.delta_mu_decoy if k3_top else None),
             "diagnostic_delta_mu_true": (
@@ -295,6 +360,10 @@ def run_pilot(
     clip_loader: Callable[[Path, str], Tuple[Tensor, np.ndarray]] = load_davis_clip,
     config_builder: Callable[[], VADIConfig] = VADIConfig,
     device: Optional[torch.device] = None,
+    sam2_eval_fn: Optional[
+        Callable[[Tensor, np.ndarray], List[np.ndarray]]
+    ] = None,
+    allow_surrogate_gate: bool = False,
 ) -> PilotDecision:
     """Run every (clip, config) pair, build records, and decide GO/NO-GO.
 
@@ -302,7 +371,31 @@ def run_pilot(
     per-clip closure `run_vadi_for_clip` expects; same for
     `forward_fn_builder_factory`. Factories exist to let the runner build
     per-clip adapters without sharing state across clips.
+
+    `sam2_eval_fn(video, prompt_mask) -> List[np.ndarray]` (optional) runs
+    clean SAM2 on an arbitrary processed video and returns per-frame hard
+    binary masks. When supplied, `run_vadi_for_clip` computes
+    `exported_j_drop` on the delivered uint8 artifact and the pilot gates
+    on that (paper-claim metric). When None (stub test path), the gate
+    falls back to `best_surrogate_J_drop` with a warning tag in the
+    per_clip dict. Codex R1 Fix 2, 2026-04-23.
+
+    `allow_surrogate_gate` (default False): codex R2 enforcement. If
+    False AND `sam2_eval_fn` is None, raises RuntimeError immediately
+    instead of silently degrading to surrogate-only gating. Self-tests
+    pass `allow_surrogate_gate=True` to exercise the fallback path.
+    Real pipeline runs (both `main()` and `run_vadi_davis10.py`) leave
+    it False so a missing sam2_eval_fn becomes a loud failure, not a
+    silent paper-claim compromise.
     """
+    if sam2_eval_fn is None and not allow_surrogate_gate:
+        raise RuntimeError(
+            "run_pilot: sam2_eval_fn is None but allow_surrogate_gate=False. "
+            "Real pilot runs MUST supply sam2_eval_fn so `exported_j_drop` "
+            "(the paper-claim metric) drives the GO/NO-GO gate. Pass "
+            "allow_surrogate_gate=True only from self-tests that exercise "
+            "the fallback path.")
+
     records: List[ClipConfigRecord] = []
     for clip_name in clips:
         x_clean, prompt_mask = clip_loader(davis_root, clip_name)
@@ -327,6 +420,7 @@ def run_pilot(
                 rng=rng,
                 config=vadi_cfg,
                 out_root=out_root,
+                sam2_eval_fn=sam2_eval_fn,
             )
             records.append(ClipConfigRecord.from_vadi_output(clip_name, out))
 
@@ -334,8 +428,18 @@ def run_pilot(
     # Persist the pilot summary for paper reproducibility.
     out_root.mkdir(parents=True, exist_ok=True)
     with open(out_root / "pilot_decision.json", "w", encoding="utf-8") as f:
+        # Summarize which metric drove the decision across EVERY (clip, config)
+        # record — mixing exported_j_drop and surrogate is allowed (surrogate
+        # fallback activates when sam2_eval_fn isn't supplied) but the auditor
+        # should see at a glance whether any record fell back. Codex R2 Fix:
+        # scan the whole records set, not just the per-clip K3 entry, so a
+        # K1_top-only fallback cannot hide inside the summary.
+        gate_sources = sorted({
+            r.gate_source() for r in decision.records
+        })
         json.dump({
             "go": decision.go,
+            "gate_metric_sources_observed": gate_sources,
             "cond1_pass": decision.cond1_pass,
             "cond2_pass": decision.cond2_pass,
             "cond1_hits": decision.cond1_hits,
@@ -362,9 +466,14 @@ def run_pilot(
 
 def build_pilot_adapters(
     checkpoint_path: str, device: torch.device,
-) -> Tuple[Callable, Callable, Callable, Callable]:
+) -> Tuple[Callable, Callable, Callable, Callable, Callable]:
     """Build `(clean_pass_fn_factory, forward_fn_builder_factory, lpips,
-    ssim)` for real SAM2.1 + LPIPS(alex) + SSIM on Pro 6000.
+    ssim, sam2_eval_fn)` for real SAM2.1 + LPIPS(alex) + SSIM on Pro 6000.
+
+    The 5th return, `sam2_eval_fn(video, prompt_mask) -> List[np.ndarray]`,
+    is a no-grad forward used by `run_vadi_for_clip` to re-evaluate attack
+    effectiveness on the exported uint8 artifact (paper-claim J-drop).
+    Added in codex R1 Fix 2 (2026-04-23).
 
     Delegates the heavy SAM2 / LPIPS setup to
     `memshield.vadi_sam2_wiring.build_sam2_lpips_ssim`; the factories
@@ -397,11 +506,15 @@ def build_pilot_adapters(
     # Lazy imports — not executed on --dry-run or self-test paths.
     from memshield.vadi_sam2_wiring import (                          # noqa: WPS433
         VADIForwardFn, build_sam2_lpips_ssim, clean_pass_vadi,
+        sam2_eval_pseudo_masks,
     )
 
     predictor, lpips_fn, ssim_fn = build_sam2_lpips_ssim(
         checkpoint_path=str(checkpoint_path), device=device,
     )
+
+    def sam2_eval_fn(video: Tensor, prompt_mask_np: np.ndarray):
+        return sam2_eval_pseudo_masks(predictor, video, prompt_mask_np, device)
 
     def clean_pass_fn_factory(
         clip_name: str, x_clean: Tensor, prompt_mask: np.ndarray,
@@ -433,7 +546,8 @@ def build_pilot_adapters(
 
         return forward_fn_builder
 
-    return clean_pass_fn_factory, forward_fn_builder_factory, lpips_fn, ssim_fn
+    return (clean_pass_fn_factory, forward_fn_builder_factory,
+            lpips_fn, ssim_fn, sam2_eval_fn)
 
 
 # =============================================================================
@@ -475,7 +589,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     try:
-        clean_fac, fwd_fac, lp, ss = build_pilot_adapters(
+        clean_fac, fwd_fac, lp, ss, eval_fn = build_pilot_adapters(
             args.checkpoint, device)
     except (NotImplementedError, ImportError) as e:
         # NotImplementedError: adapter stub (pre-wiring).
@@ -491,6 +605,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         clean_pass_fn_factory=clean_fac,
         forward_fn_builder_factory=fwd_fac,
         lpips_fn=lp, ssim_fn=ss,
+        sam2_eval_fn=eval_fn,
         device=device,
     )
     n = decision.n_clips
@@ -515,10 +630,13 @@ def _self_test() -> None:
     np.random.seed(0)
 
     # -- decide_go_no_go: GO case (both conds pass on 3/3 clips) ----------
-    def rec(clip, config, J, feas=True, dmd=0.5, dmt=-0.1):
+    def rec(clip, config, J, feas=True, dmd=0.5, dmt=-0.1, exported=None):
+        # `exported` defaults to None → gate_metric falls back to surrogate.
+        # Self-tests exercise both paths below.
         return ClipConfigRecord(
             clip=clip, config=config, infeasible=not feas,
             best_surrogate_J_drop=J,
+            exported_j_drop=exported,
             delta_mu_decoy=dmd, delta_mu_true=dmt,
             W_attacked=[5],
         )
@@ -676,6 +794,11 @@ def _self_test() -> None:
             lpips_fn=lpips_stub, ssim_fn=ssim_stub,
             clip_loader=stub_clip_loader,
             config_builder=small_cfg,
+            # Self-test intentionally stubs SAM2; allow the surrogate
+            # fallback gate so this check exercises the (clip×config→go)
+            # aggregation logic. Real runs leave allow_surrogate_gate=False
+            # (the default) which enforces sam2_eval_fn presence.
+            allow_surrogate_gate=True,
         )
         # 3 clips × 3 configs = 9 records.
         assert len(decision.records) == 9

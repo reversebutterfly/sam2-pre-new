@@ -124,10 +124,18 @@ class ClipAggregation:
         """Mean J-drop over matching feasible records. NaN if none feasible.
 
         Infeasible configs are EXCLUDED from the mean (not 0-imputed). The
-        per-clip caller re-checks feasibility count separately.
+        per-clip caller re-checks feasibility count separately. Prefers
+        `exported_j_drop` (paper-claim metric, post codex R1 Fix 2);
+        falls back to `best_surrogate_J_drop` only if the eval path was
+        not run (e.g., `sam2_eval_fn` not supplied).
         """
-        vals = [r.best_surrogate_J_drop for name, r in self.records.items()
-                if name in configs and not r.infeasible]
+        vals = []
+        for name, r in self.records.items():
+            if name not in configs or r.infeasible:
+                continue
+            m = r.gate_metric()
+            if m is not None:
+                vals.append(m)
         return float(np.mean(vals)) if vals else float("nan")
 
     def any_feasible(self, configs: Sequence[str]) -> bool:
@@ -168,7 +176,9 @@ def _random_draws(
     for s in range(n_draws):
         r = aggs.records.get(f"K{K}_random_seed{s}")
         if r is not None and not r.infeasible:
-            out.append(r.best_surrogate_J_drop)
+            m = r.gate_metric()
+            if m is not None:
+                out.append(m)
     return out
 
 
@@ -201,12 +211,16 @@ def evaluate_claims(
         ours = agg.records.get("K3_top")            # centerpiece per Row 3
         detail: Dict[str, Any] = {}
 
-        # Claim 1: J-drop(ours) ≥ 0.35
+        # Claim 1: J-drop(ours) ≥ 0.35. Uses gate_metric (exported_j_drop
+        # when available, else surrogate fallback with tagging).
         if ours and not ours.infeasible:
-            ours_J = ours.best_surrogate_J_drop
-            if ours_J >= CLAIM_J_DROP_MIN:
+            ours_J = ours.gate_metric()
+            if ours_J is not None and ours_J >= CLAIM_J_DROP_MIN:
                 claim_hits["J_drop_035"] += 1
             detail["claim1_J_drop"] = ours_J
+            detail["claim1_metric_source"] = (
+                "exported_j_drop" if ours.exported_j_drop is not None
+                else "surrogate_fallback")
         else:
             detail["claim1_J_drop"] = None
             ours_J = None
@@ -224,16 +238,20 @@ def evaluate_claims(
         else:
             detail["claim2_random_mean"] = None
 
-        # Claim 3: ours ≥ max(M·bottom, bottom + Δ)
+        # Claim 3: ours ≥ max(M·bottom, bottom + Δ). Use gate_metric on both.
         bot = agg.records.get("K3_bottom")
-        if ours and not ours.infeasible and bot and not bot.infeasible:
-            bot_J = bot.best_surrogate_J_drop
-            threshold = max(CLAIM_VS_BOTTOM_MULT * bot_J,
-                            bot_J + CLAIM_VS_BOTTOM_DELTA)
-            if ours_J >= threshold:
-                claim_hits["vs_bottom"] += 1
-            detail["claim3_bottom"] = bot_J
-            detail["claim3_threshold"] = threshold
+        if (ours and not ours.infeasible and bot and not bot.infeasible
+                and ours_J is not None):
+            bot_J = bot.gate_metric()
+            if bot_J is not None:
+                threshold = max(CLAIM_VS_BOTTOM_MULT * bot_J,
+                                bot_J + CLAIM_VS_BOTTOM_DELTA)
+                if ours_J >= threshold:
+                    claim_hits["vs_bottom"] += 1
+                detail["claim3_bottom"] = bot_J
+                detail["claim3_threshold"] = threshold
+            else:
+                detail["claim3_bottom"] = None
         else:
             detail["claim3_bottom"] = None
 
@@ -307,6 +325,9 @@ def run_davis10_main(
     clip_loader: Callable = load_davis_clip,
     config_builder: Callable[[], VADIConfig] = VADIConfig,
     device: Optional[torch.device] = None,
+    sam2_eval_fn: Optional[
+        Callable[[Tensor, np.ndarray], List[np.ndarray]]
+    ] = None,
 ) -> DAVIS10Result:
     """Run every (clip, config) in the main table and evaluate the claims.
 
@@ -339,6 +360,7 @@ def run_davis10_main(
                 min_gap=int(kwargs.get("min_gap", 2)),
                 rng=rng, config=vadi_cfg, out_root=out_root,
                 W_clean_override=override,
+                sam2_eval_fn=sam2_eval_fn,
             )
             clip_agg.records[cfg_name] = ClipConfigRecord.from_vadi_output(
                 clip_name, out)
@@ -418,9 +440,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     try:
-        clean_fac, fwd_fac, lp, ss = build_pilot_adapters(
+        clean_fac, fwd_fac, lp, ss, eval_fn = build_pilot_adapters(
             args.checkpoint, device)
-    except NotImplementedError as e:
+    except (NotImplementedError, ImportError) as e:
         print(f"[davis10] cannot run real pipeline: {e}", file=sys.stderr)
         return 2
 
@@ -430,6 +452,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         clean_pass_fn_factory=clean_fac,
         forward_fn_builder_factory=fwd_fac,
         lpips_fn=lp, ssim_fn=ss, device=device,
+        sam2_eval_fn=eval_fn,
     )
     print("[davis10] claim evaluation:")
     for name, cr in result.claims.items():
@@ -459,10 +482,11 @@ def _self_test() -> None:
         assert configs[f"K1_random_seed{s}"]["seed"] == s
 
     # -- evaluate_claims with synthetic data --------------------------------
-    def rec(J, feas=True, dmd=0.5, dmt=-0.1):
+    def rec(J, feas=True, dmd=0.5, dmt=-0.1, exported=None):
         return ClipConfigRecord(
             clip="x", config="x", infeasible=not feas,
             best_surrogate_J_drop=J,
+            exported_j_drop=exported,
             delta_mu_decoy=dmd, delta_mu_true=dmt, W_attacked=[5],
         )
 

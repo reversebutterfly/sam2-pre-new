@@ -86,13 +86,30 @@ class CleanPassOutput:
 
 @dataclass
 class VADIClipOutput:
-    """Final artifact returned by `run_vadi_for_clip`."""
+    """Final artifact returned by `run_vadi_for_clip`.
+
+    Two distinct J-drop fields (post codex R1 Fix 2, 2026-04-23):
+
+      best_surrogate_J_drop: INTERNAL to PGD, computed during optimization
+        on differentiable `pred_logits` at `insert_ids ∪ neighbor_ids` only,
+        against the pseudo-masks (clean_SAM2 self-consistency). Used by the
+        optimizer for running-best selection. NOT a paper-claim metric.
+
+      exported_j_drop: EXTERNAL, computed after export. Loads the uint8
+        PNG sequence, re-runs SAM2 on both the exported attacked video AND
+        a "clean-processed" baseline (x_clean interleaved with base_inserts
+        at W, no δ or ν), computes whole-processed-video Jaccard against
+        pseudo-GT. This is the metric the pilot gate + main-table claims
+        reference. `None` if clip was infeasible on export.
+    """
 
     clip_name: str
     config_name: str                    # "K1_top", "K3_random_seed42", ...
     W: List[int]                        # attacked-space insert positions
     infeasible: bool
-    best_surrogate_J_drop: float
+    best_surrogate_J_drop: float        # see class docstring — internal PGD metric
+    exported_j_drop: Optional[float]    # whole-video J-drop on exported artifact (paper metric)
+    exported_j_drop_details: Dict[str, Any]  # per-frame, originals-only, inserts-only
     export_dir: Optional[str]           # PNG directory if exported; None if infeasible
     vulnerability_scores: Dict[str, Any]
     exported_feasibility: Dict[str, Any]
@@ -228,6 +245,151 @@ def load_processed_uint8(png_dir: Path) -> Tensor:
     return torch.from_numpy(arr)
 
 
+def _jaccard_binary(a: np.ndarray, b: np.ndarray) -> float:
+    """Hard-binary Jaccard IoU between two `[H, W]` uint8 masks in `{0, 1}`.
+    Both-empty → 1.0 (matches `eval_v2.jaccard`)."""
+    a_ = (a > 0).astype(np.uint8)
+    b_ = (b > 0).astype(np.uint8)
+    if a_.shape != b_.shape:
+        raise ValueError(f"shape mismatch: {a_.shape} vs {b_.shape}")
+    inter = int(np.logical_and(a_, b_).sum())
+    union = int(np.logical_or(a_, b_).sum())
+    if union == 0:
+        return 1.0
+    return inter / union
+
+
+def eval_exported_j_drop(
+    sam2_eval_fn: Callable[[Tensor, np.ndarray], List[np.ndarray]],
+    prompt_mask: np.ndarray,
+    x_clean: Tensor,
+    base_inserts: Tensor,
+    exported: Tensor,              # [T_proc, H, W, 3] reloaded from PNG
+    W: Sequence[int],
+    m_hat_true_by_t: Dict[int, Tensor],  # processed-space float soft masks
+) -> Dict[str, Any]:
+    """Re-evaluate attack effectiveness on the EXPORTED uint8 artifact.
+
+    This is the codex-R1-mandated paper-claim metric (Fix 2, 2026-04-23).
+    Unlike `best_surrogate_J_drop` (which is computed during PGD on
+    differentiable logits at insert+neighbor positions against
+    pseudo-masks), this function:
+      1. Runs clean SAM2 on a "clean-processed" baseline
+         (x_clean interleaved with base_inserts at W, no δ, no ν) →
+         `masks_clean[t]` — what SAM2 outputs for insert-placement alone.
+      2. Runs clean SAM2 on the exported attacked video → `masks_attacked[t]`.
+      3. Computes per-frame Jaccard against pseudo-GT
+         (binarized `m_hat_true_by_t`) for BOTH runs on the WHOLE processed
+         video.
+      4. J_drop_exported = J_baseline_mean − J_attacked_mean.
+
+    Why the baseline is "clean-processed" (not "clean-only"): the point of
+    the J-drop number is to isolate what the OPTIMIZED (δ, ν) add on top
+    of the insert-placement intervention. If we used clean-only as the
+    baseline, J_drop would include the effect of simply inserting extra
+    frames at W, which is architectural, not attack-specific. The midframe
+    baseline gets us "δ + ν optimization contribution on delivered bytes".
+
+    Args:
+        sam2_eval_fn(video, prompt) → List[np.ndarray[H, W] uint8 binary]
+            per-frame hard masks. Injected from the pilot driver so this
+            function stays SAM2-free at import time.
+        prompt_mask: `[H, W]` uint8 binary first-frame mask.
+        x_clean: `[T_clean, H, W, 3]` float in `[0, 1]`.
+        base_inserts: `[K, H, W, 3]` float — temporal-midframe insert bases.
+        exported: `[T_proc, H, W, 3]` reloaded uint8 PNG as float in `[0, 1]`.
+        W: attacked-space insert positions (length K).
+        m_hat_true_by_t: processed-space pseudo-GT (output of
+            `remap_masks_to_processed_space`), float in `[0, 1]`; binarized
+            here at >0.5 for Jaccard.
+
+    Returns:
+        Dict with:
+          'J_baseline_mean': float — mean J over whole processed video
+          'J_attacked_mean': float
+          'J_drop_mean': float — paper claim metric (baseline − attacked)
+          'per_frame': {t: {'J_baseline': ..., 'J_attacked': ...,
+                            'J_drop': ..., 'is_insert': bool}} for all t
+          'J_drop_originals_only': float — mean J_drop across t NOT in W
+          'J_drop_inserts_only': float — mean J_drop across t IN W
+          'n_originals': int, 'n_inserts': int
+    """
+    W_sorted = sorted(int(w) for w in W)
+    W_set = set(W_sorted)
+
+    # Clean-processed baseline: same interleave structure, zero perturbation.
+    # Codex R2 Fix: the attacked video went through uint8 PNG round-trip
+    # before `sam2_eval_fn` sees it, but processed_clean would otherwise be
+    # a plain float tensor. For measurement purity we apply the SAME uint8
+    # quantization (round to integer, scale back to [0, 1]) to processed_clean
+    # so both videos are evaluated on the identical numerical grid. Without
+    # this, `J_baseline - J_attacked` would mix "quantization damage" into
+    # the reported attack effect.
+    processed_clean = build_processed(x_clean, base_inserts, W_sorted)
+    processed_clean_u8rt = (
+        (processed_clean * 255.0 + 0.5).clamp(0.0, 255.0)
+        .to(torch.uint8).to(processed_clean.dtype) / 255.0
+    )
+
+    # Per-frame binary masks from both videos.
+    masks_clean = sam2_eval_fn(processed_clean_u8rt, prompt_mask)
+    masks_attacked = sam2_eval_fn(exported, prompt_mask)
+
+    T_proc = processed_clean_u8rt.shape[0]
+    if len(masks_clean) != T_proc or len(masks_attacked) != T_proc:
+        raise RuntimeError(
+            f"sam2_eval_fn returned inconsistent lengths: "
+            f"clean={len(masks_clean)}, attacked={len(masks_attacked)}, "
+            f"expected {T_proc}")
+
+    per_frame: Dict[int, Dict[str, Any]] = {}
+    Js_baseline: List[float] = []
+    Js_attacked: List[float] = []
+    for t in range(T_proc):
+        # pseudo-GT at t (soft → hard).
+        if t not in m_hat_true_by_t:
+            raise KeyError(
+                f"m_hat_true_by_t missing entry for t={t}; "
+                f"expected all of range({T_proc})")
+        gt_soft = m_hat_true_by_t[t]
+        if isinstance(gt_soft, torch.Tensor):
+            gt_np = gt_soft.detach().cpu().numpy()
+        else:
+            gt_np = np.asarray(gt_soft)
+        gt_hard = (gt_np > 0.5).astype(np.uint8)
+
+        j_b = _jaccard_binary(masks_clean[t], gt_hard)
+        j_a = _jaccard_binary(masks_attacked[t], gt_hard)
+        Js_baseline.append(j_b)
+        Js_attacked.append(j_a)
+        per_frame[t] = {
+            "J_baseline": j_b, "J_attacked": j_a, "J_drop": j_b - j_a,
+            "is_insert": (t in W_set),
+        }
+
+    J_baseline_mean = float(np.mean(Js_baseline))
+    J_attacked_mean = float(np.mean(Js_attacked))
+    J_drop_mean = J_baseline_mean - J_attacked_mean
+
+    J_orig_drops = [per_frame[t]["J_drop"] for t in range(T_proc)
+                    if t not in W_set]
+    J_ins_drops = [per_frame[t]["J_drop"] for t in range(T_proc)
+                   if t in W_set]
+
+    return {
+        "J_baseline_mean": J_baseline_mean,
+        "J_attacked_mean": J_attacked_mean,
+        "J_drop_mean": J_drop_mean,
+        "per_frame": per_frame,
+        "J_drop_originals_only": (
+            float(np.mean(J_orig_drops)) if J_orig_drops else float("nan")),
+        "J_drop_inserts_only": (
+            float(np.mean(J_ins_drops)) if J_ins_drops else float("nan")),
+        "n_originals": len(J_orig_drops),
+        "n_inserts": len(J_ins_drops),
+    }
+
+
 def remeasure_exported_feasibility(
     x_clean: Tensor,
     base_inserts: Tensor,
@@ -334,6 +496,9 @@ def run_vadi_for_clip(
     config: Optional[VADIConfig] = None,
     out_root: Optional[Path] = None,
     W_clean_override: Optional[Sequence[int]] = None,
+    sam2_eval_fn: Optional[
+        Callable[[Tensor, np.ndarray], List[np.ndarray]]
+    ] = None,
 ) -> VADIClipOutput:
     """Top-level single-clip orchestrator.
 
@@ -434,6 +599,8 @@ def run_vadi_for_clip(
     export_dir: Optional[Path] = None
     remeasure: Dict[str, Any] = {}
     infeasible_on_export = False
+    exported_j_drop_val: Optional[float] = None
+    exported_j_drop_details: Dict[str, Any] = {}
     if not result.infeasible:
         if out_root is None:
             out_root = Path(".") / "vadi_runs"
@@ -456,6 +623,27 @@ def run_vadi_for_clip(
         if not remeasure.get("step_feasible_on_export", False):
             infeasible_on_export = True
 
+        # Stage 8.5: exported-artifact SAM2 re-eval — the paper-claim
+        # J-drop metric (codex R1 Fix 2, 2026-04-23). Only runs if
+        # caller supplied `sam2_eval_fn`; otherwise the field stays None
+        # and downstream consumers (pilot gate, main table) must treat
+        # this clip as "metric not measured" rather than "metric zero".
+        # NOTE: we run the eval even on exported-infeasible clips so the
+        # main-table denominator sees the number; infeasibility is a
+        # separate failure mode tracked by `infeasible`.
+        if sam2_eval_fn is not None:
+            exported_j_drop_details = eval_exported_j_drop(
+                sam2_eval_fn=sam2_eval_fn,
+                prompt_mask=prompt_mask,
+                x_clean=x_clean,
+                base_inserts=base_inserts,
+                exported=exported,
+                W=W_attacked,
+                m_hat_true_by_t=m_hat_true_by_t_t,
+            )
+            exported_j_drop_val = float(
+                exported_j_drop_details["J_drop_mean"])
+
     # Stage 9: build output. Strip snapshot tensors from step logs.
     summary_logs: List[Dict[str, Any]] = []
     for log in result.step_logs:
@@ -470,6 +658,8 @@ def run_vadi_for_clip(
         W=list(W_attacked),
         infeasible=result.infeasible or infeasible_on_export,
         best_surrogate_J_drop=float(result.best_surrogate_J_drop),
+        exported_j_drop=exported_j_drop_val,
+        exported_j_drop_details=exported_j_drop_details,
         export_dir=str(export_dir) if export_dir else None,
         vulnerability_scores=vs.to_dict(),
         exported_feasibility=remeasure,
