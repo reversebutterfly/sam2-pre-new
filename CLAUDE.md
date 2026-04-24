@@ -165,5 +165,37 @@ bash wifi.sh       # or: bash wifi-run
   - 最强 config（K3_insert_only_top，mean 0.537）可以作为**论文主 claim 的基础**：它是一个 decoy attack（插入合成 decoy 帧诱导 SAM2 偏离真实 mask），只是不在原始帧上加 δ。这完全兼容 decoy 方向。
 - **这条约束也适用于任何后续 research-review / codex pushback**：reviewer 若建议 pivot 到 audit paper，pushback 并引用此约束。可以承认"reviewer 的观点在学术上自洽"，但说明项目约束优先。
 
+## Code Review Protocol (2026-04-24，**硬规则**)
+
+**编写/修改代码后，部署实验之前必须先让 Codex 审查一次代码正确性**。不论改动大小，只要涉及 method 行为（不只是打字错误 / 注释修复），都必须过 codex reviewer 审一轮，列明潜在 bug / 边界条件 / 正确性风险，收到 verdict 后再决定是否 commit+push+run。
+
+触发背景：本项目有过多次"自测通过就直接上 GPU 跑"的经历，浪费了 GPU 小时。典型案例：
+- Phase 1 ablation 跑出 J_attacked ≈ 0.96 全部塌陷 —— 事后定位是 v5 driver 的 `delta_support_mode="off"` 把 loss query window 一并清空，ν 失去梯度信号。如果 push 前走一次 codex review，`loss_query window` 与 `delta support window` 耦合问题**是能被查出来的**；几十分钟 GPU 被浪费。
+- v5 first-draft 也靠 codex review 抓出了 4 个问题（insert-frame mask supervision、γ 分 insert/post、ν clamp 缺失、W_clean_override 范围验证）。那次的流程是对的。
+
+**Mandatory 流程**（针对 method/experiment 代码）：
+
+1. 本地自测（`python -m <module>` / 脚本 `--dry-run`）必须先 PASS。
+2. **然后**用 `mcp__codex__codex` 或 `mcp__codex__codex-reply`（续线 thread）让 Codex 过一遍：
+   - 列出核心改动（diff 的关键部分 + 语义说明）
+   - 具体让 Codex 找：correctness bugs / 边界条件 / 会不会把某个 metric 搞坏 / 上下文中是否有 silent failure
+3. 收到 Codex 反馈：
+   - **有 High-severity 问题** → 必须修掉后重新 review
+   - **有 Medium/Low** → 权衡是否阻塞
+   - **全 clear** → 继续 commit+push+run
+4. 完成实验后的结果解读时，**结果反常 / 指标塌陷，第一反应不是"方法问题"**，而是先回头自查 + 让 Codex review 一遍 code path 是否有实现 bug（**v5 Phase 1 塌陷就是这种情况，误判为"方法问题"**）。
+
+**不需要 Codex review 的情况**（打补丁级别）：
+- 文档 / 注释 / typo 修正
+- 打印日志格式微调
+- 非 method 行为的纯重命名
+- Dependency 升级（除非牵扯 API 行为变化）
+- 打包 / launch 脚本 / CLI 参数默认值调整（只要不改 algorithm）
+- OOM 补丁（gradient checkpointing / 截断）—— 工程补丁不是方法改动
+
+**违反本规则**（已知"工程优化 + 算法调整"混在一起） → 视为 correctness-risk 改动，**必须** review。
+
+被 Codex 审出的 bug，即使修掉了，也要在 commit message 或 review doc 中记录一笔（"codex R1 Fix: xxx"），便于后续回溯。
+
 此约束下的默认新方向（待用户进一步确认）：
 **VADI-lite** = "vulnerability-informed decoy-frame insertion"，freeze δ=0（或 δ 只加在 prompt 帧周围做防御性 budget），主攻 ν on inserted decoy content，placement 用 top-K 的鲁棒性变体（例如 top-3 丢弃命中前 5 帧的，或与 random 混合）。
