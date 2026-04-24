@@ -134,6 +134,14 @@ class VADIv5Config:
     margin_threshold: float = 0.75
     margin_neighbor_weight: float = 0.5
 
+    # STE quantization during training (codex R2 post-fix: v4 pipeline
+    # always applied fake_uint8_quantize in _apply_{delta,nu} which
+    # simulated the export-time uint8 round-trip during every forward.
+    # v5 default is False. When True, _step_loss applies STE quantization
+    # to (x_clean+δ) and (decoy_seeds+ν) before build_processed. Needed
+    # for apples-to-apples comparison with v4 K3_insert_only.
+    train_ste_quantize: bool = False
+
     seed: int = 0
 
 
@@ -196,7 +204,9 @@ from memshield.vadi_loss import (                                     # noqa: E4
 def _step_loss(
     x_clean: Tensor, delta: Tensor,
     decoy_seeds: Tensor, nu: Tensor,
-    W: Sequence[int], post_insert_clean: Sequence[int],
+    W: Sequence[int],
+    post_insert_clean: Sequence[int],
+    loss_query_post_proc: Sequence[int],
     forward_fn: Callable,
     m_decoy_by_t: Dict[int, Tensor],
     m_true_by_t: Dict[int, Tensor],
@@ -218,21 +228,21 @@ def _step_loss(
     # Construct processed sequence (differentiable wrt δ and ν).
     x_prime = torch.clamp(x_clean + delta, 0.0, 1.0)
     inserts = torch.clamp(decoy_seeds + nu, 0.0, 1.0)
-    if fake_uint8:
+    if fake_uint8 or config.train_ste_quantize:
         from memshield.losses import fake_uint8_quantize
         x_prime = fake_uint8_quantize(x_prime)
         inserts = fake_uint8_quantize(inserts)
     processed = build_processed(x_prime, inserts, W)
     T_proc = processed.shape[0]
 
-    # Query SAM2 at insert positions + post-insert positions.
-    return_at = set(int(w) for w in W) | set(int(t) for t in range(T_proc)
-                                             if t not in set(int(w) for w in W))
-    # Filter return_at to only what we need for loss (saves compute): insert + post-insert.
-    # post-insert is already in processed-space.
-    return_at_small = set(int(w) for w in W)
-    post_insert_proc_set = _post_clean_to_proc(post_insert_clean, W, T_proc)
-    return_at_small |= set(post_insert_proc_set)
+    # Query SAM2 at insert positions + loss-query-post-insert positions.
+    # NOTE: loss query window is INDEPENDENT of δ support — in particular
+    # when freeze_delta is True we still need ν supervision at post-insert
+    # frames (SAM2 memory is causal, so post-insert frames are where ν's
+    # gradient flows through the memory attention).
+    return_at_small = set(int(w) for w in W) | set(int(t) for t in loss_query_post_proc
+                                                   if int(t) not in set(int(w) for w in W))
+    post_insert_proc_set = list(loss_query_post_proc)
     logits_by_t: Dict[int, Tensor] = forward_fn(processed, return_at_small)
 
     # Attack loss — branch by config.loss_mode (codex R2 ablation axis).
@@ -412,6 +422,7 @@ def _run_v5_pgd(
     decoy_seeds: Tensor,
     W: Sequence[int],
     post_insert_clean: Sequence[int],
+    loss_query_post_proc: Sequence[int],
     forward_fn: Callable,
     lpips_fn: Callable,
     m_decoy_by_t: Dict[int, Tensor],
@@ -455,6 +466,7 @@ def _run_v5_pgd(
         nonlocal best_state, lambda_val
         L, diag = _step_loss(
             x_clean, delta, decoy_seeds, nu, W, post_insert_clean,
+            loss_query_post_proc,
             forward_fn, m_decoy_by_t, m_true_by_t, lpips_fn,
             config, lambda_current,
             freeze_delta=freeze_delta, freeze_nu=freeze_nu,
@@ -752,30 +764,39 @@ def run_v5_for_clip(
     m_decoy_by_t = {t: torch.from_numpy(m).float().to(device)
                     for t, m in m_decoy_by_t_np.items()}
 
-    # --- δ support (codex R2 ablation axis) ---
+    # --- Loss query window vs δ support window (DECOUPLED — 2026-04-24
+    # post-Round2 bug fix). Previously these were collapsed, which meant
+    # `delta_support_mode="off"` silently killed the ν gradient signal
+    # because loss was only queried at insert positions. The ν gradient
+    # ONLY flows through post-insert frames (SAM2 memory is causal; pre-
+    # insert frames have zero cross-partial from the insert's ν).
+    #
+    #   * `loss_query_post_proc` = ALWAYS the post-insert R-radius window.
+    #     Drives loss supervision for ν regardless of δ state.
+    #   * `post_insert_clean` = δ support window (may be empty if δ is off).
+    # ---
+    # Unconditional base window: post-insert R positions in processed space.
+    loss_query_post_proc, _ = build_post_insert_support(
+        W_attacked, T_proc, radius=post_insert_radius,
+    )
+    loss_query_post_clean = sorted({
+        _attacked_to_clean_same_space(a, W_attacked)
+        for a in loss_query_post_proc if a not in set(W_attacked)
+    })
+
     if config.delta_support_mode == "off":
-        post_insert_proc: List[int] = []
         post_insert_clean: List[int] = []
     elif config.delta_support_mode == "post_insert":
-        post_insert_proc, _ = build_post_insert_support(
-            W_attacked, T_proc, radius=post_insert_radius,
-        )
-        post_insert_clean = sorted({
-            _attacked_to_clean_same_space(a, W_attacked)
-            for a in post_insert_proc if a not in set(W_attacked)
-        })
+        post_insert_clean = list(loss_query_post_clean)   # δ on same window
     elif config.delta_support_mode == "v4_symmetric":
-        # v4-style: ∪_k NbrSet(W_k, ±2) ∪ {f0_processed=0} in attacked space,
-        # map to clean-space (excluding insert positions themselves).
+        # v4-style: ∪_k NbrSet(W_k, ±2) ∪ {f0=0} in processed space.
+        # δ supported there; loss query window stays at post-insert R.
         from memshield.vadi_optimize import build_support_sets
         S_delta_proc, _ = build_support_sets(
             W_attacked, T_proc, f0_processed_id=0)
-        post_insert_proc = sorted({
-            int(a) for a in S_delta_proc if int(a) not in set(W_attacked)
-        })
         post_insert_clean = sorted({
             _attacked_to_clean_same_space(a, W_attacked)
-            for a in post_insert_proc
+            for a in S_delta_proc if int(a) not in set(W_attacked)
         })
     else:
         raise ValueError(
@@ -801,6 +822,7 @@ def run_v5_for_clip(
         result = _run_v5_pgd(
             x_clean=x_clean, decoy_seeds=decoy_seeds,
             W=W_attacked, post_insert_clean=post_insert_clean,
+            loss_query_post_proc=list(loss_query_post_proc),
             forward_fn=forward_fn, lpips_fn=lpips_fn,
             m_decoy_by_t=m_decoy_by_t, m_true_by_t=m_true_by_t,
             config=config,
@@ -880,6 +902,9 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--delta-support", choices=["off", "post_insert",
                                                "v4_symmetric"],
                    default="post_insert")
+    p.add_argument("--train-ste", action="store_true",
+                   help="Apply fake_uint8_quantize STE during training "
+                        "(v4-parity; default off in v5).")
     return p
 
 
@@ -931,6 +956,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             schedule_preset=args.schedule,
             delta_support_mode=args.delta_support,
             post_insert_radius=args.post_insert_radius,
+            train_ste_quantize=args.train_ste,
         )
         out = run_v5_for_clip(
             clip_name=clip_name, config_name=config_name,
