@@ -144,3 +144,26 @@ bash wifi.sh       # or: bash wifi-run
 
 这条写进 CLAUDE.md 是因为 VADI 项目里有过 v1→v2→v3→v4 的方法迭代路径，每次重设计都是因为**正确性/有效性**问题（v2 bank-poisoning 被 B2 证伪、v3 pure-δ 用户拒绝）。这种场景下不要因为"改动小"就保留失败方案的残骸。
 
+## Paper Direction Constraint (2026-04-24，**硬约束**)
+
+**永远保持 decoy 方向的正向方法论文。不写 audit / 负面 / falsification-only 论文。**
+
+触发背景：2026-04-24 decisive round 结果（10 clips × 4 configs）把 VADI 原 3 条主张全部证伪 —— placement top 输给 random（2/10 wins）、δ 是净伤害（joint < insert-only by 0.156 pp mean）、insert-only 是最强 config（mean 0.537 J-drop）。Codex 两轮审查都推荐 audit paper pivot。用户在 14:45 明确拒绝此方向，定下以下约束：
+
+- **方向锁定**：paper 方向必须是 **decoy-based frame insertion attack on SAM2** 的正向方法论文。即便实证结果挑战某个具体组件（placement 启发式、δ 对原始帧的扰动、joint optimization 公式），**也要在 decoy 框架内精炼方法**，而不是转向 "SAM2 attack-surface audit" 或 "negative results" 论文。
+- **允许的调整**：在 decoy 大方向内可以：
+  - 调整优化目标（例如按 codex 建议把 δ 和 ν 解耦：insert-only 正是一种合法 decoy 攻击）
+  - 调整 placement 策略（random vs vulnerability vs 新 heuristic）
+  - 调整 loss 函数（contrastive decoy margin 的不同实现）
+  - 调整 threat model 细节（ε/LPIPS 预算等）
+- **禁止的调整**：
+  - **禁止**把项目重新叙述为 "analysis / audit / falsification" 论文
+  - **禁止**把负面结果（placement 反相关、δ 负贡献）作为 paper 主卖点
+  - **禁止**提议"放弃 decoy 转做纯 suppression"或"放弃 insert 转做纯 δ"（老约束 §Method Design Constraints）
+- **如何调和 decisive 的证伪结果**：
+  - 负面信号（placement inversion, δ 反贡献）作为**方法内部的校准选择理由**，不是"整个项目走错了"的证据。示例："基于 10-clip paired ablation，我们采用 vulnerability-aware top-K 的**松弛变体**（例如 top-K 混合 random-K，或避开前 N 帧后再从 top-K 选）"。
+  - 最强 config（K3_insert_only_top，mean 0.537）可以作为**论文主 claim 的基础**：它是一个 decoy attack（插入合成 decoy 帧诱导 SAM2 偏离真实 mask），只是不在原始帧上加 δ。这完全兼容 decoy 方向。
+- **这条约束也适用于任何后续 research-review / codex pushback**：reviewer 若建议 pivot 到 audit paper，pushback 并引用此约束。可以承认"reviewer 的观点在学术上自洽"，但说明项目约束优先。
+
+此约束下的默认新方向（待用户进一步确认）：
+**VADI-lite** = "vulnerability-informed decoy-frame insertion"，freeze δ=0（或 δ 只加在 prompt 帧周围做防御性 budget），主攻 ν on inserted decoy content，placement 用 top-K 的鲁棒性变体（例如 top-3 丢弃命中前 5 帧的，或与 random 混合）。
