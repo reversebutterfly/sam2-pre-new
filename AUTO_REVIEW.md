@@ -1883,3 +1883,36 @@ VADI-v5.A0 (validated final method):
 - f0 SSIM ≥ 0.98 (trivially holds since δ=0 at f0).
 
 **Key hyperparameters**: K=3 inserts, LPIPS_insert_cap=0.35, η=2/255, margin=0.75, λ schedule per FINAL_PROPOSAL.md Step 5.
+
+---
+
+# Auto-Review Loop 3 — δ redesign for original-frame perturbation
+
+**Start**: 2026-04-24 evening, after 10-clip main table (mean J_drop 0.478, only 1/10 clip redirect-dominated; Prior loop concluded "drop δ" is best; user overrides).
+
+**User directive**: "I still think we need to perturb original frames. Previous results were bad because you didn't design a good enough perturbation scheme. Design a new perturbation scheme. Don't consider implementation cost."
+
+**Constraints from CLAUDE.md**:
+- Keep decoy-direction positive-method paper (hard-lock 2026-04-24)
+- Keep insert mechanism (long-standing constraint)
+- δ allowed on original frames ≠ pure-δ attack (must stay with insert as co-mechanism)
+- fidelity: LPIPS ≤ 0.20 on originals (v4 budget)
+- codex review required before GPU deploy (new rule 2026-04-24)
+
+## Empirical context shaping the prompt
+
+From 10-clip main10 (A0 = midframe + margin + sign_pgd, δ OFF):
+
+- Mean J_drop 0.478 (below codex R3 bar 0.60)
+- Mean redirect rate 0.22; only camel 0.84 redirect-dominated
+- **But** mean align_cos > 0.5 on 8/10 clips (blackswan +1.00 despite 100% degraded)
+- Suggests ν-only pushes pred centroid toward decoy, but mask-level precision fails
+- Degraded-dominated on 5/10 clips → prediction goes somewhere wrong but neither empty nor decoy
+
+From Phase 2 δ ablations:
+
+- B1 (v4 symmetric ±2 + f0, schedule=full with stage-B δ-only): +0.005 pp vs A0 (neutral)
+- B2 (post-insert R=8, schedule=full): **−0.173 pp** mean, catastrophic on blackswan (-0.43)
+
+Both B1/B2 failed. User's hypothesis: **the failure modes (B2 stage-B δ corrupts ν-optimized memory; B1 neutrally weak) are implementation-specific, not fundamental. A well-designed δ scheme should close the "direction-right but mask-off" gap we observe on degraded clips.**
+

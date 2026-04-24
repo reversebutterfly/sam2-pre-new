@@ -134,6 +134,36 @@ class VADIv5Config:
     margin_threshold: float = 0.75
     margin_neighbor_weight: float = 0.5
 
+    # Boundary-δ polish stage (codex Round 1 design #1, 2026-04-24).
+    # After the main A0 ν-only PGD finishes and exports/re-evaluates,
+    # if boundary_polish=True we run a SHORT polish stage that:
+    #   - selects "degraded" frames (with align_cos ≥ threshold) as polish targets
+    #   - builds per-frame boundary-band δ support masks
+    #   - runs N_polish joint-ν-and-δ steps with boundary-aware loss
+    #   - compares polished J_drop vs A0 J_drop; reverts if worse (off-switch)
+    boundary_polish: bool = False                    # enable/disable whole stage
+    boundary_polish_n_steps: int = 30                # PGD steps in polish stage
+    boundary_polish_nu_lr_scale: float = 0.25        # ν LR in polish (= 0.25× main)
+    # Codex R2 high-fix (2026-04-24): separate step size from ε-ball. Step
+    # size controls per-iteration update magnitude; ε_delta is the hard ℓ∞
+    # clamp. Default: step = ε/2 so 2 steps saturate to boundary (standard).
+    boundary_polish_eta_step: float = 2.0 / 255.0    # per-step sign-PGD
+    boundary_polish_eps_delta: float = 4.0 / 255.0   # ℓ∞ ε-ball (threat-model)
+    boundary_polish_align_cos_threshold: float = 0.5 # degraded+align>=this → polish
+    boundary_polish_band_width: int = 5              # boundary band ring width
+    boundary_polish_use_corridor: bool = True
+    boundary_polish_corridor_width: int = 5
+    boundary_polish_feather_sigma: float = 2.0
+    boundary_polish_alpha_dice: float = 1.0
+    boundary_polish_beta_bce: float = 0.5
+    # Codex R2 medium-fix: split γ_anti_true by insert vs post-insert, matching
+    # main v5 loss. Inserts deserve low γ (else ν erases the original object
+    # in the duplicate-seed); post-insert can tolerate stronger anti-true.
+    boundary_polish_gamma_anti_true_insert: float = 0.1
+    boundary_polish_gamma_anti_true_post: float = 0.3
+    boundary_polish_off_switch: bool = True          # revert if worse than A0
+    boundary_polish_min_improvement: float = 0.0     # min Δ J_drop to accept polish
+
     # STE quantization during training (codex R2 post-fix: v4 pipeline
     # always applied fake_uint8_quantize in _apply_{delta,nu} which
     # simulated the export-time uint8 round-trip during every forward.
@@ -590,6 +620,299 @@ def _run_v5_pgd(
 
 
 # =============================================================================
+# Boundary-δ polish stage (codex R1 design #1, 2026-04-24)
+# =============================================================================
+
+
+def _select_polish_frames_from_decoy_semantic(
+    exported_j_drop_details: Dict[str, Any],
+    W_attacked: Sequence[int],
+    align_cos_threshold: float,
+) -> List[int]:
+    """Select polish target frames from A0's in-band decoy-semantic record.
+
+    Polish set = (insert positions W_attacked) ∪ (degraded frames with
+    align_cos ≥ threshold). Degraded + aligned is exactly the regime
+    where boundary δ is expected to help (direction right, mask wrong).
+
+    If decoy_semantic is absent (no sam2_eval_fn), returns just W_attacked.
+    """
+    polish: set = set(int(w) for w in W_attacked)
+    ds = exported_j_drop_details.get("decoy_semantic") or {}
+    per_frame = ds.get("per_frame") or []
+    for rec in per_frame:
+        if not rec.get("valid", False):
+            continue
+        if rec.get("mode") != "degraded":
+            continue
+        a = rec.get("decoy_alignment_cos")
+        if a is None:
+            continue
+        if float(a) >= align_cos_threshold:
+            polish.add(int(rec["t"]))
+    return sorted(polish)
+
+
+def _build_boundary_support_masks(
+    m_true_by_t: Dict[int, Tensor],
+    m_decoy_by_t: Dict[int, Tensor],
+    polish_frame_ids: Sequence[int],
+    *,
+    band_width: int,
+    use_corridor: bool,
+    corridor_width: int,
+    feather_sigma: float,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tuple[Dict[int, Tensor], Dict[int, Tensor]]:
+    """Build per-frame (support_mask, band_true) dicts for polish frames.
+
+    Returns ({t → [H,W] float support}, {t → [H,W] float true-band}).
+    Both on `device` in `dtype`. Built via `memshield.boundary_bands`.
+    """
+    from memshield.boundary_bands import (
+        build_delta_support_mask, boundary_band,
+    )
+    support_by_t: Dict[int, Tensor] = {}
+    band_true_by_t: Dict[int, Tensor] = {}
+    for t in polish_frame_ids:
+        t = int(t)
+        mt = m_true_by_t[t].detach().cpu().numpy()
+        md = m_decoy_by_t[t].detach().cpu().numpy()
+        supp_np = build_delta_support_mask(
+            (mt > 0.5).astype(np.uint8), (md > 0.5).astype(np.uint8),
+            band_width=band_width,
+            use_corridor=use_corridor,
+            corridor_width=corridor_width,
+            feather_sigma=feather_sigma,
+        )
+        btrue_np = boundary_band(
+            (mt > 0.5).astype(np.uint8), band_width=band_width,
+        ).astype(np.float32)
+        support_by_t[t] = torch.from_numpy(supp_np).to(device=device, dtype=dtype)
+        band_true_by_t[t] = torch.from_numpy(btrue_np).to(device=device, dtype=dtype)
+    return support_by_t, band_true_by_t
+
+
+def _run_boundary_polish_pgd(
+    x_clean: Tensor,
+    decoy_seeds: Tensor,
+    nu_init: Tensor,              # warm-start from A0 ν* (already on device)
+    W_attacked: Sequence[int],
+    polish_frame_ids: Sequence[int],
+    support_by_t: Dict[int, Tensor],      # [H, W] float
+    band_true_by_t: Dict[int, Tensor],    # [H, W] float
+    m_decoy_by_t: Dict[int, Tensor],      # [H, W] float
+    m_true_by_t: Dict[int, Tensor],       # [H, W] float, for anti-true eval only
+    forward_fn: Callable,
+    lpips_fn: Callable,
+    config: VADIv5Config,
+) -> Tuple[Optional[Tensor], Optional[Tensor], List[Dict[str, Any]]]:
+    """Short boundary-δ polish PGD.
+
+    Warm-start: ν ← nu_init (A0 ν*), δ ← 0. δ is spatially masked to
+    per-frame `support_by_t` at every step (zeroed outside). Loss is
+    the boundary-aware Dice/BCE/anti-true aggregate on polish_frame_ids.
+
+    Sign-PGD on δ with η=`config.boundary_polish_eta_delta`, Adam on ν
+    with lr = `config.eta_nu_lr × config.boundary_polish_nu_lr_scale`
+    (reuses ν's existing geometry).
+
+    Returns (δ*, ν*, step_logs). On infeasibility (no feasible step),
+    both tensors are None.
+    """
+    from memshield.vadi_boundary_loss import aggregate_boundary_loss
+    from memshield.vadi_loss import lpips_cap_hinge, tv_hinge
+
+    device = x_clean.device
+    dtype = x_clean.dtype
+    T_clean = x_clean.shape[0]
+    K = len(W_attacked)
+
+    # Leaves.
+    delta = torch.zeros_like(x_clean, device=device, requires_grad=True)
+    nu = nu_init.detach().clone().to(device)
+    nu.requires_grad_(True)
+    nu_opt = torch.optim.Adam(
+        [nu], lr=config.eta_nu_lr * config.boundary_polish_nu_lr_scale,
+    )
+
+    # Pre-compute a clean-space support mask for δ (union over polish frames
+    # mapped to clean-space). Outside this region, δ stays at 0.
+    support_clean_union = torch.zeros(
+        (T_clean, x_clean.shape[1], x_clean.shape[2]),
+        device=device, dtype=dtype,
+    )
+    for t_proc in polish_frame_ids:
+        if int(t_proc) in set(W_attacked):
+            # Insert positions in processed space — affect insert content (ν),
+            # NOT original frames (δ lives in clean-space). Skip for δ mask.
+            continue
+        t_clean = _attacked_to_clean_same_space(int(t_proc), W_attacked)
+        if 0 <= t_clean < T_clean:
+            # Broadcast [H, W] across 3 channels below at update time.
+            support_clean_union[t_clean] = torch.maximum(
+                support_clean_union[t_clean], support_by_t[int(t_proc)],
+            )
+
+    # Best-step tracking.
+    best: Optional[Tuple[Tensor, Tensor, float]] = None
+    step_logs: List[Dict[str, Any]] = []
+    lambda_val = config.lambda_init
+
+    # Split polish frame ids by insert-vs-post for γ_anti_true weighting.
+    W_set = set(int(w) for w in W_attacked)
+    insert_polish_ids = sorted(t for t in polish_frame_ids if int(t) in W_set)
+    post_polish_ids = sorted(t for t in polish_frame_ids if int(t) not in W_set)
+
+    for step in range(config.boundary_polish_n_steps):
+        # Forward build.
+        x_prime = torch.clamp(x_clean + delta, 0.0, 1.0)
+        inserts = torch.clamp(decoy_seeds + nu, 0.0, 1.0)
+        if config.train_ste_quantize:
+            from memshield.losses import fake_uint8_quantize
+            x_prime = fake_uint8_quantize(x_prime)
+            inserts = fake_uint8_quantize(inserts)
+        processed = build_processed(x_prime, inserts, W_attacked)
+
+        # Query SAM2 at polish frame ids.
+        return_at = set(int(t) for t in polish_frame_ids)
+        logits_by_t: Dict[int, Tensor] = forward_fn(processed, return_at)
+
+        # Boundary-weighted decoy loss — split insert vs post for γ_anti.
+        # Codex R2 medium-fix: inserts get γ=0.1, post gets γ=0.3 to avoid
+        # eroding the duplicate-seed identity on insert frames.
+        if insert_polish_ids:
+            L_ins_agg, rec_ins = aggregate_boundary_loss(
+                pred_logits_by_t=logits_by_t,
+                m_decoy_by_t=m_decoy_by_t,
+                band_true_by_t=band_true_by_t,
+                support_by_t=support_by_t,
+                polish_frame_ids=insert_polish_ids,
+                alpha_dice=config.boundary_polish_alpha_dice,
+                beta_bce=config.boundary_polish_beta_bce,
+                gamma_anti_true=config.boundary_polish_gamma_anti_true_insert,
+            )
+        else:
+            L_ins_agg = torch.zeros((), dtype=x_prime.dtype, device=x_prime.device)
+            rec_ins = None
+        if post_polish_ids:
+            L_post_agg, rec_post = aggregate_boundary_loss(
+                pred_logits_by_t=logits_by_t,
+                m_decoy_by_t=m_decoy_by_t,
+                band_true_by_t=band_true_by_t,
+                support_by_t=support_by_t,
+                polish_frame_ids=post_polish_ids,
+                alpha_dice=config.boundary_polish_alpha_dice,
+                beta_bce=config.boundary_polish_beta_bce,
+                gamma_anti_true=config.boundary_polish_gamma_anti_true_post,
+            )
+        else:
+            L_post_agg = torch.zeros((), dtype=x_prime.dtype, device=x_prime.device)
+            rec_post = None
+        # Equal 1:1 mean over two non-empty groups; falls back to either alone.
+        if insert_polish_ids and post_polish_ids:
+            L_margin = 0.5 * (L_ins_agg + L_post_agg)
+        elif insert_polish_ids:
+            L_margin = L_ins_agg
+        elif post_polish_ids:
+            L_margin = L_post_agg
+        else:
+            L_margin = torch.zeros((), dtype=x_prime.dtype, device=x_prime.device)
+        bnd_n_frames = len(insert_polish_ids) + len(post_polish_ids)
+
+        # Fidelity hinges on original frames (where δ is nonzero)
+        # AND on insert frames (where ν continues to move).
+        polish_clean = sorted({
+            _attacked_to_clean_same_space(int(t), W_attacked)
+            for t in polish_frame_ids if int(t) not in W_set
+        })
+        L_fid_orig = torch.zeros((), dtype=x_prime.dtype, device=x_prime.device)
+        for c in polish_clean:
+            if 0 <= c < T_clean:
+                lp = lpips_fn(x_prime[c], x_clean[c])
+                L_fid_orig = L_fid_orig + lpips_cap_hinge(
+                    lp, config.lpips_orig_cap)
+        L_fid_ins = torch.zeros_like(L_fid_orig)
+        L_fid_TV = torch.zeros_like(L_fid_orig)
+        W_sorted = sorted(int(w) for w in W_attacked)
+        for k, w in enumerate(W_sorted):
+            c_k = int(w - k)
+            if not (0 <= c_k < T_clean):
+                continue
+            x_ref = x_clean[c_k]
+            lp = lpips_fn(inserts[k], x_ref)
+            L_fid_ins = L_fid_ins + lpips_cap_hinge(
+                lp, config.lpips_insert_cap)
+            ins_chw = inserts[k].permute(2, 0, 1)
+            ref_chw = x_ref.permute(2, 0, 1)
+            L_fid_TV = L_fid_TV + tv_hinge(
+                ins_chw, ref_chw, multiplier=config.tv_multiplier)
+
+        L = L_margin + lambda_val * (L_fid_orig + L_fid_ins + L_fid_TV)
+
+        # Codex R2 high-fix: feasibility / best-state bookkeeping captures
+        # PRE-update state — the (δ, ν) values that the recorded
+        # L_fid_* and L_margin were computed against. Snapshot them
+        # BEFORE the upcoming mutation.
+        tol = 1e-6
+        feas = (
+            float(L_fid_orig.detach().item()) <= tol
+            and float(L_fid_ins.detach().item()) <= tol
+            and float(L_fid_TV.detach().item()) <= tol
+        )
+        if feas:
+            score = -float(L_margin.detach().item())
+            if best is None or score > best[2]:
+                best = (delta.detach().cpu().clone(),
+                        nu.detach().cpu().clone(), score)
+
+        log = {
+            "step": step + 1, "stage": "polish",
+            "L": float(L.detach().item()),
+            "L_margin": float(L_margin.detach().item()),
+            "L_fid_orig": float(L_fid_orig.detach().item()),
+            "L_fid_ins": float(L_fid_ins.detach().item()),
+            "L_fid_TV": float(L_fid_TV.detach().item()),
+            "n_polish_frames": bnd_n_frames,
+            "feasible": feas,
+        }
+        step_logs.append(log)
+
+        if delta.grad is not None:
+            delta.grad.zero_()
+        nu_opt.zero_grad()
+        L.backward()
+
+        # δ update: sign-PGD, masked to per-frame support then per-clean-frame
+        # union. Codex R2 high-fix: strict ε=ε_delta clamp (not 4× over-budget).
+        with torch.no_grad():
+            if delta.grad is not None:
+                delta.add_(
+                    -config.boundary_polish_eta_step * delta.grad.sign())
+                # Broadcast [T, H, W] clean-space union → [T, H, W, 3].
+                mask_bcast = support_clean_union.unsqueeze(-1)
+                delta.mul_(mask_bcast)
+                # Threat-model hard ε clamp.
+                delta.clamp_(
+                    -config.boundary_polish_eps_delta,
+                    +config.boundary_polish_eps_delta)
+
+        # ν update: Adam + eps_nu clamp.
+        nu_opt.step()
+        with torch.no_grad():
+            nu.clamp_(-config.eps_nu, config.eps_nu)
+
+        # λ escalation.
+        if (not feas) and (step + 1) % config.lambda_growth_period == 0:
+            lambda_val *= config.lambda_growth_factor
+
+    if best is None:
+        return None, None, step_logs
+    return best[0], best[1], step_logs
+
+
+# =============================================================================
 # Per-clip orchestrator
 # =============================================================================
 
@@ -608,6 +931,13 @@ class V5ClipOutput:
     step_log_summary: List[Dict[str, Any]]
     placement_source: str
     post_insert_radius: int
+    # Boundary-δ polish fields (codex R1 #1, 2026-04-24).
+    # polish_applied: whether polish actually ran (i.e. there were degraded+
+    # aligned frames AND polish improved over A0 without hitting off-switch).
+    # polish_reverted: polish ran but off-switch triggered, reverted to A0.
+    polish_applied: bool = False
+    polish_reverted: bool = False
+    polish_stats: Dict[str, Any] = field(default_factory=dict)
 
 
 def run_v5_for_clip(
@@ -858,7 +1188,122 @@ def run_v5_for_clip(
             exported_j_drop_val = float(
                 exported_j_drop_details["J_drop_mean"])
 
+    # --- Stage 10 (optional): boundary-δ polish (codex R1 #1, 2026-04-24)
+    polish_applied = False
+    polish_reverted = False
+    polish_stats: Dict[str, Any] = {}
+    polish_logs: List[Dict[str, Any]] = []
+    if (config.boundary_polish
+            and not result.infeasible
+            and sam2_eval_fn is not None
+            and result.nu_star is not None
+            and exported_j_drop_details):
+        polish_frames = _select_polish_frames_from_decoy_semantic(
+            exported_j_drop_details, W_attacked,
+            align_cos_threshold=config.boundary_polish_align_cos_threshold,
+        )
+        n_degraded_aligned = len(polish_frames) - len(W_attacked)
+        polish_stats["polish_frames"] = polish_frames
+        polish_stats["n_degraded_aligned"] = n_degraded_aligned
+        if n_degraded_aligned <= 0:
+            # No eligible degraded frames → skip polish entirely.
+            polish_stats["skipped"] = "no_degraded_aligned_frames"
+        else:
+            # Build per-frame support masks.
+            support_by_t, band_true_by_t = _build_boundary_support_masks(
+                m_true_by_t, m_decoy_by_t, polish_frames,
+                band_width=config.boundary_polish_band_width,
+                use_corridor=config.boundary_polish_use_corridor,
+                corridor_width=config.boundary_polish_corridor_width,
+                feather_sigma=config.boundary_polish_feather_sigma,
+                device=x_clean.device, dtype=x_clean.dtype,
+            )
+            # Warm-start ν from A0 ν*.
+            nu_star_a0 = result.nu_star.to(x_clean.device)
+            delta_polish, nu_polish, polish_logs = _run_boundary_polish_pgd(
+                x_clean=x_clean, decoy_seeds=decoy_seeds,
+                nu_init=nu_star_a0,
+                W_attacked=W_attacked, polish_frame_ids=polish_frames,
+                support_by_t=support_by_t,
+                band_true_by_t=band_true_by_t,
+                m_decoy_by_t=m_decoy_by_t,
+                m_true_by_t=m_true_by_t,
+                forward_fn=forward_fn, lpips_fn=lpips_fn,
+                config=config,
+            )
+            if delta_polish is None or nu_polish is None:
+                polish_stats["skipped"] = "polish_infeasible_no_best_step"
+            else:
+                # Export polish result to a sibling directory + eval.
+                polish_dir = out_root / clip_name / f"{config_name}__polish" \
+                    / "processed"
+                export_processed_uint8(
+                    x_clean, delta_polish.to(x_clean.device),
+                    nu_polish.to(x_clean.device), decoy_seeds,
+                    W_attacked, polish_dir,
+                )
+                exported_polish = load_processed_uint8(
+                    polish_dir).to(x_clean.device)
+                polish_eval = eval_exported_j_drop(
+                    sam2_eval_fn=sam2_eval_fn,
+                    prompt_mask=prompt_mask,
+                    x_clean=x_clean,
+                    base_inserts=decoy_seeds,
+                    exported=exported_polish,
+                    W=W_attacked,
+                    m_hat_true_by_t=m_true_by_t,
+                    m_hat_decoy_by_t=m_decoy_by_t,
+                    decoy_offsets=decoy_offsets,
+                )
+                polish_j_drop = float(polish_eval["J_drop_mean"])
+                # Codex R3 high-fix: `exported_j_drop_val or 0.0` would
+                # silently treat a negative A0 J-drop (rare failed clips)
+                # as 0.0, corrupting the accept/revert decision. Use
+                # explicit None check.
+                a0_j_drop = (exported_j_drop_val
+                             if exported_j_drop_val is not None else 0.0)
+                delta_j = polish_j_drop - a0_j_drop
+                polish_stats["a0_j_drop"] = a0_j_drop
+                polish_stats["polish_j_drop"] = polish_j_drop
+                polish_stats["delta_j_drop"] = delta_j
+                # Off-switch: accept polish only if improvement ≥ min threshold.
+                accept = (not config.boundary_polish_off_switch) or (
+                    delta_j >= config.boundary_polish_min_improvement
+                )
+                polish_stats["accepted"] = accept
+                if accept:
+                    polish_applied = True
+                    # Overwrite the returned A0 export_dir / J_drop /
+                    # details with the polish-winning result. Codex R3
+                    # low-fix: also refresh step_logs so bookkeeping
+                    # reflects the polish run (A0 logs are prepended;
+                    # polish logs appended separately).
+                    export_dir = polish_dir
+                    exported_j_drop_val = polish_j_drop
+                    exported_j_drop_details = polish_eval
+                    # best_surrogate_loss: compute from polish's final
+                    # reported L_margin if polish_logs has any feasible
+                    # entry; otherwise mark NaN to signal boundary-loss
+                    # has different scale than margin loss.
+                    best_surrogate = float("nan")
+                    if polish_logs:
+                        feas_logs = [lg for lg in polish_logs
+                                     if lg.get("feasible")]
+                        if feas_logs:
+                            best_surrogate = min(
+                                lg["L_margin"] for lg in feas_logs)
+                    result = V5Result(
+                        delta_star=delta_polish, nu_star=nu_polish,
+                        best_surrogate_loss=best_surrogate,
+                        infeasible=False, step_logs=result.step_logs,
+                    )
+                else:
+                    polish_reverted = True
+                    # Keep A0 export unchanged; polish dir stays as reference.
+
     summary_logs: List[Dict[str, Any]] = [asdict(log) for log in result.step_logs]
+    if polish_logs:
+        polish_stats["step_logs"] = polish_logs
 
     return V5ClipOutput(
         clip_name=clip_name, config_name=config_name,
@@ -872,6 +1317,9 @@ def run_v5_for_clip(
         step_log_summary=summary_logs,
         placement_source=placement_source,
         post_insert_radius=post_insert_radius,
+        polish_applied=polish_applied,
+        polish_reverted=polish_reverted,
+        polish_stats=polish_stats,
     )
 
 
@@ -907,6 +1355,18 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--train-ste", action="store_true",
                    help="Apply fake_uint8_quantize STE during training "
                         "(v4-parity; default off in v5).")
+    # Boundary-δ polish (codex R1 #1, 2026-04-24).
+    p.add_argument("--boundary-polish", action="store_true",
+                   help="After A0 ν-only run, run a short boundary-δ polish "
+                        "stage on degraded+aligned frames. Off by default.")
+    p.add_argument("--boundary-polish-n-steps", type=int, default=30)
+    p.add_argument("--boundary-polish-align-cos-threshold", type=float,
+                   default=0.5)
+    p.add_argument("--boundary-polish-band-width", type=int, default=5)
+    p.add_argument("--boundary-polish-no-corridor", action="store_true",
+                   help="Disable centroid corridor in δ support mask.")
+    p.add_argument("--boundary-polish-no-off-switch", action="store_true",
+                   help="Accept polish result even if worse than A0.")
     return p
 
 
@@ -937,11 +1397,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.seed_only:
         config_name = f"K{args.K}_{args.placement}_seedonly"
     else:
+        polish_suffix = "_polish" if args.boundary_polish else ""
         config_name = (
             f"K{args.K}_{args.placement}_R{args.post_insert_radius}_"
             f"b-{short[args.insert_base]}_l-{short[args.loss]}_"
             f"o-{short[args.nu_optimizer]}_d-{short[args.delta_support]}_"
-            f"s-{short[args.schedule]}"
+            f"s-{short[args.schedule]}{polish_suffix}"
         )
 
     all_results: List[V5ClipOutput] = []
@@ -959,6 +1420,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             delta_support_mode=args.delta_support,
             post_insert_radius=args.post_insert_radius,
             train_ste_quantize=args.train_ste,
+            boundary_polish=args.boundary_polish,
+            boundary_polish_n_steps=args.boundary_polish_n_steps,
+            boundary_polish_align_cos_threshold=(
+                args.boundary_polish_align_cos_threshold),
+            boundary_polish_band_width=args.boundary_polish_band_width,
+            boundary_polish_use_corridor=(
+                not args.boundary_polish_no_corridor),
+            boundary_polish_off_switch=(
+                not args.boundary_polish_no_off_switch),
         )
         out = run_v5_for_clip(
             clip_name=clip_name, config_name=config_name,
@@ -1151,11 +1621,56 @@ def _self_test() -> None:
                 f"ablation variant {i} produced wrong type"
             assert len(out.W) == 3
 
+    # -- Boundary-δ polish stage integration smoke with stubs.
+    # Need a sam2_eval_fn that returns per-frame masks; stub it to return
+    # all-zeros so decoy_semantic classifies everything as either empty-
+    # clean (excluded) or suppressed (never "degraded"). With no degraded
+    # frames, polish stage should skip cleanly without crashing.
+    def _stub_sam2_eval(video, prompt):
+        return [np.zeros(prompt.shape, dtype=np.uint8)
+                for _ in range(int(video.shape[0]))]
+
+    with tempfile.TemporaryDirectory() as td:
+        cfg_polish = VADIv5Config(
+            N_A_nu=3, N_B_delta=0, N_C_alt=0,
+            lambda_init=1.0, lambda_growth_factor=2.0,
+            lambda_growth_period=2,
+            post_insert_radius=2,
+            insert_base_mode="midframe", loss_mode="margin",
+            optimizer_nu_mode="sign_pgd",
+            schedule_preset="full",           # N_A_nu=3 so effectively short
+            delta_support_mode="off",
+            boundary_polish=True,
+            boundary_polish_n_steps=2,        # tiny for self-test
+            boundary_polish_band_width=3,
+        )
+        out_pol = run_v5_for_clip(
+            clip_name="stub_polish", config_name="K3_polish_smoke",
+            x_clean=x_clean, prompt_mask=prompt,
+            clean_pass_fn=stub_clean_pass,
+            forward_fn_builder=stub_forward_builder,
+            lpips_fn=lpips_stub,
+            K_ins=3, placement_mode="top",
+            post_insert_radius=2,
+            config=cfg_polish, out_root=Path(td),
+            sam2_eval_fn=_stub_sam2_eval,
+        )
+        # With all-zero stub masks, no frame is "degraded" in the strict
+        # decoy-semantic sense → polish should skip, not crash.
+        assert not out_pol.polish_applied, \
+            "polish should not apply with all-empty stub masks"
+        # polish_stats should indicate either 'skipped' or the decoy_semantic
+        # wasn't populated (sam2_eval_fn returned zeros → baseline/attacked
+        # have zero masks, jaccard both-empty = 1.0, J_drop = 0, all frames
+        # excluded as empty_pred_clean → n_degraded_aligned = 0 → skipped).
+        # Either state is acceptable as long as no exception is raised.
+
     print("scripts.run_vadi_v5: all self-tests PASSED "
           "(build_post_insert_support edge cases, _post_clean_to_proc, "
           "3-stage PGD end-to-end with stub adapters, decoy-seed construction, "
           "4 ablation axes {base, loss, optimizer, delta_support} "
-          "import and run cleanly with stubs)")
+          "import and run cleanly with stubs, boundary-polish integration "
+          "smoke with stub sam2_eval_fn)")
 
 
 if __name__ == "__main__":

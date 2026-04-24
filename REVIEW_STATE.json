@@ -1,43 +1,15 @@
 {
-  "round": 3,
-  "threadId": "019dbec1-75c8-72e3-8439-f7dbf38ca6c1",
-  "status": "completed",
+  "round": 0,
+  "threadId": null,
+  "status": "in_progress",
   "difficulty": "medium",
-  "topic": "vadi_method_redesign_dire_v5",
-  "last_score": 6.0,
-  "last_verdict": "LOOP END. Method core 6/10. All 4 codex R1 DIRE-v5 proposals (duplicate_seed, dice_bce, adam, post-insert long δ) empirically falsified. Validated config = V5.A0 (midframe + margin + sign_pgd + STE, K=3 top, no δ). Mean J_drop 0.703 on 3 clips. Next: scale to 10 clips + decoy-semantic validation + claim pruning. No more method redesign.",
-  "score_progression": [2.0, 2.0, 6.0],
+  "topic": "delta_redesign_original_frame_perturbation",
+  "last_score": null,
+  "last_verdict": null,
+  "score_progression": [],
   "max_rounds": 4,
-  "rounds_used": 3,
-  "pending_experiments": [
-    "10-clip A0 main table",
-    "decoy-semantic validation (overlap, centroid)",
-    "placement top vs random on 10 clips",
-    "K=1/2/3 scaling",
-    "transfer to SAM2Long or SAM2.1-Base",
-    "codec / resize robustness"
-  ],
-  "resolved_blockers": [
-    "loss-query window coupled to delta-support-mode (Phase 1 silent ν-gradient collapse)",
-    "train_ste_quantize flag added for v4-parity in v5 path",
-    "insert-frame mask supervision override for duplicate-seed path"
-  ],
-  "validated_method_v5_A0": {
-    "insert_base": "temporal_midframe",
-    "loss": "contrastive_decoy_margin",
-    "optimizer": "sign_pgd_shared_eta",
-    "train_quantize": "STE_fake_uint8",
-    "K_ins": 3,
-    "placement": "top_vulnerability (pending random comparison on 10 clips)",
-    "delta_support": "off",
-    "mean_J_drop_3clip": 0.703,
-    "mean_J_attacked_3clip": 0.292
-  },
-  "falsified_variants": [
-    "duplicate_object_decoy_seed (-0.021 pp mean)",
-    "dice_bce_loss (-0.264 pp mean)",
-    "adam_on_nu (-0.344 pp mean)",
-    "post_insert_R8_delta (-0.173 pp mean, catastrophic on blackswan)"
-  ],
-  "timestamp": "2026-04-24T22:30:00"
+  "rounds_used": 0,
+  "pending_experiments": [],
+  "user_directive": "2026-04-24 evening: user rejects the 'drop δ' conclusion from prior ablation. Per user, previous δ schemes (v4 symmetric ±2+f0; post-insert R=8) failed because of poor design, not because δ is fundamentally incompatible. Design fresh δ schemes. Ignore implementation cost.",
+  "timestamp": "2026-04-24T23:15:00"
 }
