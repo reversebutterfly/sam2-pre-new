@@ -1711,3 +1711,74 @@ Saved separately in `REVIEW_PRE_PILOT_2026-04-23.md` to keep AUTO_REVIEW.md read
 ### Status: LOOP COMPLETE — proceed to Pro 6000 re-smoke + pilot launch.
 - Difficulty: medium
 - Final score progression: 4 → 8
+
+---
+
+# Auto-Review Loop 2 — VADI method redesign (DIRE v5)
+
+**Start**: 2026-04-24 late afternoon, after decisive 10-clip round returned AUDIT_PIVOT (proceed=False).
+**User directive**: keep decoy-direction positive-method paper (hard-locked in CLAUDE.md as of 2026-04-24); do NOT pivot to audit.
+**Topic**: "Is the current VADI design methodologically flawed in a way that explains the decisive-round falsifications? Specifically: pre-insert δ breaks causality; PGD sign-grad with shared η is wrong-geometry for ν; temporal-midframe base is a terrible starting point for a decoy frame."
+
+## Round 1 (2026-04-24, thread 019dbec1-75c8-72e3-8439-f7dbf38ca6c1)
+
+### Assessment (Summary)
+- **Score**: 2/10 for VADI as-is
+- **Verdict**: NOT READY — decisive falsifies own method claims (placement top<random 7/10, insert-only > joint by 0.156 pp, camel 0.985 → 0.314 when δ added)
+- **But**: decoy direction is still alive if reframed as DIRE-v5 with specific fixes
+
+### Key criticisms (all validated by decisive numbers)
+
+- **C1 — Pre-insert δ violates decoy semantic**: symmetric ±2 δ support symmetrically perturbs pre-insert frames with no theoretical justification; decisive (insert-only > joint) is consistent with pre-insert δ actively interfering
+- **C2 — Shared-η PGD sign-grad is wrong geometry for ν**: δ is ℓ∞-bounded (ε=4/255), ν is only LPIPS-soft-bounded; sign-grad with η=2/255 saturates δ in 2 steps, ν's larger search space dominates
+- **C3 — Temporal-midframe base is in-distribution**: `base_insert_k = 0.5·x_{c_k-1} + 0.5·x_{c_k}` looks like a real middle frame; ν must FIGHT against a benign init, bounded softly by LPIPS ≤ 0.35; attack has no chance to reach a decoy-semantic
+
+### Reviewer Raw Response
+
+<details>
+<summary>Click to expand full reviewer response</summary>
+
+**Score**: `VADI as-is: 2/10` for a top-venue decoy-attack paper.
+
+The score is this low because the decisive table does not merely weaken the method; it inverts its claimed mechanism.
+- `random > top` means the vulnerability-aware placement claim is currently false.
+- `insert-only > joint` means the decoy frame is the dominant mechanism and current δ is not helping.
+- `δ-only ≈ joint` means the claimed insert+δ synergy is also false.
+- `camel: 0.985 -> 0.314` after adding δ is catastrophic evidence that the current original-frame perturbation design can destroy a strong decoy attack.
+
+What still has value is only the core intuition: a synthetic decoy frame can hijack SAM2, and causal post-insert perturbations might prolong that failure. The current instantiation is not paper-ready.
+
+**DIRE-v5**
+
+I would rebuild the method around a strict causal hierarchy: decoy insert first, recovery evasion second, placement third. The insert must work on its own. δ is allowed only to preserve the hijack after the insert, never to help create it beforehand.
+
+- S_δ: post-insert only. Use S_δ = ⋃_k {W_k+1, ..., min(W_k+R, W_{k+1}-1)} with R=8 as the default and ablate R ∈ {4,8,12}. No pre-insert δ. No f0 perturbation in the primary method.
+- ν optimizer: use Adam for inserts, PGD/sign only for original-frame δ. Do not share an update rule or step size. Schedule: ν-only stage first, then δ-only stage, then a short alternating polish. Remove early fake-quantize STE from the joint loop; do float optimization first, then a short quantization-aware finetune at the end.
+- Insert initialization: do not start from a temporal midframe. Start from a decoy-semantic frame. My recommendation: `(b) identity-confusion double` — extract pseudo-mask object from clean SAM2, translate to decoy location with low overlap, paste as duplicate, optionally apply light motion-consistent warp/blur, keep the original object present. This already contains the wrong identity cue.
+- Insert fidelity target: stop constraining against midframe. Constrain against the actual source frame and neighbors. Preserve background strongly outside the edited region.
+- Loss: current contrastive margin is too indirect. Use Dice/BCE(p_t, m_t^d) on decoy mask on insert + post-insert window + anti-original overlap term. Margin becomes weak auxiliary.
+- Placement: drop current vulnerability score. Replace with causal screening — cheap unoptimized duplicate-object seed insert, short H=3 horizon, score immediate decoy adoption + persistence. If doesn't beat random, use random and drop placement claim.
+- K: start K=1 as proof of mechanism. Add K=2 or K=3 only if recovery remains strong.
+
+**Priority order**
+1. Remove all pre-insert δ; rerun insert-only as backbone condition
+2. Replace midframe base with duplicate-object decoy seed + optimize ν with Adam
+3. Replace margin-first loss with direct decoy-target tracking
+4. Reintroduce δ only on post-insert frames with longer window; test consistent lift
+5. Replace placement heuristics with short-horizon causal screening
+6. Only then: alternating polish, memory losses, multi-insert
+
+**Submission bar for DIRE**:
+- mean exported J-drop ≥ 0.60s or better
+- full DIRE beats best insert-only baseline by ≥ +0.05 to +0.10 absolute mean J-drop
+- ≥ 7/10 per-clip wins at 0.05 threshold
+- placement claim beats random by same standard, else drop placement claim
+
+The current VADI is not a weakened version of the right method; it is a mis-specified version of the right idea. The right idea is still alive, but only if you stop treating pre-insert δ, shared PGD, and midframe init as sacred.
+
+</details>
+
+### Actions Taken (in progress)
+
+Implementing DIRE-v5 per priority 1-3 (+4 folded in via post-insert-only flag). Held for separate Round 2 review after smoke completes.
+

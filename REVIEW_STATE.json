@@ -1,30 +1,28 @@
 {
-  "round": 2,
-  "threadId": "019dbabd-4803-7752-95cc-99f3ac08999c",
-  "status": "completed",
+  "round": 1,
+  "threadId": "019dbec1-75c8-72e3-8439-f7dbf38ca6c1",
+  "status": "in_progress",
   "difficulty": "medium",
-  "topic": "vadi_pre_pilot_code_fixes",
-  "last_score": 8.0,
-  "last_verdict": "LAUNCH_WITH_FIX → almost ready. Two Round 1 HALT issues materially fixed (rank ties + exported re-eval). 3 R2 purity fixes applied (uint8 symmetry, per-config gate source, strict real-run enforcement). All 8 VADI module self-tests pass locally.",
-  "score_progression": [4.0, 8.0],
+  "topic": "vadi_method_redesign_dire_v5",
+  "last_score": 2.0,
+  "last_verdict": "NOT READY, but decoy direction alive if reframed as DIRE-v5 with post-insert-only δ, Adam for ν, duplicate-object decoy seed, direct decoy-tracking loss",
+  "score_progression": [2.0],
   "max_rounds": 4,
-  "rounds_used": 2,
+  "rounds_used": 1,
   "pending_experiments": [],
-  "resolved_blockers": [
-    "best_surrogate_J_drop gate → exported_j_drop gate (paper-claim metric)",
-    "_ordinal_rank late-frame tie bias → average-rank",
-    "sam2_eval_fn missing silently degraded to surrogate → now hard-fails via allow_surrogate_gate=False default"
+  "open_tasks": [
+    "8: decoy_seed.py module",
+    "9: vadi_v5_loss.py module",
+    "10: post-insert-only δ flag in run_vadi_for_clip",
+    "11: run_vadi_v5.py driver",
+    "12: codex review of v5 diff",
+    "13: smoke test v5 on dog+camel+blackswan"
   ],
-  "deferred_to_main_table": [
-    "K1_random 1 draw → 5 draws (pilot is cheap kill-switch; main table already supports 5 via K1_random_seedN)",
-    "Δmu vs dedicated clean-baseline decomposition (flagged non-blocking at pilot per handoff)",
-    "Decoy margin → suppression collapse check: will inspect Δmu_decoy sign post-pilot as narrative check"
-  ],
-  "next_steps": [
-    "commit locally: VADI codex R1+R2 fixes (rank ties + exported re-eval + 3 purity refinements)",
-    "bundle 6e00d5e..HEAD → Pro 6000 → ff-merge → push origin",
-    "Pro 6000 re-smoke with the now-final code (verify eval_exported_j_drop actually works on real DAVIS)",
-    "nohup pilot launch: 3 clips × 3 configs with exported_j_drop gating"
-  ],
-  "timestamp": "2026-04-23T23:15:00"
+  "submission_bar_for_v5": {
+    "mean_exported_j_drop": 0.60,
+    "vs_insert_only_baseline_min_delta": 0.05,
+    "per_clip_wins_threshold": 0.05,
+    "min_clip_wins_for_placement_claim": 7
+  },
+  "timestamp": "2026-04-24T15:15:00"
 }
