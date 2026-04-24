@@ -852,6 +852,8 @@ def run_v5_for_clip(
                 exported=exported,
                 W=W_attacked,
                 m_hat_true_by_t=m_true_by_t,
+                m_hat_decoy_by_t=m_decoy_by_t,
+                decoy_offsets=decoy_offsets,
             )
             exported_j_drop_val = float(
                 exported_j_drop_details["J_drop_mean"])

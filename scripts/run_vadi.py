@@ -267,6 +267,8 @@ def eval_exported_j_drop(
     exported: Tensor,              # [T_proc, H, W, 3] reloaded from PNG
     W: Sequence[int],
     m_hat_true_by_t: Dict[int, Tensor],  # processed-space float soft masks
+    m_hat_decoy_by_t: Optional[Dict[int, Tensor]] = None,
+    decoy_offsets: Optional[Sequence[Tuple[int, int]]] = None,
 ) -> Dict[str, Any]:
     """Re-evaluate attack effectiveness on the EXPORTED uint8 artifact.
 
@@ -376,7 +378,7 @@ def eval_exported_j_drop(
     J_ins_drops = [per_frame[t]["J_drop"] for t in range(T_proc)
                    if t in W_set]
 
-    return {
+    result: Dict[str, Any] = {
         "J_baseline_mean": J_baseline_mean,
         "J_attacked_mean": J_attacked_mean,
         "J_drop_mean": J_drop_mean,
@@ -388,6 +390,74 @@ def eval_exported_j_drop(
         "n_originals": len(J_orig_drops),
         "n_inserts": len(J_ins_drops),
     }
+
+    # Decoy-semantic metrics (2026-04-24 Round 3 codex requirement). When
+    # the caller supplies m_hat_decoy_by_t + the per-insert decoy_offsets,
+    # we reuse the already-computed pred_clean / pred_attacked to compute
+    # per-frame attack-mode classification, retention, centroid-alignment.
+    # Hyperparameters documented in `memshield.decoy_semantic_metrics`.
+    if m_hat_decoy_by_t is not None and decoy_offsets is not None:
+        from memshield.decoy_semantic_metrics import (               # noqa: WPS433
+            aggregate_decoy_semantic, per_frame_decoy_semantic,
+        )
+        # For per-frame decoy offset lookup: the most recent insert's
+        # offset applies. Map processed-space t → its cover offset.
+        W_sorted = sorted(int(w) for w in W)
+        offs_sorted = [decoy_offsets[i] for i, _ in
+                       sorted(enumerate(W), key=lambda kv: int(kv[1]))]
+
+        def _offset_for_t(t_proc: int) -> Tuple[int, int]:
+            """Cover rule: most recent insert with W_k <= t_proc."""
+            k_cover = -1
+            for k, w in enumerate(W_sorted):
+                if w <= t_proc:
+                    k_cover = k
+                else:
+                    break
+            if k_cover == -1:
+                return (0, 0)   # pre-first-insert (rare); no alignment test applies
+            return (int(offs_sorted[k_cover][0]),
+                    int(offs_sorted[k_cover][1]))
+
+        # Codex R1-post-fix: fail-fast if decoy GT is incomplete. Previously
+        # a silent `continue` could shrink the denominator and bias
+        # aggregate rates.
+        ds_records = []
+        first_insert_proc = min(W_sorted) if W_sorted else None
+        for t in range(T_proc):
+            if t not in m_hat_decoy_by_t:
+                raise KeyError(
+                    f"m_hat_decoy_by_t missing entry for processed frame "
+                    f"t={t}; decoy-semantic validation requires coverage "
+                    f"over all processed frames.")
+            gt_true = (_as_np(m_hat_true_by_t[t]) > 0.5).astype(np.uint8)
+            gt_decoy = (_as_np(m_hat_decoy_by_t[t]) > 0.5).astype(np.uint8)
+            is_pre = (first_insert_proc is not None
+                      and t < first_insert_proc)
+            rec = per_frame_decoy_semantic(
+                t=t, is_insert=(t in W_set),
+                pred_clean=masks_clean[t], pred_attacked=masks_attacked[t],
+                m_true=gt_true, m_decoy=gt_decoy,
+                decoy_offset=_offset_for_t(t),
+                is_pre_first_insert=is_pre,
+            )
+            ds_records.append(rec)
+        agg = aggregate_decoy_semantic(ds_records)
+        # Serialize record objects to dicts for JSON-friendliness.
+        from dataclasses import asdict as _asdict
+        result["decoy_semantic"] = {
+            "per_frame": [_asdict(r) for r in ds_records],
+            "aggregate": _asdict(agg),
+        }
+
+    return result
+
+
+def _as_np(x) -> np.ndarray:
+    """Coerce torch.Tensor or np.ndarray → np.ndarray (float)."""
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
 
 
 def remeasure_exported_feasibility(
