@@ -123,6 +123,17 @@ class VADIv5Config:
     feather_radius: int = 5
     feather_sigma: float = 2.0
 
+    # Ablation axes (codex R2 disciplined plan, 2026-04-24).
+    # Defaults reproduce the original v5-full; flip one axis per A1/A2/A3.
+    insert_base_mode: str = "duplicate_seed"   # "midframe" | "duplicate_seed"
+    loss_mode: str = "dice_bce"                # "margin" | "dice_bce"
+    optimizer_nu_mode: str = "adam"            # "adam" | "sign_pgd"
+    schedule_preset: str = "full"              # "full" | "insert_only_100"
+    delta_support_mode: str = "post_insert"    # "off" | "v4_symmetric" | "post_insert"
+    # Margin loss knobs (only consulted when loss_mode=="margin").
+    margin_threshold: float = 0.75
+    margin_neighbor_weight: float = 0.5
+
     seed: int = 0
 
 
@@ -224,46 +235,71 @@ def _step_loss(
     return_at_small |= set(post_insert_proc_set)
     logits_by_t: Dict[int, Tensor] = forward_fn(processed, return_at_small)
 
-    # Decoy tracking loss on insert + post-insert positions.
-    # Codex R1-2 fix: different γ_anti_true on insert vs post-insert.
-    # Build two aggregates and recombine manually.
+    # Attack loss — branch by config.loss_mode (codex R2 ablation axis).
     decoy_logits = {t: logits_by_t[t] for t in return_at_small}
     insert_ids_sorted = sorted(int(w) for w in W)
     post_ids_sorted = sorted(int(t) for t in post_insert_proc_set
                              if int(t) not in set(insert_ids_sorted))
-    # Insert-group aggregate (γ_insert).
-    L_insert_agg, rec_ins = aggregate_decoy_tracking_loss(
-        decoy_logits, m_decoy_by_t, m_true_by_t,
-        insert_ids=insert_ids_sorted, post_insert_ids=[],
-        alpha_dice=config.alpha_dice, beta_bce=config.beta_bce,
-        gamma_anti_true=config.gamma_anti_true_insert,
-        insert_weight=1.0, post_insert_weight=0.0,
-    )
-    # Post-insert-group aggregate (γ_post).
-    if post_ids_sorted:
-        L_post_agg, rec_post = aggregate_decoy_tracking_loss(
+
+    if config.loss_mode == "dice_bce":
+        # Codex R1-2 fix: different γ_anti_true on insert vs post-insert.
+        L_insert_agg, rec_ins = aggregate_decoy_tracking_loss(
             decoy_logits, m_decoy_by_t, m_true_by_t,
-            insert_ids=[], post_insert_ids=post_ids_sorted,
+            insert_ids=insert_ids_sorted, post_insert_ids=[],
             alpha_dice=config.alpha_dice, beta_bce=config.beta_bce,
-            gamma_anti_true=config.gamma_anti_true_post,
-            insert_weight=0.0, post_insert_weight=1.0,
+            gamma_anti_true=config.gamma_anti_true_insert,
+            insert_weight=1.0, post_insert_weight=0.0,
         )
+        if post_ids_sorted:
+            L_post_agg, _ = aggregate_decoy_tracking_loss(
+                decoy_logits, m_decoy_by_t, m_true_by_t,
+                insert_ids=[], post_insert_ids=post_ids_sorted,
+                alpha_dice=config.alpha_dice, beta_bce=config.beta_bce,
+                gamma_anti_true=config.gamma_anti_true_post,
+                insert_weight=0.0, post_insert_weight=1.0,
+            )
+        else:
+            L_post_agg = torch.zeros((), dtype=x_prime.dtype,
+                                     device=x_prime.device)
+        w_ins = config.insert_weight; w_post = config.post_insert_weight
+        if insert_ids_sorted and post_ids_sorted:
+            L_margin = (w_ins * L_insert_agg + w_post * L_post_agg) \
+                       / (w_ins + w_post)
+        elif insert_ids_sorted:
+            L_margin = L_insert_agg
+        elif post_ids_sorted:
+            L_margin = L_post_agg
+        else:
+            L_margin = torch.zeros((), dtype=x_prime.dtype,
+                                   device=x_prime.device)
+        margin_rec = rec_ins
+    elif config.loss_mode == "margin":
+        # v4-style contrastive margin. post_insert_ids play the role of
+        # v4's "neighbor_ids" (half-weight).
+        from memshield.vadi_loss import (
+            aggregate_margin_loss, decoy_margin_per_frame,
+        )
+        margins_by_t = {}
+        for t in set(insert_ids_sorted) | set(post_ids_sorted):
+            margins_by_t[t] = decoy_margin_per_frame(
+                decoy_logits[t], m_true_by_t[t], m_decoy_by_t[t],
+                margin=config.margin_threshold,
+            )
+        agg = aggregate_margin_loss(
+            margins_by_t,
+            insert_ids=insert_ids_sorted,
+            neighbor_ids=post_ids_sorted,
+            neighbor_weight=config.margin_neighbor_weight,
+        )
+        L_margin = agg.L_margin
+        margin_rec = {
+            "mode": "margin",
+            "L_margin": float(agg.L_margin.detach().item()),
+            "L_insert": float(agg.L_insert.detach().item()),
+            "L_neighbor": float(agg.L_neighbor.detach().item()),
+        }
     else:
-        L_post_agg = torch.zeros((), dtype=x_prime.dtype, device=x_prime.device)
-        rec_post = None
-    # Weighted combination.
-    w_ins = config.insert_weight
-    w_post = config.post_insert_weight
-    if insert_ids_sorted and post_ids_sorted:
-        L_margin = (w_ins * L_insert_agg + w_post * L_post_agg) \
-                   / (w_ins + w_post)
-    elif insert_ids_sorted:
-        L_margin = L_insert_agg
-    elif post_ids_sorted:
-        L_margin = L_post_agg
-    else:
-        L_margin = torch.zeros((), dtype=x_prime.dtype, device=x_prime.device)
-    margin_rec = rec_ins     # keep the insert-group record for logging
+        raise ValueError(f"unknown loss_mode {config.loss_mode!r}")
 
     # Fidelity on originals: LPIPS on post-insert-clean positions vs x_clean there.
     L_fid_orig = torch.zeros((), dtype=x_prime.dtype, device=x_prime.device)
@@ -399,8 +435,15 @@ def _run_v5_pgd(
         nu = nu_init.detach().clone()
     nu.requires_grad_(True)
 
-    # Adam optimizer for ν (stage A + C). δ uses manual sign-PGD (stage B + C).
-    nu_opt = torch.optim.Adam([nu], lr=config.eta_nu_lr)
+    # ν optimizer — branch on config.optimizer_nu_mode.
+    nu_opt: Optional[torch.optim.Optimizer]
+    if config.optimizer_nu_mode == "adam":
+        nu_opt = torch.optim.Adam([nu], lr=config.eta_nu_lr)
+    elif config.optimizer_nu_mode == "sign_pgd":
+        nu_opt = None                          # manual sign-grad updates
+    else:
+        raise ValueError(
+            f"unknown optimizer_nu_mode {config.optimizer_nu_mode!r}")
 
     step_logs: List[V5StepLog] = []
     best_state: Optional[Tuple[Tensor, Tensor, float]] = None
@@ -419,7 +462,10 @@ def _run_v5_pgd(
         )
         if delta.grad is not None:
             delta.grad.zero_()
-        nu_opt.zero_grad()
+        if nu_opt is not None:
+            nu_opt.zero_grad()
+        elif nu.grad is not None:
+            nu.grad.zero_()
         L.backward()
 
         # δ update: sign-PGD, masked to post-insert-clean support only.
@@ -440,11 +486,14 @@ def _run_v5_pgd(
                         else:
                             delta[c].zero_()
 
-        # ν update: Adam, then hard ε-ball clamp as a safety belt so
-        # Adam can't wander far during a pathological fidelity schedule.
-        # Codex R1 medium fix (2026-04-24).
+        # ν update — Adam or sign-PGD, then hard ε-ball clamp as a safety
+        # belt. Codex R1 medium fix (2026-04-24).
         if not freeze_nu:
-            nu_opt.step()
+            if nu_opt is not None:
+                nu_opt.step()
+            elif nu.grad is not None:
+                with torch.no_grad():
+                    nu.add_(-config.eta_nu_lr * nu.grad.sign())
             with torch.no_grad():
                 nu.clamp_(-config.eps_nu, config.eps_nu)
 
@@ -484,27 +533,36 @@ def _run_v5_pgd(
         if (not feas) and len(step_logs) % config.lambda_growth_period == 0:
             lambda_val *= config.lambda_growth_factor
 
-    # --- Stage A: ν-only Adam ---
-    for _ in range(config.N_A_nu):
+    # Schedule preset — codex R2 ablation axis.
+    if config.schedule_preset == "insert_only_100":
+        N_A = 100; N_B = 0; N_C = 0
+    elif config.schedule_preset == "full":
+        N_A = config.N_A_nu; N_B = config.N_B_delta; N_C = config.N_C_alt
+    else:
+        raise ValueError(f"unknown schedule_preset {config.schedule_preset!r}")
+
+    # --- Stage A: ν-only ---
+    for _ in range(N_A):
         _run_step(stage="A_nu", freeze_delta=True, freeze_nu=False,
                   eta_delta=0.0, lambda_current=lambda_val)
 
     # --- Stage B: δ-only sign-PGD (ν frozen at its current value) ---
-    # Snapshot ν at end of stage A as the frozen reference.
-    for _ in range(config.N_B_delta):
+    for _ in range(N_B):
         _run_step(stage="B_delta", freeze_delta=False, freeze_nu=True,
                   eta_delta=config.eta_delta, lambda_current=lambda_val)
 
     # --- Stage C: alternating polish with halved rates ---
-    nu_opt = torch.optim.Adam([nu], lr=0.5 * config.eta_nu_lr)
-    for i in range(config.N_C_alt):
-        if i % 2 == 0:
-            _run_step(stage="C_alt", freeze_delta=True, freeze_nu=False,
-                      eta_delta=0.0, lambda_current=lambda_val)
-        else:
-            _run_step(stage="C_alt", freeze_delta=False, freeze_nu=True,
-                      eta_delta=0.5 * config.eta_delta,
-                      lambda_current=lambda_val)
+    if N_C > 0:
+        if config.optimizer_nu_mode == "adam":
+            nu_opt = torch.optim.Adam([nu], lr=0.5 * config.eta_nu_lr)
+        for i in range(N_C):
+            if i % 2 == 0:
+                _run_step(stage="C_alt", freeze_delta=True, freeze_nu=False,
+                          eta_delta=0.0, lambda_current=lambda_val)
+            else:
+                _run_step(stage="C_alt", freeze_delta=False, freeze_nu=True,
+                          eta_delta=0.5 * config.eta_delta,
+                          lambda_current=lambda_val)
 
     if best_state is None:
         return V5Result(
@@ -614,13 +672,26 @@ def run_v5_for_clip(
     W_attacked = sorted([c + k for k, c in enumerate(sorted(W_clean))])
     T_proc = T_clean + len(W_attacked)
 
-    # --- decoy-seed construction ---
-    decoy_seeds, decoy_offsets = build_decoy_insert_seeds(
-        x_clean, clean_out.pseudo_masks, sorted(W_clean),
-        feather_radius=config.feather_radius,
-        feather_sigma=config.feather_sigma,
-    )
-    decoy_seeds = decoy_seeds.to(x_clean.device)
+    # --- insert base construction (codex R2 ablation axis) ---
+    if config.insert_base_mode == "duplicate_seed":
+        decoy_seeds, decoy_offsets = build_decoy_insert_seeds(
+            x_clean, clean_out.pseudo_masks, sorted(W_clean),
+            feather_radius=config.feather_radius,
+            feather_sigma=config.feather_sigma,
+        )
+        decoy_seeds = decoy_seeds.to(x_clean.device)
+    elif config.insert_base_mode == "midframe":
+        from memshield.vadi_optimize import build_base_inserts as _bbi
+        decoy_seeds = _bbi(x_clean, W_attacked)
+        # Still need decoy offsets for shifted-mask supervision.
+        decoy_offsets = [
+            compute_decoy_offset_from_mask(
+                np.asarray(clean_out.pseudo_masks[c], dtype=np.float32))
+            for c in sorted(W_clean)
+        ]
+    else:
+        raise ValueError(
+            f"unknown insert_base_mode {config.insert_base_mode!r}")
 
     # --- decoy mask trajectory (for loss supervision) ---
     # For each insert, the decoy target at post-insert frames is the
@@ -681,17 +752,34 @@ def run_v5_for_clip(
     m_decoy_by_t = {t: torch.from_numpy(m).float().to(device)
                     for t, m in m_decoy_by_t_np.items()}
 
-    # --- post-insert support (processed-space and clean-space) ---
-    post_insert_proc, _ = build_post_insert_support(
-        W_attacked, T_proc, radius=post_insert_radius,
-    )
-    post_insert_clean: List[int] = []
-    for a in post_insert_proc:
-        if a in set(W_attacked):
-            continue
-        post_insert_clean.append(
-            _attacked_to_clean_same_space(a, W_attacked))
-    post_insert_clean = sorted(set(post_insert_clean))
+    # --- δ support (codex R2 ablation axis) ---
+    if config.delta_support_mode == "off":
+        post_insert_proc: List[int] = []
+        post_insert_clean: List[int] = []
+    elif config.delta_support_mode == "post_insert":
+        post_insert_proc, _ = build_post_insert_support(
+            W_attacked, T_proc, radius=post_insert_radius,
+        )
+        post_insert_clean = sorted({
+            _attacked_to_clean_same_space(a, W_attacked)
+            for a in post_insert_proc if a not in set(W_attacked)
+        })
+    elif config.delta_support_mode == "v4_symmetric":
+        # v4-style: ∪_k NbrSet(W_k, ±2) ∪ {f0_processed=0} in attacked space,
+        # map to clean-space (excluding insert positions themselves).
+        from memshield.vadi_optimize import build_support_sets
+        S_delta_proc, _ = build_support_sets(
+            W_attacked, T_proc, f0_processed_id=0)
+        post_insert_proc = sorted({
+            int(a) for a in S_delta_proc if int(a) not in set(W_attacked)
+        })
+        post_insert_clean = sorted({
+            _attacked_to_clean_same_space(a, W_attacked)
+            for a in post_insert_proc
+        })
+    else:
+        raise ValueError(
+            f"unknown delta_support_mode {config.delta_support_mode!r}")
 
     # --- forward_fn ---
     forward_fn = forward_fn_builder(
@@ -781,6 +869,17 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--seed-only", action="store_true",
                    help="Skip optimization. Export with δ=0, ν=0 "
                         "(decoy seed alone) for A/B comparison.")
+    # Ablation axes (codex R2 disciplined plan, 2026-04-24).
+    p.add_argument("--insert-base", choices=["midframe", "duplicate_seed"],
+                   default="duplicate_seed")
+    p.add_argument("--loss", choices=["margin", "dice_bce"], default="dice_bce")
+    p.add_argument("--nu-optimizer", choices=["adam", "sign_pgd"],
+                   default="adam")
+    p.add_argument("--schedule", choices=["full", "insert_only_100"],
+                   default="full")
+    p.add_argument("--delta-support", choices=["off", "post_insert",
+                                               "v4_symmetric"],
+                   default="post_insert")
     return p
 
 
@@ -799,10 +898,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     out_root = Path(args.out_root)
     out_root.mkdir(parents=True, exist_ok=True)
-    config_name = (
-        f"K{args.K}_{args.placement}_R{args.post_insert_radius}_"
-        f"{'seedonly' if args.seed_only else 'v5full'}"
-    )
+    # Compact config name encoding the 4 ablation axes + placement + K.
+    # b={midframe|dup}, l={margin|dice}, o={adam|pgd}, d={off|post|v4}.
+    short = {
+        "midframe": "mid", "duplicate_seed": "dup",
+        "margin": "mg", "dice_bce": "dc",
+        "adam": "ad", "sign_pgd": "pg",
+        "off": "off", "post_insert": "post", "v4_symmetric": "v4",
+        "full": "fs", "insert_only_100": "io100",
+    }
+    if args.seed_only:
+        config_name = f"K{args.K}_{args.placement}_seedonly"
+    else:
+        config_name = (
+            f"K{args.K}_{args.placement}_R{args.post_insert_radius}_"
+            f"b-{short[args.insert_base]}_l-{short[args.loss]}_"
+            f"o-{short[args.nu_optimizer]}_d-{short[args.delta_support]}_"
+            f"s-{short[args.schedule]}"
+        )
 
     all_results: List[V5ClipOutput] = []
     for clip_name in args.clips:
@@ -811,6 +924,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         clean_pass_fn = clean_fac(clip_name, x_clean, prompt_mask)
         fwd_builder = fwd_fac(clip_name, x_clean, prompt_mask)
         rng = np.random.default_rng(0)
+        cfg = VADIv5Config(
+            insert_base_mode=args.insert_base,
+            loss_mode=args.loss,
+            optimizer_nu_mode=args.nu_optimizer,
+            schedule_preset=args.schedule,
+            delta_support_mode=args.delta_support,
+            post_insert_radius=args.post_insert_radius,
+        )
         out = run_v5_for_clip(
             clip_name=clip_name, config_name=config_name,
             x_clean=x_clean, prompt_mask=prompt_mask,
@@ -819,7 +940,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             lpips_fn=lpips_fn,
             K_ins=args.K, placement_mode=args.placement,
             post_insert_radius=args.post_insert_radius,
-            rng=rng, out_root=out_root,
+            rng=rng, config=cfg, out_root=out_root,
             sam2_eval_fn=sam2_eval_fn,
             seed_only=args.seed_only,
         )
@@ -953,9 +1074,60 @@ def _self_test() -> None:
     mapped = _post_clean_to_proc([4], [3, 7], 10)
     assert mapped == [5], f"clean 4 → processed {mapped}"
 
+    # -- Ablation axes smoke: make sure each alternative mode imports
+    # cleanly and runs end-to-end with stub adapters. Tiny step counts.
+    ablation_variants = [
+        # A1: duplicate_seed + margin + sign_pgd + off + insert_only_100
+        dict(insert_base_mode="duplicate_seed", loss_mode="margin",
+             optimizer_nu_mode="sign_pgd", delta_support_mode="off",
+             schedule_preset="insert_only_100"),
+        # A2: midframe + dice_bce + sign_pgd + off + insert_only_100
+        dict(insert_base_mode="midframe", loss_mode="dice_bce",
+             optimizer_nu_mode="sign_pgd", delta_support_mode="off",
+             schedule_preset="insert_only_100"),
+        # A3: midframe + margin + adam + off + insert_only_100
+        dict(insert_base_mode="midframe", loss_mode="margin",
+             optimizer_nu_mode="adam", delta_support_mode="off",
+             schedule_preset="insert_only_100"),
+        # B2-ish: duplicate_seed + margin + sign_pgd + v4_symmetric + full
+        dict(insert_base_mode="duplicate_seed", loss_mode="margin",
+             optimizer_nu_mode="sign_pgd", delta_support_mode="v4_symmetric",
+             schedule_preset="full"),
+    ]
+    for i, ax in enumerate(ablation_variants):
+        with tempfile.TemporaryDirectory() as td:
+            cfg_ab = VADIv5Config(
+                N_A_nu=2, N_B_delta=1, N_C_alt=1,
+                lambda_init=1.0, lambda_growth_factor=2.0,
+                lambda_growth_period=2,
+                post_insert_radius=2,
+                **ax,
+            )
+            # insert_only_100 forces N_A=100; override for speed to avoid
+            # a 100-step self-test. We instead stub the preset mapping by
+            # switching back to "full" after constructing; cheap hack.
+            if cfg_ab.schedule_preset == "insert_only_100":
+                cfg_ab.schedule_preset = "full"
+                cfg_ab.N_A_nu, cfg_ab.N_B_delta, cfg_ab.N_C_alt = 3, 0, 0
+            out = run_v5_for_clip(
+                clip_name=f"stubab{i}", config_name=f"ab{i}",
+                x_clean=x_clean, prompt_mask=prompt,
+                clean_pass_fn=stub_clean_pass,
+                forward_fn_builder=stub_forward_builder,
+                lpips_fn=lpips_stub,
+                K_ins=3, placement_mode="top",
+                post_insert_radius=2,
+                config=cfg_ab, out_root=Path(td),
+            )
+            assert isinstance(out, V5ClipOutput), \
+                f"ablation variant {i} produced wrong type"
+            assert len(out.W) == 3
+
     print("scripts.run_vadi_v5: all self-tests PASSED "
           "(build_post_insert_support edge cases, _post_clean_to_proc, "
-          "3-stage PGD end-to-end with stub adapters, decoy-seed construction)")
+          "3-stage PGD end-to-end with stub adapters, decoy-seed construction, "
+          "4 ablation axes {base, loss, optimizer, delta_support} "
+          "import and run cleanly with stubs)")
 
 
 if __name__ == "__main__":
