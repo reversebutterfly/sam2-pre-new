@@ -426,7 +426,12 @@ def remeasure_exported_feasibility(
             exported_clean.append(exported[t])
             clean_i += 1
     exported_clean_stack = torch.stack(exported_clean, dim=0)   # [T_clean, H, W, 3]
-    exported_inserts_stack = torch.stack(exported_inserts, dim=0)
+    # Phantom K=0 mode has zero inserts. Stack needs at least one tensor,
+    # so fall through to an empty [0, H, W, 3] with matching dtype/device.
+    if exported_inserts:
+        exported_inserts_stack = torch.stack(exported_inserts, dim=0)
+    else:
+        exported_inserts_stack = exported.new_zeros((0, *exported.shape[1:]))
 
     for c in range(T_clean):
         if c == 0:
@@ -491,6 +496,7 @@ def run_vadi_for_clip(
     ssim_fn: Callable[[Tensor, Tensor], Tensor],
     vulnerability_mode: str = "top",
     K_ins: int = 1,
+    K_phantom: int = 0,
     min_gap: int = 2,
     rng: Optional[np.random.Generator] = None,
     config: Optional[VADIConfig] = None,
@@ -505,9 +511,32 @@ def run_vadi_for_clip(
     See module docstring for the 9-stage pipeline. `clean_pass_fn` and
     `forward_fn_builder` are injected to decouple the real SAM2 dependencies
     from the orchestration; stubs in `_self_test` exercise the full flow.
+
+    Mode selection (2026-04-24 decisive-round extension):
+      - K_ins > 0, K_phantom == 0 (default): inserts + local δ on their
+        ±2 neighborhoods. Standard VADI.
+      - K_ins == 0, K_phantom > 0: "δ-only" phantom mode — pick K_phantom
+        vulnerability-aware positions in clean-space but do NOT insert;
+        local δ support is built around those phantoms. Used to isolate
+        whether inserts are necessary for the attack effect.
+      - K_ins > 0, K_phantom == 0, config.freeze_delta=True: "insert-only"
+        baseline — ν is optimized on insert content, originals are bit-
+        identical to clean (δ never updates).
+      - (K_ins == 0, K_phantom == 0) is illegal; one of the two must be
+        > 0 so δ or ν has something to attack.
     """
     config = config or VADIConfig()
     rng = rng if rng is not None else np.random.default_rng(config.seed)
+
+    if K_ins == 0 and K_phantom == 0:
+        raise ValueError(
+            "run_vadi_for_clip: K_ins=0 AND K_phantom=0 leaves nothing "
+            "to optimize. Set K_ins≥1 (insert mode) OR K_phantom≥1 "
+            "(phantom δ-only mode).")
+    if K_ins > 0 and K_phantom > 0:
+        raise ValueError(
+            f"run_vadi_for_clip: K_ins={K_ins} AND K_phantom={K_phantom} "
+            "are mutually exclusive modes — pick one.")
 
     # Stage 2: clean-SAM2 pass.
     clean_out = clean_pass_fn(x_clean, prompt_mask)
@@ -519,6 +548,11 @@ def run_vadi_for_clip(
         pseudo_masks=clean_out.pseudo_masks,
         hiera_features=clean_out.hiera_features,
     )
+
+    T_clean = x_clean.shape[0]
+    phantom_mode = (K_ins == 0)
+    K_pick = K_phantom if phantom_mode else K_ins
+
     # `pick` returns CLEAN-space indices. Convert to ATTACKED-space (W) by
     # inserting k at clean-idx c_k → attacked-idx W_k = c_k + k AFTER sort.
     # Callers driving paired baselines (e.g., `run_vadi_pilot.py` matching
@@ -526,19 +560,26 @@ def run_vadi_for_clip(
     # `W_clean_override` directly.
     if W_clean_override is not None:
         W_clean = sorted(int(c) for c in W_clean_override)
-        if len(W_clean) != K_ins:
+        if len(W_clean) != K_pick:
             raise ValueError(
-                f"W_clean_override has {len(W_clean)} entries; K_ins={K_ins}")
-        # Validate: uniqueness, range [1, T_clean-1], min_gap.
-        T_clean = x_clean.shape[0]
-        if len(set(W_clean)) != K_ins:
+                f"W_clean_override has {len(W_clean)} entries; "
+                f"expected K_pick={K_pick} "
+                f"(K_ins={K_ins}, K_phantom={K_phantom})")
+        if len(set(W_clean)) != K_pick:
             raise ValueError(
                 f"W_clean_override has duplicate entries: {W_clean_override}")
+        # Clean-index range depends on mode:
+        #   insert mode (K_ins≥1): c_k ∈ [1, T_clean) because c_k maps to
+        #     base_midframe(c_k-1, c_k).
+        #   phantom mode: c ∈ [0, T_clean) — any clean index can be a
+        #     vulnerability center since there is no midframe constraint.
+        lo = 0 if phantom_mode else 1
         for c in W_clean:
-            if not (1 <= c < T_clean):
+            if not (lo <= c < T_clean):
                 raise ValueError(
-                    f"W_clean_override entry {c} out of [1, {T_clean}) "
-                    f"— clean-space insert points need 1 ≤ c_k < T_clean.")
+                    f"W_clean_override entry {c} out of [{lo}, {T_clean}) "
+                    f"— {'phantom' if phantom_mode else 'insert'}-mode "
+                    f"clean index constraint.")
         for i in range(1, len(W_clean)):
             if W_clean[i] - W_clean[i - 1] < min_gap:
                 raise ValueError(
@@ -546,10 +587,33 @@ def run_vadi_for_clip(
                     f"{W_clean[i - 1]} and {W_clean[i]}")
         placement_source = "override"
     else:
-        W_clean = vs.pick(K=K_ins, mode=vulnerability_mode, min_gap=min_gap,
+        W_clean = vs.pick(K=K_pick, mode=vulnerability_mode, min_gap=min_gap,
                           rng=rng if vulnerability_mode == "random" else None)
+        # HARD assert: the vulnerability scorer may silently return fewer
+        # than K positions on pathological clips (too short / scorer ties
+        # collapsing). For the decisive round's paired comparison we need
+        # matched K across configs, so fail loudly if the pick shrank.
+        if len(W_clean) != K_pick:
+            raise RuntimeError(
+                f"vs.pick returned {len(W_clean)} positions, expected "
+                f"K_pick={K_pick} (K_ins={K_ins}, K_phantom={K_phantom}, "
+                f"mode={vulnerability_mode}, min_gap={min_gap}, "
+                f"T_clean={T_clean}). Decisive paired comparison requires "
+                f"matched K across configs; silent shrinkage would bias "
+                f"the comparison. If this clip is too short for K="
+                f"{K_pick}, skip it from the clip set, do not silently "
+                f"downgrade.")
         placement_source = "scorer"
-    W_attacked = sorted([c + k for k, c in enumerate(sorted(W_clean))])
+
+    if phantom_mode:
+        # No inserts → attacked-space = clean-space. "W_attacked" kept as
+        # an empty list so downstream export / remeasure / eval paths
+        # (all already guarded) take their K=0 branches.
+        W_attacked: List[int] = []
+        W_phantom_clean = sorted(int(c) for c in W_clean)
+    else:
+        W_attacked = sorted([c + k for k, c in enumerate(sorted(W_clean))])
+        W_phantom_clean = []
 
     # Stage 4: decoy offset + per-frame decoy trajectory.
     frame_0_u8 = (x_clean[0].cpu().numpy() * 255.0 + 0.5).clip(0, 255) \
@@ -560,7 +624,8 @@ def run_vadi_for_clip(
     # Stage 5: remap to processed-space. Keep tensors on the same device
     # as x_clean so vadi_loss's masked means don't trip a CPU/CUDA split
     # (pred_logits from forward_fn are on the model device; m_hat and
-    # confidence weight must match).
+    # confidence weight must match). For phantom mode (W_attacked=[]) the
+    # remap is the identity since processed-space == clean-space.
     m_hat_true_by_t = remap_masks_to_processed_space(
         clean_out.pseudo_masks, W_attacked)
     m_hat_decoy_by_t = remap_masks_to_processed_space(
@@ -575,13 +640,36 @@ def run_vadi_for_clip(
         for t, m in m_hat_decoy_by_t.items()
     }
 
-    # Stage 6: VADIInputs.
-    T_proc = x_clean.shape[0] + len(W_attacked)
-    S_delta_proc, neighbor_ids = build_support_sets(
-        W_attacked, T_proc, f0_processed_id=0)
-    # S_δ in attacked-space → clean-space (excluding insert positions).
-    S_delta_clean_list = sorted({attacked_to_clean(a, W_attacked)
-                                 for a in S_delta_proc if a not in W_attacked})
+    # Stage 6: VADIInputs. Two paths:
+    #   insert mode: S_δ built from W_attacked in attacked-space, then
+    #     remapped to clean-space (excluding insert positions).
+    #   phantom mode: S_δ built directly in clean-space from phantom
+    #     centers' ±2 neighborhoods ∪ centers ∪ {f0}. Phantoms play the
+    #     role of "inserts" in the margin loss (full weight); the ±2 ring
+    #     minus centers becomes "neighbor_ids" (0.5× weight).
+    if phantom_mode:
+        T_proc = T_clean
+        nbr_ring: set = set()
+        for c in W_phantom_clean:
+            for d in (-2, -1, 1, 2):
+                nc = c + d
+                if 0 <= nc < T_clean:
+                    nbr_ring.add(nc)
+        centers_set = set(W_phantom_clean)
+        S_delta_clean_list = sorted((nbr_ring | centers_set) | {0})
+        insert_ids_processed = sorted(centers_set)
+        neighbor_ids_list = sorted(nbr_ring - centers_set)
+    else:
+        T_proc = T_clean + len(W_attacked)
+        S_delta_proc, neighbor_ids = build_support_sets(
+            W_attacked, T_proc, f0_processed_id=0)
+        # S_δ in attacked-space → clean-space (excluding insert positions).
+        S_delta_clean_list = sorted({
+            attacked_to_clean(a, W_attacked)
+            for a in S_delta_proc if a not in W_attacked
+        })
+        insert_ids_processed = list(W_attacked)
+        neighbor_ids_list = list(neighbor_ids)
     base_inserts = build_base_inserts(x_clean, W_attacked)
 
     inputs = VADIInputs(
@@ -589,8 +677,8 @@ def run_vadi_for_clip(
         base_inserts=base_inserts,
         W=W_attacked,
         S_delta_clean=S_delta_clean_list,
-        insert_ids_processed=list(W_attacked),
-        neighbor_ids_processed=neighbor_ids,
+        insert_ids_processed=insert_ids_processed,
+        neighbor_ids_processed=neighbor_ids_list,
         m_hat_true_by_t=m_hat_true_by_t_t,
         m_hat_decoy_by_t=m_hat_decoy_by_t_t,
         f0_clean_id=0,
@@ -944,6 +1032,68 @@ def _self_test() -> None:
                     f"W_clean_override={bad} must raise ({expected})")
             except ValueError:
                 pass
+
+    # -- Phantom K=0 δ-only mode (decisive-round baseline) -----------------
+    with tempfile.TemporaryDirectory() as td:
+        result_phantom = run_vadi_for_clip(
+            clip_name="stub3_phantom", config_name="K0_phantom_top",
+            x_clean=x_big, prompt_mask=prompt_np,
+            clean_pass_fn=stub_clean_pass_tv,
+            forward_fn_builder=stub_forward_builder,
+            lpips_fn=lpips_stub, ssim_fn=ssim_stub,
+            vulnerability_mode="top", K_ins=0, K_phantom=3, min_gap=2,
+            config=cfg, out_root=Path(td),
+        )
+        # No inserts in phantom mode.
+        assert result_phantom.W == [], \
+            f"phantom mode must have W=[], got {result_phantom.W}"
+        # A feasible run must still produce an export of length T_clean.
+        if not result_phantom.infeasible:
+            from PIL import Image
+            exp = Path(result_phantom.export_dir)
+            png_n = len(list(exp.glob("frame_*.png")))
+            assert png_n == x_big.shape[0], \
+                f"phantom export frame count {png_n} != T_clean={x_big.shape[0]}"
+
+    # -- Insert-only mode (freeze_delta, δ stays at 0) ---------------------
+    with tempfile.TemporaryDirectory() as td:
+        cfg_insert_only = VADIConfig(
+            N_1=2, N_2=3, N_3=2,
+            lambda_init=1.0, lambda_growth_factor=2.0, lambda_growth_period=2,
+            freeze_delta=True,
+        )
+        result_ins_only = run_vadi_for_clip(
+            clip_name="stub3_insert_only", config_name="K3_insert_only",
+            x_clean=x_big, prompt_mask=prompt_np,
+            clean_pass_fn=stub_clean_pass_tv,
+            forward_fn_builder=stub_forward_builder,
+            lpips_fn=lpips_stub, ssim_fn=ssim_stub,
+            vulnerability_mode="top", K_ins=3, min_gap=2,
+            config=cfg_insert_only, out_root=Path(td),
+        )
+        # 3 inserts placed, δ* must remain all-zero.
+        assert len(result_ins_only.W) == 3
+        # Only proceed if a feasible step exists; otherwise δ_star=None by contract.
+
+    # -- Illegal mode combinations raise --------------------------------------
+    for kw, why in [
+        (dict(K_ins=0, K_phantom=0), "K_ins=0 AND K_phantom=0"),
+        (dict(K_ins=2, K_phantom=2), "K_ins and K_phantom both >0"),
+    ]:
+        try:
+            run_vadi_for_clip(
+                clip_name="x", config_name="x",
+                x_clean=x_big, prompt_mask=prompt_np,
+                clean_pass_fn=stub_clean_pass_tv,
+                forward_fn_builder=stub_forward_builder,
+                lpips_fn=lpips_stub, ssim_fn=ssim_stub,
+                vulnerability_mode="top", min_gap=2,
+                config=cfg, out_root=Path(tempfile.mkdtemp()),
+                **kw,
+            )
+            raise AssertionError(f"{why} must raise ValueError")
+        except ValueError:
+            pass
 
     # -- CLI argparser --------------------------------------------------------
     args = build_argparser().parse_args([

@@ -100,6 +100,15 @@ class VADIConfig:
     # Sanity.
     seed: int = 0
 
+    # Ablation flags for decisive-round baselines (2026-04-24).
+    #   freeze_delta=True, freeze_nu=False  → "insert-only" baseline (ν is
+    #     optimized, originals are bit-identical to clean).
+    #   freeze_nu=True, freeze_delta=False  → "δ-only" ablation with K≥1
+    #     inserts held at base-midframe (rare; usually expressed via K=0
+    #     phantom mode upstream).
+    freeze_delta: bool = False
+    freeze_nu: bool = False
+
 
 # =============================================================================
 # Geometric utilities (frame-index bookkeeping)
@@ -154,8 +163,13 @@ def build_base_inserts(x_clean: Tensor, W: Sequence[int]) -> Tensor:
     base_insert_k = 0.5 · clean[c_k - 1] + 0.5 · clean[c_k],
     where c_k = W_k - k is the clean-frame index at the "right" of the
     gap where insert k will sit. Returns [K, H, W, 3].
+
+    Special-case: W empty (phantom K=0 mode for δ-only baselines) returns
+    an empty [0, H, W, 3] tensor on the same device and dtype as x_clean.
     """
     W_sorted = sorted(int(w) for w in W)
+    if not W_sorted:
+        return x_clean.new_zeros((0, *x_clean.shape[1:]))
     T_clean = x_clean.shape[0]
     bases = []
     for k, w in enumerate(W_sorted):
@@ -481,10 +495,12 @@ def vadi_step(
     _mask_gradient_to_support(state.delta, inputs.S_delta_clean)
 
     with torch.no_grad():
-        if state.delta.grad is not None:
+        if (not config.freeze_delta) and state.delta.grad is not None:
             state.delta.add_(-eta * state.delta.grad.sign())
-        if state.nu.grad is not None:
+        if (not config.freeze_nu) and state.nu.grad is not None:
             state.nu.add_(-eta * state.nu.grad.sign())
+        # Clip still runs unconditionally: safe no-op when δ is frozen
+        # at zero, and cheap insurance in case a bug lets δ drift.
         _clip_delta_two_tier(
             state.delta, inputs.S_delta_clean,
             inputs.f0_clean_id,
