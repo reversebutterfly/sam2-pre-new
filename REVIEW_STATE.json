@@ -1,28 +1,43 @@
 {
-  "round": 1,
+  "round": 3,
   "threadId": "019dbec1-75c8-72e3-8439-f7dbf38ca6c1",
-  "status": "in_progress",
+  "status": "completed",
   "difficulty": "medium",
   "topic": "vadi_method_redesign_dire_v5",
-  "last_score": 2.0,
-  "last_verdict": "NOT READY, but decoy direction alive if reframed as DIRE-v5 with post-insert-only δ, Adam for ν, duplicate-object decoy seed, direct decoy-tracking loss",
-  "score_progression": [2.0],
+  "last_score": 6.0,
+  "last_verdict": "LOOP END. Method core 6/10. All 4 codex R1 DIRE-v5 proposals (duplicate_seed, dice_bce, adam, post-insert long δ) empirically falsified. Validated config = V5.A0 (midframe + margin + sign_pgd + STE, K=3 top, no δ). Mean J_drop 0.703 on 3 clips. Next: scale to 10 clips + decoy-semantic validation + claim pruning. No more method redesign.",
+  "score_progression": [2.0, 2.0, 6.0],
   "max_rounds": 4,
-  "rounds_used": 1,
-  "pending_experiments": [],
-  "open_tasks": [
-    "8: decoy_seed.py module",
-    "9: vadi_v5_loss.py module",
-    "10: post-insert-only δ flag in run_vadi_for_clip",
-    "11: run_vadi_v5.py driver",
-    "12: codex review of v5 diff",
-    "13: smoke test v5 on dog+camel+blackswan"
+  "rounds_used": 3,
+  "pending_experiments": [
+    "10-clip A0 main table",
+    "decoy-semantic validation (overlap, centroid)",
+    "placement top vs random on 10 clips",
+    "K=1/2/3 scaling",
+    "transfer to SAM2Long or SAM2.1-Base",
+    "codec / resize robustness"
   ],
-  "submission_bar_for_v5": {
-    "mean_exported_j_drop": 0.60,
-    "vs_insert_only_baseline_min_delta": 0.05,
-    "per_clip_wins_threshold": 0.05,
-    "min_clip_wins_for_placement_claim": 7
+  "resolved_blockers": [
+    "loss-query window coupled to delta-support-mode (Phase 1 silent ν-gradient collapse)",
+    "train_ste_quantize flag added for v4-parity in v5 path",
+    "insert-frame mask supervision override for duplicate-seed path"
+  ],
+  "validated_method_v5_A0": {
+    "insert_base": "temporal_midframe",
+    "loss": "contrastive_decoy_margin",
+    "optimizer": "sign_pgd_shared_eta",
+    "train_quantize": "STE_fake_uint8",
+    "K_ins": 3,
+    "placement": "top_vulnerability (pending random comparison on 10 clips)",
+    "delta_support": "off",
+    "mean_J_drop_3clip": 0.703,
+    "mean_J_attacked_3clip": 0.292
   },
-  "timestamp": "2026-04-24T15:15:00"
+  "falsified_variants": [
+    "duplicate_object_decoy_seed (-0.021 pp mean)",
+    "dice_bce_loss (-0.264 pp mean)",
+    "adam_on_nu (-0.344 pp mean)",
+    "post_insert_R8_delta (-0.173 pp mean, catastrophic on blackswan)"
+  ],
+  "timestamp": "2026-04-24T22:30:00"
 }

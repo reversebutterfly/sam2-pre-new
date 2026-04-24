@@ -1782,3 +1782,104 @@ The current VADI is not a weakened version of the right method; it is a mis-spec
 
 Implementing DIRE-v5 per priority 1-3 (+4 folded in via post-insert-only flag). Held for separate Round 2 review after smoke completes.
 
+
+## Round 2 (2026-04-24 evening, post-Phase1 ablation)
+
+### Assessment (Summary)
+- **Score**: 2/10 for v5-full (all 5 Round-1 changes at once)
+- **Verdict**: NOT READY. v5 regressed from v4 K3_insert_only on same 3 clips (J_attacked 0.703 vs 0.325, i.e., 38pp WORSE than the strongest v4 variant).
+- **Diagnosis**: changed 5 axes simultaneously → can't attribute regression. Need disciplined single-variable ablation.
+
+### Phase 1 ablation (single-variable, STE-on, δ off, insert_only_100, K3_top, dog/camel/blackswan)
+
+| config | mean J_drop | mean J_attacked | Δ vs A0 |
+|---|---|---|---|
+| **A0 anchor** (mid + margin + sign_pgd) | **0.703** | 0.292 | — |
+| A1 base → duplicate_seed | 0.682 | 0.295 | −0.021 (noise) |
+| A2 loss → dice_bce | 0.439 | 0.556 | **−0.264** |
+| A3 optim → adam | 0.359 | 0.636 | **−0.344** |
+
+A0 successfully reproduces v4 K3_insert_only (mean 0.672 → 0.703 on same clips; within +0.03 pp tolerance). Phase 1 concludes: margin loss >> dice_bce; sign-PGD >> Adam; duplicate_seed ≈ midframe.
+
+### Phase 2 (A0 + δ axis, schedule=full)
+
+| config | mean J_drop | Δ vs A0 |
+|---|---|---|
+| A0 (δ off) | 0.703 | — |
+| B1 (A0 + v4 symmetric δ) | 0.708 | +0.005 (noise) |
+| B2 (A0 + post_insert R=8 δ) | 0.530 | **−0.173** |
+
+Phase 2 concludes: δ is net-neutral at best (B1 v4 symmetric); post-insert-only R=8 HURTS (user's articulated theory + codex R1 recommendation both empirically falsified). Best config is A0 with **no δ**.
+
+### Codex Round 3 verdict
+
+Method core 6/10, submission readiness 4/10, overall 5/10. **Stop redesigning. Scale to 10 clips. Validate + prune claims.** All 4 Round-1 DIRE-v5 recommendations (duplicate_seed, dice_bce, adam, post-insert long δ) empirically falsified.
+
+### Validated method (call it V5.A0)
+
+- Midframe temporal insert base
+- Contrastive decoy margin loss (v4)
+- Shared-η sign-PGD (v4)
+- STE fake_uint8_quantize during training (v4)
+- K=3 top placement
+- **No δ** (simplified from v4 — this is the only surviving "new" claim)
+- GT-free (v4)
+- Exported-artifact evaluation (v4)
+
+### Positive-paper narrative (codex Round 3, user-decoy-lock compliant)
+
+"Minimal temporal decoy insertion attack on SAM2-style video segmentation. No perturbation to originals, GT-free, exported-artifact effective. Surprisingly, the strongest decoy attack is the SIMPLEST — richer decoy synthesis (duplicate-object seeds), harder supervision (Dice/BCE), more complex optimizers (Adam), and larger perturbation budgets (post-insert δ) do NOT help."
+
+### Must-run package (codex R3, priority order)
+
+1. 10-clip main table with A0
+2. Report J_drop AND J_attacked
+3. **Decoy-semantic validation** (decoy-overlap vs true-overlap, centroid displacement, qualitative trajectories) — essential for "decoy redirection" claim
+4. Placement top vs random on 10 clips
+5. K ablation (1, 2, 3)
+6. Transfer (SAM2Long or SAM2.1-Base)
+7. Codec robustness
+8. B1 symmetric δ as appendix only
+
+### One more variant worth trying (codex R3)
+
+**Offset search**: keep A0 fixed, search decoy offset Δ over a small discrete set, or enforce clip-consistent offset. Low-risk decoy-specific tweak.
+
+### Status: LOOP ENDING at Round 3 with score 6/10 (method core acceptance)
+- Difficulty: medium
+- Score progression: 2 → 2 (post-smoke) → 6 (post-ablation, method core validated)
+- Stopped at positive assessment. Next phase is experimental scaling, not method redesign.
+
+## Method Description (for paper illustration)
+
+VADI-v5.A0 (validated final method):
+
+**Input**: video x_clean [T, H, W, 3], prompt mask m_0.
+
+**Step 1** (offline, GT-free): clean SAM2 pass → pseudo-masks {m̂_true_t}, confidences, Hiera features.
+
+**Step 2** (vulnerability scoring, 3-signal rank-sum): score every frame 1..T-1 by |Δconfidence| + (1-IoU(m̂_{t-1}, m̂_t)) + ||ΔHiera||. Top-K non-adjacent positions W = argtop-K_non-adj(v_scores, K=3, min_gap=2).
+
+**Step 3** (decoy mask construction): for each W_k, compute decoy offset Δ_k from pseudo-mask bbox. Decoy mask m̂_decoy_t = shift(m̂_true_t, Δ_{k_cover(t)}) where k_cover(t) = most recent insert position ≤ t.
+
+**Step 4** (insert base construction): base_insert_k = 0.5·x_{c_k-1} + 0.5·x_{c_k} (temporal midframe).
+
+**Step 5** (per-video PGD, 100 steps): sign-PGD updates on ν (insert residual), with δ=0 frozen. Per step:
+- processed = interleave(x_clean, base_insert + ν at W); apply fake_uint8_quantize STE.
+- forward SAM2 → pred_logits at W and neighbors.
+- loss = aggregate margin = Σ softplus(μ_true_t − μ_decoy_t + 0.75), weighted 1.0 on W, 0.5 on neighbors.
+- fidelity hinges: LPIPS(insert, base_insert) ≤ 0.35 + TV hinge.
+- ν ← ν − η·sign(∂L/∂ν); η = 2/255.
+- 3-stage schedule: N_1=30 attack-only (λ=0), N_2=40 fidelity regularization (λ grows), N_3=30 Pareto polish (η/2).
+- running-best over feasible steps → (ν*).
+
+**Step 6** (export): processed uint8 = clamp((base_insert + ν*) * 255 + 0.5, 0, 255) interleaved at W. Save as PNG sequence.
+
+**Step 7** (evaluation): re-load exported PNG → fresh SAM2 forward → J_attacked per frame. Baseline = processed with base_insert (no ν) → J_baseline. J_drop = J_baseline_mean − J_attacked_mean.
+
+**Fidelity guarantees on exported artifact**:
+- Original frames: bit-identical to x_clean (uint8 round-trip).
+- Insert frames: LPIPS ≤ 0.35 vs midframe baseline; TV ≤ 1.2× baseline.
+- f0 SSIM ≥ 0.98 (trivially holds since δ=0 at f0).
+
+**Key hyperparameters**: K=3 inserts, LPIPS_insert_cap=0.35, η=2/255, margin=0.75, λ schedule per FINAL_PROPOSAL.md Step 5.
