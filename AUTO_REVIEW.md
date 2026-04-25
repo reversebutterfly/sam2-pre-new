@@ -1916,3 +1916,48 @@ From Phase 2 δ ablations:
 
 Both B1/B2 failed. User's hypothesis: **the failure modes (B2 stage-B δ corrupts ν-optimized memory; B1 neutrally weak) are implementation-specific, not fundamental. A well-designed δ scheme should close the "direction-right but mask-off" gap we observe on degraded clips.**
 
+
+## Loop 3 Round 1 — Phase E documentation (2026-04-25)
+
+### Assessment (Summary, Codex Round 1 Phase A→B verdict)
+
+- **V5.A0 score**: 6/10 ("threat model clean, honest eval, simple; redirect 0.22 not strong")
+- **5 δ designs proposed**, ranked: boundary-bridge #1 (+0.05~0.09 lift), Hiera feature-steering #2, motion-template #3, low-rank #4, deterministic photometric #5
+- **Codex pre-committed acceptance criterion**: "+0.05 mean J_drop AND ≥2 redirect-flipped clips → keep δ; else cut δ permanently"
+
+### Phase C — boundary-bridge δ implementation (~1300 lines, codex-reviewed pre-commit)
+
+3 files: `memshield/boundary_bands.py`, `memshield/vadi_boundary_loss.py`, `scripts/run_vadi_v5.py` extension. 5 codex pre-commit fixes (best-state PRE-update snapshot, strict ε=4/255 hard clamp, split γ_insert=0.1/γ_post=0.3, explicit None on a0_j_drop, recompute best_surrogate on accept). Self-tests pass on Pro 6000.
+
+### Phase D — 10-clip experiment
+
+Per-clip (A0_self vs polish-only, off-switch enabled):
+
+| clip | A0_self | Polish | Δ | status |
+|---|---|---|---|---|
+| dog | 0.402 | 0.402 | +0.000 | APPLY |
+| cows | 0.453 | 0.448 | −0.005 | REVERT |
+| bmx-trees | 0.642 | 0.496 | **−0.146** | REVERT |
+| blackswan | 0.721 | 0.726 | +0.005 | APPLY |
+| camel | 0.981 | 0.982 | +0.001 | APPLY |
+| motocross-jump | 0.599 | 0.599 | +0.000 | APPLY |
+| car-roundabout | 0.031 | — | — | SKIP |
+| dance-twirl | 0.782 | 0.384 | **−0.398** | REVERT |
+| drift-straight | 0.042 | — | — | SKIP |
+| soapbox | 0.424 | 0.423 | −0.001 | REVERT |
+
+- **Mean A0→Final lift: +0.0006 pp** (off-switch absorbed all variation)
+- **Mean polish-only delta on applied clips: +0.0015 pp** (noise level)
+- **Off-switch saved bmx-trees (−0.15) and dance-twirl (−0.40)** from polish-induced collapse
+- **0/10 clips flipped to redirect-dominated** (codex bar: ≥2)
+
+### Codex Round 1 verdict applied
+
+Per pre-committed criterion: **+0.0006 ≪ +0.05 AND 0 ≪ 2 → cut δ permanently**. Boundary-bridge design empirically falsified.
+
+### Status
+
+- Round 1 closed with negative result (consistent with codex's prior "generic PGD-on-originals is dead" position)
+- User over-rides codex verdict for the 3rd time: "design STRONGER perturbation, maintain high fidelity" (auto-review-loop Round 2 directive 2026-04-25)
+- A0 (no δ) remains the empirically-validated method at mean J_drop ~0.48-0.51 across 10 clips
+

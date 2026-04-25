@@ -1,15 +1,24 @@
 {
-  "round": 0,
-  "threadId": null,
+  "round": 2,
+  "threadId": "019dbfe0-d348-7c72-8e46-ba1139e00347",
   "status": "in_progress",
   "difficulty": "medium",
-  "topic": "delta_redesign_original_frame_perturbation",
-  "last_score": null,
-  "last_verdict": null,
-  "score_progression": [],
+  "topic": "delta_redesign_stronger_perturbation_high_fidelity",
+  "last_score": 6.0,
+  "last_verdict": "Round 1: boundary-bridge δ failed (+0.0006 ≪ +0.05 bar); user overrides 'cut δ' verdict 3rd time, requests stronger perturbation maintaining high fidelity",
+  "score_progression": [6.0],
   "max_rounds": 4,
-  "rounds_used": 0,
+  "rounds_used": 1,
   "pending_experiments": [],
-  "user_directive": "2026-04-24 evening: user rejects the 'drop δ' conclusion from prior ablation. Per user, previous δ schemes (v4 symmetric ±2+f0; post-insert R=8) failed because of poor design, not because δ is fundamentally incompatible. Design fresh δ schemes. Ignore implementation cost.",
-  "timestamp": "2026-04-24T23:15:00"
+  "user_directive": "2026-04-25: design stronger perturbation while maintaining high fidelity (LPIPS ≤ 0.20, SSIM ≥ 0.98). Boundary-bridge δ within ε=4/255 ℓ∞ failed (+0.0006); explore stronger budget structures (spatially non-uniform ε / perceptually-shaped ε / frequency-domain / Hiera feature-steering) without sacrificing global fidelity.",
+  "rejected_designs": [
+    "v4_symmetric δ ±2+f0 (Phase 2 B1 mean +0.005, neutral)",
+    "post_insert_R8 δ (Phase 2 B2 mean -0.173, hurt blackswan -0.43)",
+    "duplicate_seed insert base (ablation A1 -0.021, noise)",
+    "Dice/BCE direct decoy loss (ablation A2 -0.264)",
+    "Adam optimizer for ν (ablation A3 -0.344)",
+    "boundary-bridge δ with ε=4/255 (Loop 3 R1 +0.0006)"
+  ],
+  "validated_method": "V5.A0: midframe + margin + sign_pgd + STE + δ off, K=3 top, mean J_drop 0.48-0.51",
+  "timestamp": "2026-04-25T00:00:00"
 }

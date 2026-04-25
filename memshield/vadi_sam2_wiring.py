@@ -553,6 +553,113 @@ class VADIForwardFn:
                 f"VADIForwardFn: failed to fill return_at slots {sorted(missing)}")
         return out
 
+    def forward_with_hiera(
+        self,
+        processed: Tensor,
+        return_at: Iterable[int],
+        hiera_at: Iterable[int],
+        *,
+        fpn_level: int = -1,
+    ) -> Tuple[Dict[int, Tensor], Dict[int, Tensor]]:
+        """Same as `__call__` but also returns per-frame Hiera tokens for
+        ids in `hiera_at`. Used by Hiera feature-steering δ stage
+        (codex Loop 3 R2 design #1, 2026-04-25).
+
+        The Hiera tokens are extracted from `backbone_out["backbone_fpn"]
+        [fpn_level]` (default -1 = deepest level, same as the
+        vulnerability scorer's source). They carry gradient w.r.t.
+        `processed[fid]` for any fid in `hiera_at`.
+
+        Note: gradient checkpointing remains active. The returned Hiera
+        tokens are a *forward output* of the checkpointed function and
+        thus available for gradient-tracked downstream losses without
+        breaking the checkpoint contract.
+
+        Returns:
+            (logits_by_t, hiera_by_t) — both dicts of `int → Tensor`
+            with grad through `processed`.
+        """
+        if processed.dim() != 4 or processed.shape[-1] != 3:
+            raise ValueError(
+                f"processed must be [T, H, W, 3]; got "
+                f"{tuple(processed.shape)}")
+        if int(processed.shape[1]) != self.video_H \
+                or int(processed.shape[2]) != self.video_W:
+            raise ValueError(
+                f"processed spatial shape mismatch")
+        T_proc = int(processed.shape[0])
+        return_set = {int(t) for t in return_at}
+        hiera_set = {int(t) for t in hiera_at}
+        bad = [t for t in (return_set | hiera_set) if not (0 <= t < T_proc)]
+        if bad:
+            raise ValueError(
+                f"return_at|hiera_at ids out of [0, {T_proc}): {sorted(bad)}")
+
+        obj_output_dict: Dict[str, Dict[int, Dict]] = {
+            "cond_frame_outputs": {},
+            "non_cond_frame_outputs": {},
+        }
+        out_logits: Dict[int, Tensor] = {}
+        out_hiera: Dict[int, Tensor] = {}
+
+        if self.autocast_dtype is not None and self.device.type == "cuda":
+            autocast_ctx = torch.amp.autocast(
+                device_type="cuda", dtype=self.autocast_dtype)
+        else:
+            from contextlib import nullcontext
+            autocast_ctx = nullcontext()
+
+        with autocast_ctx:
+            for fid in range(T_proc):
+                frame = processed[fid:fid + 1]
+                img_norm = _to_sam2_input(
+                    frame, self.image_size, self._img_mean, self._img_std,
+                )
+                if self.use_gradient_checkpointing and img_norm.requires_grad:
+                    from torch.utils.checkpoint import checkpoint as _ckpt
+                    backbone_out = _ckpt(
+                        self.predictor.forward_image, img_norm,
+                        use_reentrant=False,
+                    )
+                else:
+                    backbone_out = self.predictor.forward_image(img_norm)
+                _, vision_feats, vision_pos, feat_sizes = \
+                    self.predictor._prepare_backbone_features(backbone_out)
+
+                is_init = (fid == 0)
+                current_out = self.predictor.track_step(
+                    frame_idx=fid, is_init_cond_frame=is_init,
+                    current_vision_feats=vision_feats,
+                    current_vision_pos_embeds=vision_pos,
+                    feat_sizes=feat_sizes,
+                    point_inputs=None,
+                    mask_inputs=self._mask_inputs_f0 if is_init else None,
+                    output_dict=obj_output_dict,
+                    num_frames=T_proc, track_in_reverse=False,
+                    run_mem_encoder=True, prev_sam_mask_logits=None,
+                )
+                if is_init:
+                    obj_output_dict["cond_frame_outputs"][fid] = current_out
+                else:
+                    obj_output_dict["non_cond_frame_outputs"][fid] = current_out
+
+                if fid in return_set:
+                    pred_vid = _low_res_to_video_res(
+                        current_out["pred_masks"],
+                        self.video_H, self.video_W)
+                    out_logits[fid] = pred_vid.float()
+                if fid in hiera_set:
+                    out_hiera[fid] = backbone_out["backbone_fpn"][
+                        int(fpn_level)].float()
+
+        missing_l = return_set - set(out_logits.keys())
+        missing_h = hiera_set - set(out_hiera.keys())
+        if missing_l or missing_h:
+            raise RuntimeError(
+                f"forward_with_hiera: missing logits {sorted(missing_l)} / "
+                f"hiera {sorted(missing_h)}")
+        return out_logits, out_hiera
+
 
 # ---------------------------------------------------------------------------
 # High-level factory for build_pilot_adapters / build_restoration_adapters
