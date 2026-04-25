@@ -996,11 +996,13 @@ def _run_hiera_steering_pgd(
     K = len(W_attacked)
 
     delta = torch.zeros_like(x_clean, device=device, requires_grad=True)
-    nu = nu_init.detach().clone().to(device)
-    nu.requires_grad_(True)
-    nu_opt = torch.optim.Adam(
-        [nu], lr=config.eta_nu_lr * config.hiera_steering_nu_lr_scale,
-    )
+    # Codex Loop3-R3 fix (2026-04-25): freeze ν during Hiera polish.
+    # `hiera_at` excludes insert positions (R4 fix earlier), so L_hiera has
+    # no ν gradient path; the only ν path is L_margin on insert frames,
+    # which warm-started from A0 ν* is already optimized. Leaving ν trainable
+    # let polish push ν off A0's TV-feasible operating point. Frozen ν also
+    # removes the per-insert TV blowup we saw in the v0 pilot.
+    nu = nu_init.detach().clone().to(device)  # NO requires_grad → frozen
 
     # Polish-clean indices for δ LPIPS hinge (clean-space, exclude inserts).
     W_set = set(int(w) for w in W_attacked)
@@ -1008,6 +1010,20 @@ def _run_hiera_steering_pgd(
         _attacked_to_clean_same_space(int(t), W_attacked)
         for t in polish_frame_ids if int(t) not in W_set
     })
+
+    # Codex Loop3-R3 fix (2026-04-25): δ support mask. Without this,
+    # gradient through SAM2's causal memory chain backprops from polish
+    # frames all the way back to f0 → δ[0].grad ≠ 0 → sign-PGD saturates
+    # δ[0] to ε → f0 SSIM drops below 0.98 floor → off-switch revert.
+    # Mask is True only on clean-space indices that map to polish-frame
+    # post-insert positions (= polish_clean). f0 (idx 0) is naturally
+    # excluded since polish_frame_ids excludes pre-insert frames.
+    support_mask = torch.zeros(
+        (T_clean, 1, 1, 1), dtype=delta.dtype, device=device,
+    )
+    for c in polish_clean:
+        if 0 <= c < T_clean:
+            support_mask[c] = 1.0
 
     # Build hiera_at = polish_frame_ids that are POST-INSERT (k_cover ≥ 0
     # AND t is NOT itself an insert position). Codex R4 fix (2026-04-25):
@@ -1118,6 +1134,15 @@ def _run_hiera_steering_pgd(
                 best = (delta.detach().cpu().clone(),
                         nu.detach().cpu().clone(), score)
 
+        # Codex Loop3-R3 invariant tripwire: δ should be exactly 0 at
+        # frames OUTSIDE polish_clean. Log max |δ| there to catch any
+        # future regression of the support-masking logic. Expected: 0.0.
+        with torch.no_grad():
+            outside_mask = (1.0 - support_mask)
+            delta_outside_linf = float(
+                (delta.detach() * outside_mask).abs().max().item()
+            ) if outside_mask.any() else 0.0
+
         log = {
             "step": step + 1, "stage": "hiera_steering",
             "L": float(L.detach().item()),
@@ -1128,25 +1153,28 @@ def _run_hiera_steering_pgd(
             "L_fid_TV": float(L_fid_TV.detach().item()),
             "n_polish_frames": len(polish_frame_ids),
             "feasible": feas,
+            "delta_outside_support_linf": delta_outside_linf,
         }
         step_logs.append(log)
 
         if delta.grad is not None:
             delta.grad.zero_()
-        nu_opt.zero_grad()
+        # ν is frozen — no Adam optimizer to zero_grad.
         L.backward()
 
-        # δ update: sign-PGD, full-frame, strict ε clamp.
+        # δ update: support-masked sign-PGD, strict ε clamp.
+        # Codex Loop3-R3 fix: gate δ.grad to support BEFORE sign() so
+        # off-support frames cannot accumulate updates via memory backprop.
+        # Belt-and-suspenders: also project δ to support after the step.
         with torch.no_grad():
             if delta.grad is not None:
+                delta.grad.mul_(support_mask)
                 delta.add_(-config.hiera_steering_eta_step * delta.grad.sign())
+                delta.mul_(support_mask)         # off-support → 0
                 delta.clamp_(
                     -config.hiera_steering_eps_delta,
                     +config.hiera_steering_eps_delta)
-
-        nu_opt.step()
-        with torch.no_grad():
-            nu.clamp_(-config.eps_nu, config.eps_nu)
+        # ν is frozen — skip Adam step + clamp.
 
         if (not feas) and (step + 1) % config.lambda_growth_period == 0:
             lambda_val *= config.lambda_growth_factor
@@ -1549,151 +1577,203 @@ def run_v5_for_clip(
     # --- Stage 11 (alternative to Stage 10): Hiera feature-steering polish
     # Codex Loop 3 R2 design #1, 2026-04-25. Mutually exclusive with
     # boundary_polish in v0; if both flags are set, hiera takes precedence.
-    if (config.hiera_steering
-            and not result.infeasible
-            and not polish_applied
-            and sam2_eval_fn is not None
-            and result.nu_star is not None):
+    # Codex Loop3-R3 fix (2026-04-25): require ssim_fn for any Hiera polish
+    # run. Without it, the preflight + exported-fidelity gates become no-ops
+    # and acceptance degrades to J-drop only — fine for debugging but unsafe
+    # for a decision run. Record skip reason if ssim_fn missing.
+    _hiera_eligible = (
+        config.hiera_steering
+        and not result.infeasible
+        and not polish_applied
+        and sam2_eval_fn is not None
+        and result.nu_star is not None
+    )
+    if _hiera_eligible and ssim_fn is None:
+        polish_stats["skipped"] = (
+            "hiera_polish_requires_ssim_fn_for_fidelity_gate")
+    if _hiera_eligible and ssim_fn is not None:
         from memshield.hiera_features import (
             build_decoy_teacher_frames,
             extract_hiera_teacher_tokens,
             build_polish_to_insert_k_map,
         )
-        # Step 1: build per-insert teacher frames + Hiera tokens (no_grad,
-        # one-time setup). Codex R3 critical fix (2026-04-25): pass the
-        # actual recorded `decoy_offsets` so teacher frames are spatially
-        # aligned with v5 driver's decoy-mask construction.
-        # Note: `decoy_offsets` is sorted by W_clean_positions order; we
-        # need it in the same order as sorted(W_clean) (which sorts by
-        # clean-space c_k, identical to original since W_clean is already
-        # sorted before c_k → W_attacked mapping).
-        W_clean_sorted = sorted(W_clean)
-        offsets_for_sorted_W = [
-            decoy_offsets[i] for i, _ in
-            sorted(enumerate(W_clean), key=lambda kv: int(kv[1]))
-        ]
-        teachers, _teacher_offsets = build_decoy_teacher_frames(
-            x_clean, clean_out.pseudo_masks, W_clean_sorted,
-            decoy_offsets=offsets_for_sorted_W,
-            feather_radius=config.feather_radius,
-            feather_sigma=config.feather_sigma,
-        )
-        teachers = teachers.to(x_clean.device)
-        # Codex R4 low fix (2026-04-25): pass through SAM2 preprocessing
-        # constants from forward_fn so teacher extraction stays in lockstep
-        # with the differentiable forward. Avoids latent parity bug if SAM2
-        # config (image_size / mean / std / autocast) ever differs from
-        # tiny defaults.
-        teacher_hiera = extract_hiera_teacher_tokens(
-            forward_fn.predictor, teachers,
-            image_size=int(forward_fn.image_size),
-            img_mean=tuple(forward_fn._img_mean.flatten().tolist())
-                if hasattr(forward_fn, "_img_mean")
-                else (0.485, 0.456, 0.406),
-            img_std=tuple(forward_fn._img_std.flatten().tolist())
-                if hasattr(forward_fn, "_img_std")
-                else (0.229, 0.224, 0.225),
-            autocast_dtype=getattr(forward_fn, "autocast_dtype",
-                                   torch.bfloat16),
-        )
-        # Step 2: select polish frames + map to insert k.
-        hiera_polish_frames = _select_hiera_polish_frames(
-            W_attacked, T_proc,
-            polish_window=config.hiera_steering_polish_window,
-        )
-        polish_to_k = build_polish_to_insert_k_map(
-            hiera_polish_frames, W_attacked,
-        )
-        polish_stats["hiera_polish_frames"] = hiera_polish_frames
-        polish_stats["n_polish_frames"] = len(hiera_polish_frames)
-        # Step 3: run polish PGD warm-started from A0 ν*.
-        nu_a0 = result.nu_star.to(x_clean.device)
-        delta_h, nu_h, hiera_logs = _run_hiera_steering_pgd(
-            x_clean=x_clean, decoy_seeds=decoy_seeds,
-            nu_init=nu_a0, W_attacked=W_attacked,
-            polish_frame_ids=hiera_polish_frames,
-            teacher_hiera_tokens=teacher_hiera,
-            polish_to_insert_k=polish_to_k,
-            forward_fn=forward_fn, lpips_fn=lpips_fn,
-            m_decoy_by_t=m_decoy_by_t, m_true_by_t=m_true_by_t,
-            config=config,
-        )
-        polish_logs = hiera_logs
-        if delta_h is None or nu_h is None:
-            polish_stats["skipped"] = "hiera_polish_infeasible_no_best_step"
-        else:
-            polish_dir = out_root / clip_name / f"{config_name}__hiera" \
-                / "processed"
-            export_processed_uint8(
-                x_clean, delta_h.to(x_clean.device),
-                nu_h.to(x_clean.device), decoy_seeds,
-                W_attacked, polish_dir,
-            )
-            exported_polish = load_processed_uint8(
-                polish_dir).to(x_clean.device)
-            polish_eval = eval_exported_j_drop(
-                sam2_eval_fn=sam2_eval_fn,
-                prompt_mask=prompt_mask,
-                x_clean=x_clean,
-                base_inserts=decoy_seeds,
-                exported=exported_polish,
-                W=W_attacked,
-                m_hat_true_by_t=m_true_by_t,
-                m_hat_decoy_by_t=m_decoy_by_t,
-                decoy_offsets=decoy_offsets,
-            )
-            hiera_j_drop = float(polish_eval["J_drop_mean"])
-            a0_j_drop = (exported_j_drop_val
-                         if exported_j_drop_val is not None else 0.0)
-            delta_j = hiera_j_drop - a0_j_drop
-            polish_stats["a0_j_drop"] = a0_j_drop
-            polish_stats["hiera_j_drop"] = hiera_j_drop
-            polish_stats["delta_j_drop"] = delta_j
-            # Codex R3 medium-fix (2026-04-25): re-check exported fidelity
-            # on the polish artifact too. Reject if LPIPS/TV/SSIM hinges
-            # are violated on the uint8 export, even if J_drop improved.
-            # Skips quietly if ssim_fn is not available (caller didn't
-            # supply it — degrades to J_drop-only acceptance).
-            polish_export_feasible = True
-            if ssim_fn is not None:
-                polish_remeasure = remeasure_exported_feasibility(
-                    x_clean, decoy_seeds, exported_polish, W_attacked,
-                    lpips_fn, ssim_fn, config,
+        # Build clean-source per-insert references shared by preflight + remeasure.
+        # Codex Loop3-R3 fix: invariant `0 <= w - k < T_clean` should always
+        # hold under v5 placement rules; assert instead of clamp so an
+        # upstream bug surfaces loudly.
+        W_sorted_int = sorted(int(w) for w in W_attacked)
+        for k_, w_ in enumerate(W_sorted_int):
+            c_k_ = w_ - k_
+            if not (0 <= c_k_ < x_clean.shape[0]):
+                # Codex Loop3-R3 fix (2026-04-25): explicit RuntimeError so
+                # the check survives `python -O` (assert is stripped).
+                raise RuntimeError(
+                    f"Hiera polish: invalid c_k={c_k_} for W_sorted[{k_}]={w_} "
+                    f"(T_clean={x_clean.shape[0]}) — invariant w-k in [0, T_clean) violated"
                 )
-                polish_export_feasible = bool(
-                    polish_remeasure.get("step_feasible_on_export", False))
-                polish_stats["exported_feasibility"] = polish_remeasure
-            polish_stats["polish_export_feasible"] = polish_export_feasible
-            accept = (
-                polish_export_feasible
-                and (
-                    (not config.hiera_steering_off_switch)
-                    or (delta_j >= config.hiera_steering_min_improvement)
-                )
+        clean_refs_for_inserts = torch.stack([
+            x_clean[w_ - k_] for k_, w_ in enumerate(W_sorted_int)
+        ], dim=0).to(x_clean.device)
+
+        # Codex Loop3-R3 preflight (2026-04-25): with frozen ν, polish cannot
+        # change insert TV/LPIPS at all. If A0's exported insert fidelity is
+        # already infeasible against the clean-source reference, every polish
+        # step is doomed regardless of δ work. Skip and record reason.
+        polish_preflight_ok = True
+        if ssim_fn is not None:
+            a0_clean_ref_remeasure = remeasure_exported_feasibility(
+                x_clean, clean_refs_for_inserts, exported, W_attacked,
+                lpips_fn, ssim_fn, config,
             )
-            polish_stats["accepted"] = accept
-            if accept:
-                polish_applied = True
-                export_dir = polish_dir
-                exported_j_drop_val = hiera_j_drop
-                exported_j_drop_details = polish_eval
-                best_surrogate = float("nan")
-                if hiera_logs:
-                    feas_logs = [lg for lg in hiera_logs
-                                 if lg.get("feasible")]
-                    if feas_logs:
-                        # Codex R3 high-fix: weighted objective parity.
-                        w = config.hiera_steering_loss_weight
-                        best_surrogate = min(
-                            lg["L_margin"] + w * lg["L_hiera"]
-                            for lg in feas_logs)
-                result = V5Result(
-                    delta_star=delta_h, nu_star=nu_h,
-                    best_surrogate_loss=best_surrogate,
-                    infeasible=False, step_logs=result.step_logs,
-                )
+            polish_stats["a0_clean_ref_feasibility"] = a0_clean_ref_remeasure
+            polish_preflight_ok = bool(
+                a0_clean_ref_remeasure.get("step_feasible_on_export", False))
+
+        if polish_preflight_ok:
+            # Step 1: build per-insert teacher frames + Hiera tokens (no_grad,
+            # one-time setup). Codex R3 critical fix (2026-04-25): pass the
+            # actual recorded `decoy_offsets` so teacher frames are spatially
+            # aligned with v5 driver's decoy-mask construction.
+            # Note: `decoy_offsets` is sorted by W_clean_positions order; we
+            # need it in the same order as sorted(W_clean) (which sorts by
+            # clean-space c_k, identical to original since W_clean is already
+            # sorted before c_k → W_attacked mapping).
+            W_clean_sorted = sorted(W_clean)
+            offsets_for_sorted_W = [
+                decoy_offsets[i] for i, _ in
+                sorted(enumerate(W_clean), key=lambda kv: int(kv[1]))
+            ]
+            teachers, _teacher_offsets = build_decoy_teacher_frames(
+                x_clean, clean_out.pseudo_masks, W_clean_sorted,
+                decoy_offsets=offsets_for_sorted_W,
+                feather_radius=config.feather_radius,
+                feather_sigma=config.feather_sigma,
+            )
+            teachers = teachers.to(x_clean.device)
+            # Codex R4 low fix (2026-04-25): pass through SAM2 preprocessing
+            # constants from forward_fn so teacher extraction stays in lockstep
+            # with the differentiable forward. Avoids latent parity bug if SAM2
+            # config (image_size / mean / std / autocast) ever differs from
+            # tiny defaults.
+            teacher_hiera = extract_hiera_teacher_tokens(
+                forward_fn.predictor, teachers,
+                image_size=int(forward_fn.image_size),
+                img_mean=tuple(forward_fn._img_mean.flatten().tolist())
+                    if hasattr(forward_fn, "_img_mean")
+                    else (0.485, 0.456, 0.406),
+                img_std=tuple(forward_fn._img_std.flatten().tolist())
+                    if hasattr(forward_fn, "_img_std")
+                    else (0.229, 0.224, 0.225),
+                autocast_dtype=getattr(forward_fn, "autocast_dtype",
+                                       torch.bfloat16),
+            )
+            # Step 2: select polish frames + map to insert k.
+            hiera_polish_frames = _select_hiera_polish_frames(
+                W_attacked, T_proc,
+                polish_window=config.hiera_steering_polish_window,
+            )
+            polish_to_k = build_polish_to_insert_k_map(
+                hiera_polish_frames, W_attacked,
+            )
+            polish_stats["hiera_polish_frames"] = hiera_polish_frames
+            polish_stats["n_polish_frames"] = len(hiera_polish_frames)
+            # Step 3: run polish PGD warm-started from A0 ν*.
+            nu_a0 = result.nu_star.to(x_clean.device)
+            delta_h, nu_h, hiera_logs = _run_hiera_steering_pgd(
+                x_clean=x_clean, decoy_seeds=decoy_seeds,
+                nu_init=nu_a0, W_attacked=W_attacked,
+                polish_frame_ids=hiera_polish_frames,
+                teacher_hiera_tokens=teacher_hiera,
+                polish_to_insert_k=polish_to_k,
+                forward_fn=forward_fn, lpips_fn=lpips_fn,
+                m_decoy_by_t=m_decoy_by_t, m_true_by_t=m_true_by_t,
+                config=config,
+            )
+            polish_logs = hiera_logs
+            if delta_h is None or nu_h is None:
+                polish_stats["skipped"] = "hiera_polish_infeasible_no_best_step"
             else:
-                polish_reverted = True
+                polish_dir = out_root / clip_name / f"{config_name}__hiera" \
+                    / "processed"
+                export_processed_uint8(
+                    x_clean, delta_h.to(x_clean.device),
+                    nu_h.to(x_clean.device), decoy_seeds,
+                    W_attacked, polish_dir,
+                )
+                exported_polish = load_processed_uint8(
+                    polish_dir).to(x_clean.device)
+                polish_eval = eval_exported_j_drop(
+                    sam2_eval_fn=sam2_eval_fn,
+                    prompt_mask=prompt_mask,
+                    x_clean=x_clean,
+                    base_inserts=decoy_seeds,
+                    exported=exported_polish,
+                    W=W_attacked,
+                    m_hat_true_by_t=m_true_by_t,
+                    m_hat_decoy_by_t=m_decoy_by_t,
+                    decoy_offsets=decoy_offsets,
+                )
+                hiera_j_drop = float(polish_eval["J_drop_mean"])
+                a0_j_drop = (exported_j_drop_val
+                             if exported_j_drop_val is not None else 0.0)
+                delta_j = hiera_j_drop - a0_j_drop
+                polish_stats["a0_j_drop"] = a0_j_drop
+                polish_stats["hiera_j_drop"] = hiera_j_drop
+                polish_stats["delta_j_drop"] = delta_j
+                # Codex R3 medium-fix (2026-04-25): re-check exported fidelity
+                # on the polish artifact too. Reject if LPIPS/TV/SSIM hinges
+                # are violated on the uint8 export, even if J_drop improved.
+                # Skips quietly if ssim_fn is not available (caller didn't
+                # supply it — degrades to J_drop-only acceptance).
+                polish_export_feasible = True
+                if ssim_fn is not None:
+                    # Codex Loop3-R3 fix (2026-04-25): use the SAME clean-source
+                    # reference tensor built earlier for the preflight check.
+                    # Both the polish PGD opt-time L_fid_TV and this remeasure
+                    # now use x_clean[w-k] as the per-insert reference (was the
+                    # apples-to-oranges decoy_seeds mismatch causing the v0
+                    # 8k-26k TV blowup).
+                    polish_remeasure = remeasure_exported_feasibility(
+                        x_clean, clean_refs_for_inserts, exported_polish,
+                        W_attacked, lpips_fn, ssim_fn, config,
+                    )
+                    polish_export_feasible = bool(
+                        polish_remeasure.get("step_feasible_on_export", False))
+                    polish_stats["exported_feasibility"] = polish_remeasure
+                polish_stats["polish_export_feasible"] = polish_export_feasible
+                accept = (
+                    polish_export_feasible
+                    and (
+                        (not config.hiera_steering_off_switch)
+                        or (delta_j >= config.hiera_steering_min_improvement)
+                    )
+                )
+                polish_stats["accepted"] = accept
+                if accept:
+                    polish_applied = True
+                    export_dir = polish_dir
+                    exported_j_drop_val = hiera_j_drop
+                    exported_j_drop_details = polish_eval
+                    best_surrogate = float("nan")
+                    if hiera_logs:
+                        feas_logs = [lg for lg in hiera_logs
+                                     if lg.get("feasible")]
+                        if feas_logs:
+                            # Codex R3 high-fix: weighted objective parity.
+                            w = config.hiera_steering_loss_weight
+                            best_surrogate = min(
+                                lg["L_margin"] + w * lg["L_hiera"]
+                                for lg in feas_logs)
+                    result = V5Result(
+                        delta_star=delta_h, nu_star=nu_h,
+                        best_surrogate_loss=best_surrogate,
+                        infeasible=False, step_logs=result.step_logs,
+                    )
+                else:
+                    polish_reverted = True
+        else:
+            polish_stats["skipped"] = (
+                "a0_clean_ref_infeasible_polish_cannot_recover_with_frozen_nu")
 
     summary_logs: List[Dict[str, Any]] = [asdict(log) for log in result.step_logs]
     if polish_logs:
