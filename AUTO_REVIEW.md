@@ -2150,3 +2150,98 @@ Medium/low fix list deferred (cleanup race for parallel use, --oracle-traj-bridg
 - Bundle B sub-session 4 = PENDING (semantic_compositor.py + masked residual).
 - Bundle B sub-session 5 = BLOCKED on profile completion (3-clip pilot Stage 14 + Bundle B + profiled placement).
 
+
+
+## Loop 3 Round 5 sub-session 3 — Phase E documentation (2026-04-25)
+
+### Sub-session 3 Topic
+Bundle B opener: replace the per-bridge-frame compositor proxy
+(`build_duplicate_object_decoy_frame`) with a no-proxy semantic compositor.
+Originally scoped as "inpainting model integration (LaMa or SD)" per HANDOFF;
+gpt-5.4 xhigh research-review pivoted the choice to **silhouette alpha-feather
+paste with halo fix, no inpainter**.
+
+### User intervention 1 (research-review trigger)
+After gpt-5.2 design consult thread `019dc511-5154-7a82-9083-525ffb078442`
+recommended Option B alpha-feather (vs LaMa Option C), user invoked
+`/research-review` asking "wouldn't choosing SD be better?" — escalation to
+gpt-5.4 xhigh.
+
+### gpt-5.4 xhigh verdict (research-review thread `019dc51a-c71a-7971-bece-116a592de2f5`)
+**SD is dead weight under current Stage 14 math.** Decisive argument:
+`apply_continuation_overlay` is `out = (1 - α·soft_decoy)·x_warped + (α·soft_decoy)·duplicate`
+with `α_max = 0.35`. The duplicate's pixels at the **true-object region** are
+dropped by `(1-α·soft_decoy) ≈ 1` (where soft_decoy ≈ 0). Inpainting only
+changes pixels in that dropped region. Therefore B (alpha-feather, no model)
+≡ C (LaMa) ≡ D (SD) pixel-for-pixel at SAM2's input in the disjoint-region
+regime — which is the typical case under Round 5 vulnerability-aware top-K
+placement.
+
+Quantitative prior: `E[ΔJ_SD - ΔJ_B] ≈ 0`, [-0.005, +0.005] realistic range,
+plausible negative tail from spill/LPIPS pressure. Reviewer recommendation:
+**commit B, optionally keep C as run-level ablation flag, do not build D**.
+SD would only matter if Stage 14 redesigns to make duplicate's non-decoy
+pixels survive into x_edited (e.g., `α_max → 1` hard-replace, background-first
+composition) — those are NEW attack designs, not Bundle B compositor swaps.
+
+User accepted verdict; SD-related redesign paths backed up in
+`BUNDLE_B_SD_ALTERNATIVES_BACKUP.md` for future trigger conditions
+(Bundle B pilot lands [+0.02, +0.05) AND `sum(soft_decoy × true_mask)` shows
+nontrivial overlap regime).
+
+### Halo fix discovered while implementing Option B
+Reading the existing `build_duplicate_object_decoy_frame` revealed: the
+HANDOFF's "Poisson seamless clone ghost halo" framing was inaccurate — the
+function is already silhouette alpha-feather paste, not Poisson. But it has
+a real bug: at the feathered boundary OUTSIDE the shifted silhouette,
+`shifted_object_pixels = 0` while `alpha > 0` (Gaussian leakage), so
+`(1-α)·x_ref + α·0` darkens the background (~7.5% deviation at sigma=2.0
+boundary). After Stage 14's 35% blend, this is the actual LPIPS-catching
+artifact.
+
+`compose_decoy_alpha_paste` fixes this by filling shifted pixels with `x_ref`
+outside the shifted hard silhouette via `torch.where(fill_inside, shifted_pixels, x_ref)`.
+Self-test `no_dark_halo` directly compares: new diff to clean=0.0000,
+legacy diff=0.0753. Halo elimination empirically validated.
+
+### Phase C — implementation
+2 deliverables:
+- `memshield/semantic_compositor.py` (NEW, ~280 LOC): `compose_decoy_alpha_paste`
+  with same signature as legacy (drop-in). 7/7 self-tests pass including
+  shape/range, silhouette interior correctness, no-dark-halo (vs legacy
+  comparison), zero-offset identity, overlap regime stability, signature
+  compat, gradient flow.
+- `scripts/run_vadi_v5.py` (modified, +30 LOC across 5 surgical edits):
+  VADIv5Config.oracle_traj_compositor field default "alpha_paste"; imports
+  + dispatch table inside `_run_oracle_trajectory_pgd`; call site swap at
+  line ~2130; `--oracle-traj-compositor {alpha_paste, poisson}` CLI flag;
+  main() wiring.
+
+### Phase D — codex pre-commit review (thread `019dc52e-163e-7a60-bd31-cffb04dca00f`)
+gpt-5.2 high reviewer: **GO with no HIGH-severity bugs**. One MEDIUM concern
+(sigma=0 divide-by-zero in `_gaussian_kernel_1d`) preemptively patched in
+`compose_decoy_alpha_paste` via `if feather_radius > 0 and feather_sigma > 0`
+guard. Other concerns (alpha overshoot, gradient flow change) refuted: blur
+clamps to [0,1] before return; x_clean is leaf tensor with no requires_grad.
+MEDIUM/LOW deferrable: dtype guard, tiny-positive-sigma fp16 underflow, .to(device)
+redundancy.
+
+### Phase E — deployment status
+- Self-tests pass locally (Windows): `python -m memshield.semantic_compositor`
+  + `python scripts/run_vadi_v5.py` (driver _self_test).
+- Sync + commit + push from Pro 6000 (Windows has no GitHub key).
+- Bundle B sub-session 4 = NEXT (masked residual R_k per-bridge-frame).
+- Profile job alive on Pro 6000 GPU 1, in K=2 beam search phase as of
+  23:05 (dog clip K=1 raw 59/59 done, beam picked frame 32 with score 0.4572).
+
+### Round 5 trajectory
+| sub-session | content | status |
+|---|---|---|
+| 1 | oracle_trajectory.py + placement_profiler.py | DONE (f8518b0) |
+| 2 | polish_gating + v5_score_fn + run_placement_profile + Stage 14 | DONE (b0967ea) |
+| **3** | **alpha_paste compositor + Stage 14 wiring** | **DONE (this commit)** |
+| 4 | masked residual R_k + final integration | NEXT |
+| 5 | 3-clip pilot Stage 14 + Bundle B + profiled placement | BLOCKED on profile complete |
+| 6 | end-to-end joint opt + LPIPS-native ν | PENDING |
+| 7 | final pilot + decision | PENDING |
+

@@ -273,6 +273,19 @@ class VADIv5Config:
     oracle_traj_area_max: float = 1.4
     oracle_traj_off_switch: bool = True
     oracle_traj_min_improvement: float = 0.0
+    # Bundle B sub-session 3 (codex Loop 3 R5, gpt-5.4 review thread
+    # 019dc51a-c71a-7971-bece-116a592de2f5, doc BUNDLE_B_INPAINTER_REVIEW.md):
+    # compositor for the per-bridge-frame duplicate inside Stage 14.
+    #   "alpha_paste" — silhouette alpha-feather paste with no-halo fix
+    #                   (memshield.semantic_compositor.compose_decoy_alpha_paste,
+    #                   default; recommended by gpt-5.4 review).
+    #   "poisson"     — legacy build_duplicate_object_decoy_frame; retained
+    #                   only as ablation to measure halo-fix uplift.
+    # gpt-5.4 reviewer rejected "lama" / "sd" inpaint variants under current
+    # apply_continuation_overlay math (≤0.35 blend gated by soft_decoy);
+    # see BUNDLE_B_SD_ALTERNATIVES_BACKUP.md for escalation paths if Stage 14
+    # math changes later.
+    oracle_traj_compositor: str = "alpha_paste"
     # When set, main() loads profile.json and uses best.subset as W_clean.
     profiled_placement_path: Optional[str] = None
 
@@ -1961,12 +1974,27 @@ def _run_oracle_trajectory_pgd(
         alpha_regularizer, warp_regularizer, soften_decoy_mask,
     )
     from memshield.decoy_seed import build_duplicate_object_decoy_frame
+    from memshield.semantic_compositor import compose_decoy_alpha_paste
     from memshield.oracle_trajectory import (
         init_false_trajectory, trajectory_offset_at,
         build_oracle_decoy_masks_for_clip,
         project_trajectory_to_budget,
         trajectory_smoothness_loss,
     )
+
+    # Bundle B sub-session 3: dispatch table for per-bridge-frame compositor.
+    # Both have identical signatures (drop-in). gpt-5.4 review rationale in
+    # BUNDLE_B_INPAINTER_REVIEW.md.
+    _compositors = {
+        "alpha_paste": compose_decoy_alpha_paste,
+        "poisson": build_duplicate_object_decoy_frame,
+    }
+    if config.oracle_traj_compositor not in _compositors:
+        raise ValueError(
+            f"oracle_traj_compositor must be one of "
+            f"{sorted(_compositors)}; got "
+            f"{config.oracle_traj_compositor!r}")
+    _build_duplicate = _compositors[config.oracle_traj_compositor]
     from memshield.vadi_loss import (
         aggregate_margin_loss, decoy_margin_per_frame,
         lpips_cap_hinge, tv_hinge,
@@ -2115,7 +2143,9 @@ def _run_oracle_trajectory_pgd(
             )
 
             # Duplicate frame at oracle position (built with detached offset,
-            # since build_duplicate_object_decoy_frame is non-differentiable).
+            # compositor is non-differentiable wrt trajectory: gradient flows
+            # via soft_decoy through apply_continuation_overlay, NOT via
+            # the duplicate's pixel content).
             # NOTE: `l_idx` is 0-based over bridge frames returned by
             # `select_bridge_frames` (t = w_k+1 is l_idx=0). This aligns with
             # `build_oracle_decoy_masks_for_clip`, which uses bridge_step=0 for
@@ -2127,7 +2157,7 @@ def _run_oracle_trajectory_pgd(
                 int(round(float(offset_detached[0].item()))),
                 int(round(float(offset_detached[1].item()))),
             )
-            duplicate = build_duplicate_object_decoy_frame(
+            duplicate = _build_duplicate(
                 x_ref=x_clean[c_t], object_mask=true_mask_c,
                 decoy_offset=dup_offset,
                 feather_radius=config.feather_radius,
@@ -3765,6 +3795,15 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--oracle-traj-no-off-switch", action="store_true")
     p.add_argument("--oracle-traj-phase-a-steps", type=int, default=20)
     p.add_argument("--oracle-traj-phase-b-steps", type=int, default=10)
+    p.add_argument("--oracle-traj-compositor", type=str, default="alpha_paste",
+                   choices=["alpha_paste", "poisson"],
+                   help="Per-bridge-frame duplicate compositor inside Stage 14. "
+                        "alpha_paste (default, gpt-5.4 reviewed): silhouette "
+                        "alpha-feather paste with no-halo fix. poisson "
+                        "(legacy ablation): build_duplicate_object_decoy_frame "
+                        "with the dark-halo bug. Inpainter variants (lama/sd) "
+                        "rejected by gpt-5.4 review under current Stage 14 "
+                        "math; see BUNDLE_B_INPAINTER_REVIEW.md.")
     p.add_argument("--use-profiled-placement", type=str, default=None,
                    help="Path to placement-profile root; per-clip "
                         "<path>/<clip>/profile.json's best.subset is used "
@@ -3873,6 +3912,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             oracle_traj_phase_b_steps=args.oracle_traj_phase_b_steps,
             oracle_traj_off_switch=(
                 not args.oracle_traj_no_off_switch),
+            oracle_traj_compositor=args.oracle_traj_compositor,
             profiled_placement_path=args.use_profiled_placement,
         )
 
