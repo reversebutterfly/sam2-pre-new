@@ -72,7 +72,67 @@ from memshield.decoy_seed import (
 )
 
 
-__all__ = ["compose_decoy_alpha_paste"]
+__all__ = ["compose_decoy_alpha_paste", "apply_masked_residual"]
+
+
+def apply_masked_residual(
+    x_base: Tensor,                 # [H, W, 3] in [0, 1]
+    residual: Tensor,               # [H, W, 3] (typically clamped to [-eps_R, eps_R])
+    support_mask: Tensor,           # [H, W] in [0, 1] — caller MUST detach
+) -> Tensor:
+    """Add a mask-supported residual to a base frame and clamp to [0, 1].
+
+    Used in Stage 14 Bundle B sub-session 4 to apply the per-bridge-frame
+    learnable residual R_k after the alpha-overlay composes the duplicate
+    onto the warped clean frame.
+
+    Formula:
+        out = (x_base + support_mask * residual).clamp(0, 1)
+
+    Caller is responsible for **detaching** `support_mask` if it was built
+    from a differentiable mask source (e.g. `soften_decoy_mask` of an
+    oracle decoy mask that depends on trajectory params). Detaching
+    prevents the high-dim `residual` from creating a second gradient path
+    into the trajectory params (anchor/delta), which would let the
+    residual steer geometry instead of refining pixels — flagged as a
+    blocking issue by gpt-5.4 reviewer in design consult thread
+    `019dc51a-c71a-7971-bece-116a592de2f5`.
+
+    Args:
+        x_base: [H, W, 3] in [0, 1]. Output of `apply_continuation_overlay`.
+        residual: [H, W, 3]. Per-bridge-frame learnable R_k. Caller is
+            responsible for clamping to its ε-budget (e.g. ±8/255 via
+            sign-PGD with hard clamp).
+        support_mask: [H, W] in [0, 1]. Localizes where the residual can
+            edit. Caller MUST pass a detached tensor.
+
+    Returns:
+        [H, W, 3] in [0, 1].
+    """
+    if x_base.dim() != 3 or x_base.shape[-1] != 3:
+        raise ValueError(
+            f"x_base must be [H, W, 3]; got {tuple(x_base.shape)}")
+    if residual.shape != x_base.shape:
+        raise ValueError(
+            f"residual must match x_base shape {tuple(x_base.shape)}; "
+            f"got {tuple(residual.shape)}")
+    if support_mask.dim() != 2 or support_mask.shape != x_base.shape[:2]:
+        raise ValueError(
+            f"support_mask must be [H, W]={x_base.shape[:2]}; "
+            f"got {tuple(support_mask.shape)}")
+    # Codex pre-commit review (2026-04-25, thread
+    # 019dc51a-c71a-7971-bece-116a592de2f5) flagged that the docstring's
+    # detach contract should be enforced. A support_mask with grad would
+    # let R steer geometry through whatever produced the mask.
+    if support_mask.requires_grad:
+        raise ValueError(
+            "support_mask must be detached (requires_grad=False); "
+            "received a tensor with requires_grad=True. Caller must "
+            ".detach() the soften'd decoy mask before passing it in "
+            "to prevent the residual from creating a second gradient "
+            "path into trajectory params (gpt-5.4 blocking item).")
+    support_3 = support_mask.unsqueeze(-1)                 # [H, W, 1]
+    return (x_base + support_3 * residual).clamp(0.0, 1.0)
 
 
 def compose_decoy_alpha_paste(
@@ -314,6 +374,114 @@ def _test_no_grad_through_content() -> None:
           "OK")
 
 
+def _test_apply_masked_residual_basic() -> None:
+    """Basic shape, range, and identity checks."""
+    H, W = 16, 16
+    x = torch.full((H, W, 3), 0.5)
+    R = torch.zeros(H, W, 3)
+    sup = torch.zeros(H, W); sup[6:10, 6:10] = 1.0
+    out = apply_masked_residual(x, R, sup)
+    assert out.shape == (H, W, 3)
+    assert out.min().item() >= 0.0 and out.max().item() <= 1.0
+    # R = 0 → output = x_base.
+    assert torch.allclose(out, x), "R=0 should be identity"
+    # support = 0 everywhere → output = x_base regardless of R.
+    R_nonzero = torch.full((H, W, 3), 0.1)
+    sup_zero = torch.zeros(H, W)
+    out2 = apply_masked_residual(x, R_nonzero, sup_zero)
+    assert torch.allclose(out2, x), "support=0 should be identity"
+    print("  apply_masked_residual_basic OK")
+
+
+def _test_apply_masked_residual_localization() -> None:
+    """Residual only edits pixels where support > 0; outside support,
+    output equals x_base."""
+    H, W = 16, 16
+    x = torch.full((H, W, 3), 0.5)
+    R = torch.full((H, W, 3), 0.05)        # small uniform residual
+    sup = torch.zeros(H, W); sup[6:10, 6:10] = 1.0   # support only at interior
+    out = apply_masked_residual(x, R, sup)
+    # Outside support: out = x.
+    assert torch.allclose(out[0, 0], x[0, 0]), \
+        f"outside support: out={out[0, 0]} vs x={x[0, 0]}"
+    # Inside support: out = (x + R).clamp = 0.5 + 0.05 = 0.55.
+    assert torch.allclose(out[7, 7], torch.full((3,), 0.55), atol=1e-5), \
+        f"inside support: out={out[7, 7]} (expected 0.55)"
+    print("  apply_masked_residual_localization OK")
+
+
+def _test_apply_masked_residual_clamps_to_unit_range() -> None:
+    """Output strictly in [0, 1] even when x + support·R would overflow."""
+    H, W = 8, 8
+    x = torch.full((H, W, 3), 0.95)         # near upper bound
+    R = torch.full((H, W, 3), 0.5)          # would push above 1
+    sup = torch.ones(H, W)
+    out = apply_masked_residual(x, R, sup)
+    assert out.max().item() <= 1.0
+    # Lower bound similarly.
+    x_low = torch.full((H, W, 3), 0.05)
+    R_neg = torch.full((H, W, 3), -0.5)
+    out_low = apply_masked_residual(x_low, R_neg, sup)
+    assert out_low.min().item() >= 0.0
+    print("  apply_masked_residual_clamps_to_unit_range OK")
+
+
+def _test_apply_masked_residual_grad_paths() -> None:
+    """Gradient flows to residual but NOT through detached support_mask
+    when caller detaches it (caller responsibility)."""
+    H, W = 8, 8
+    x_base = torch.full((H, W, 3), 0.5, requires_grad=False)
+    R = torch.zeros(H, W, 3, requires_grad=True)
+    # Build a differentiable support, then detach it explicitly (caller
+    # responsibility — apply_masked_residual itself does NOT detach).
+    raw_decoy = torch.zeros(H, W, requires_grad=True)
+    raw_decoy.data[2:6, 2:6] = 1.0
+    sup = raw_decoy.detach()                # caller's detach
+    out = apply_masked_residual(x_base, R, sup)
+    loss = out.sum()
+    loss.backward()
+    assert R.grad is not None and R.grad.abs().sum().item() > 0, \
+        "R should receive non-zero gradient"
+    # raw_decoy should NOT receive grad because we detached.
+    assert raw_decoy.grad is None or raw_decoy.grad.abs().sum().item() == 0, \
+        "detached support_mask must block grad to its source"
+    print("  apply_masked_residual_grad_paths OK")
+
+
+def _test_apply_masked_residual_input_validation() -> None:
+    """Bad shapes raise clear errors. Non-detached support_mask raises."""
+    H, W = 8, 8
+    x = torch.zeros(H, W, 3)
+    R = torch.zeros(H, W, 3)
+    sup = torch.zeros(H, W)
+    # Wrong x_base shape.
+    try:
+        apply_masked_residual(torch.zeros(H, W), R, sup)
+        assert False, "should have raised on bad x_base"
+    except ValueError:
+        pass
+    # Wrong residual shape.
+    try:
+        apply_masked_residual(x, torch.zeros(H, W), sup)
+        assert False, "should have raised on bad residual"
+    except ValueError:
+        pass
+    # Wrong support shape.
+    try:
+        apply_masked_residual(x, R, torch.zeros(H + 1, W))
+        assert False, "should have raised on bad support"
+    except ValueError:
+        pass
+    # support_mask with requires_grad=True raises (codex pre-commit invariant).
+    sup_with_grad = torch.zeros(H, W, requires_grad=True)
+    try:
+        apply_masked_residual(x, R, sup_with_grad)
+        assert False, "should have raised on grad-requiring support_mask"
+    except ValueError as e:
+        assert "detached" in str(e), f"unexpected error message: {e}"
+    print("  apply_masked_residual_input_validation OK")
+
+
 if __name__ == "__main__":
     print("memshield.semantic_compositor self-tests:")
     _test_shape_and_range()
@@ -323,4 +491,9 @@ if __name__ == "__main__":
     _test_overlap_regime()
     _test_signature_compat_with_legacy()
     _test_no_grad_through_content()
+    _test_apply_masked_residual_basic()
+    _test_apply_masked_residual_localization()
+    _test_apply_masked_residual_clamps_to_unit_range()
+    _test_apply_masked_residual_grad_paths()
+    _test_apply_masked_residual_input_validation()
     print("memshield.semantic_compositor: all self-tests PASSED")

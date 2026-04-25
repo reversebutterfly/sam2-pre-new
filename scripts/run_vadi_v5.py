@@ -273,6 +273,20 @@ class VADIv5Config:
     oracle_traj_area_max: float = 1.4
     oracle_traj_off_switch: bool = True
     oracle_traj_min_improvement: float = 0.0
+    # Bundle B sub-session 4 (codex Loop 3 R5, gpt-5.4 review thread
+    # 019dc51a-c71a-7971-bece-116a592de2f5): per-bridge-frame learnable
+    # masked residual R_k. Phase A frozen at 0; Phase B sign-PGD with
+    # ε_R hard bound. Mask-supported via DETACHED soften_decoy_mask
+    # (detach is critical: prevents R from creating second gradient path
+    # into anchor/delta — flagged as blocking by gpt-5.4 reviewer).
+    # Single combined LPIPS budget (no separate R-only hinge); tiny
+    # normalized TV smoothness only.
+    oracle_traj_use_residual: bool = True
+    oracle_traj_residual_eps: float = 8.0 / 255.0     # ε_R hard bound (gpt-5.4 default)
+    oracle_traj_residual_lr: float = 2.0 / 255.0      # sign-PGD step size
+    oracle_traj_residual_dilate_px: int = 4           # support dilation (gpt-5.4: modest)
+    oracle_traj_residual_feather_sigma: float = 3.0   # support feather sigma
+    oracle_traj_lambda_residual_tv: float = 0.001     # tiny TV (avoids speckle)
     # Bundle B sub-session 3 (codex Loop 3 R5, gpt-5.4 review thread
     # 019dc51a-c71a-7971-bece-116a592de2f5, doc BUNDLE_B_INPAINTER_REVIEW.md):
     # compositor for the per-bridge-frame duplicate inside Stage 14.
@@ -1974,7 +1988,9 @@ def _run_oracle_trajectory_pgd(
         alpha_regularizer, warp_regularizer, soften_decoy_mask,
     )
     from memshield.decoy_seed import build_duplicate_object_decoy_frame
-    from memshield.semantic_compositor import compose_decoy_alpha_paste
+    from memshield.semantic_compositor import (
+        compose_decoy_alpha_paste, apply_masked_residual,
+    )
     from memshield.oracle_trajectory import (
         init_false_trajectory, trajectory_offset_at,
         build_oracle_decoy_masks_for_clip,
@@ -2066,6 +2082,18 @@ def _run_oracle_trajectory_pgd(
     nu = nu_init.detach().clone().to(device)
     nu_requires_grad = False
 
+    # Bundle B sub-session 4: per-bridge-frame masked residual R[K, L_max,
+    # H, W, 3]. Frozen at 0 in Phase A; sign-PGD update in Phase B.
+    H, W = int(x_clean.shape[1]), int(x_clean.shape[2])
+    if config.oracle_traj_use_residual:
+        R = torch.zeros(
+            K, L_max, H, W, 3, device=device, dtype=x_clean.dtype,
+        )
+        R_requires_grad = False
+    else:
+        R = None
+        R_requires_grad = False
+
     # Optimizers.
     opt_alpha = torch.optim.Adam(
         [edit_params.alpha_logits], lr=config.oracle_traj_alpha_lr)
@@ -2096,6 +2124,12 @@ def _run_oracle_trajectory_pgd(
         if step == config.oracle_traj_phase_a_steps and not nu_requires_grad:
             nu = nu.detach().clone().requires_grad_(True)
             nu_requires_grad = True
+        # Phase B switch: unfreeze R for sign-PGD updates (Bundle B ss4).
+        if (config.oracle_traj_use_residual
+                and step == config.oracle_traj_phase_a_steps
+                and not R_requires_grad):
+            R = R.detach().clone().requires_grad_(True)
+            R_requires_grad = True
 
         # 1. Build oracle decoy masks for ALL clean bridge frames (per-step,
         #    differentiable in anchor + delta).
@@ -2169,6 +2203,21 @@ def _run_oracle_trajectory_pgd(
             x_edited = apply_continuation_overlay(
                 x_warped, duplicate, soft_decoy, alphas[k_, l_idx],
             )
+            # Bundle B sub-session 4: apply masked residual R[k, l] after
+            # the alpha-overlay. support_R is built from the SAME oracle
+            # decoy mask as soft_decoy but with broader dilation/feather
+            # (gpt-5.4 default: dilate=4, sigma=3.0); critically, it is
+            # DETACHED so R does not create a second gradient path into
+            # anchor/delta. R is zero in Phase A (frozen), updated via
+            # sign-PGD in Phase B.
+            if config.oracle_traj_use_residual:
+                support_R = soften_decoy_mask(
+                    decoy_mask_diff,
+                    dilate_px=config.oracle_traj_residual_dilate_px,
+                    feather_sigma=config.oracle_traj_residual_feather_sigma,
+                ).detach()
+                x_edited = apply_masked_residual(
+                    x_edited, R[k_, l_idx], support_R)
             edited_by_c[int(c_t)] = x_edited
 
         # 4. Stack into [T_clean, H, W, 3].
@@ -2273,6 +2322,19 @@ def _run_oracle_trajectory_pgd(
             magnitude_weight=config.oracle_traj_lambda_traj_magnitude,
         )
 
+        # Bundle B sub-session 4: L1-TV smoothness on the residual
+        # (per-pixel finite-diff abs, normalized by R element count).
+        # gpt-5.4 verdict: tiny TV, normalize, no L1 / no inter-bridge
+        # smoothness in v1. Active only when R is trainable (Phase B);
+        # in Phase A R=0 so TV=0 regardless.
+        if config.oracle_traj_use_residual and R_requires_grad:
+            dh = (R[:, :, 1:, :, :] - R[:, :, :-1, :, :]).abs()
+            dw = (R[:, :, :, 1:, :] - R[:, :, :, :-1, :]).abs()
+            L_R_tv = (dh.mean() + dw.mean())
+        else:
+            L_R_tv = torch.zeros(
+                (), dtype=x_edited_full.dtype, device=device)
+
         L = (
             config.oracle_traj_lambda_margin * L_margin
             + config.oracle_traj_lambda_obj * L_obj
@@ -2280,6 +2342,7 @@ def _run_oracle_trajectory_pgd(
             + lambda_fid_val * L_fid_total
             + config.oracle_traj_lambda_alpha * L_alpha
             + config.oracle_traj_lambda_warp * L_warp
+            + config.oracle_traj_lambda_residual_tv * L_R_tv
             + L_traj
         )
 
@@ -2337,19 +2400,22 @@ def _run_oracle_trajectory_pgd(
                 + L_traj.detach().item()
             )
             if best is None or score > best[3]:
+                best_params = {
+                    "alpha_logits":
+                        edit_params.alpha_logits.detach().cpu().clone(),
+                    "warp_s": edit_params.warp_s.detach().cpu().clone(),
+                    "warp_r": edit_params.warp_r.detach().cpu().clone(),
+                    "anchor_offset":
+                        traj.anchor_offset.detach().cpu().clone(),
+                    "delta_offset":
+                        traj.delta_offset.detach().cpu().clone(),
+                }
+                if config.oracle_traj_use_residual and R is not None:
+                    best_params["residual_R"] = R.detach().cpu().clone()
                 best = (
                     x_edited_full.detach().cpu().clone(),
                     nu.detach().cpu().clone(),
-                    {
-                        "alpha_logits":
-                            edit_params.alpha_logits.detach().cpu().clone(),
-                        "warp_s": edit_params.warp_s.detach().cpu().clone(),
-                        "warp_r": edit_params.warp_r.detach().cpu().clone(),
-                        "anchor_offset":
-                            traj.anchor_offset.detach().cpu().clone(),
-                        "delta_offset":
-                            traj.delta_offset.detach().cpu().clone(),
-                    },
+                    best_params,
                     score,
                     step + 1,
                 )
@@ -2381,6 +2447,14 @@ def _run_oracle_trajectory_pgd(
             "anchor_max_norm": anchor_max,
             "delta_max_norm": delta_max,
             "n_bridge": len(bridge_polish),
+            # Bundle B sub-session 4 residual diagnostics.
+            "L_R_tv": float(L_R_tv.detach().item()),
+            "R_max_abs": (
+                float(R.detach().abs().max().item())
+                if config.oracle_traj_use_residual and R is not None else 0.0),
+            "R_active": (
+                bool(R_requires_grad)
+                if config.oracle_traj_use_residual else False),
         }
         step_logs.append(log)
 
@@ -2391,6 +2465,8 @@ def _run_oracle_trajectory_pgd(
         opt_delta.zero_grad()
         if nu_requires_grad and nu.grad is not None:
             nu.grad.zero_()
+        if R_requires_grad and R.grad is not None:
+            R.grad.zero_()
         L.backward()
         opt_alpha.step()
         opt_warp.step()
@@ -2401,6 +2477,17 @@ def _run_oracle_trajectory_pgd(
                 nu.add_(
                     -config.oracle_traj_nu_lr_phase_b * nu.grad.sign())
                 nu.clamp_(-config.eps_nu, config.eps_nu)
+        # Bundle B sub-session 4: sign-PGD on R (Phase B only).
+        if R_requires_grad and R.grad is not None:
+            with torch.no_grad():
+                R.data.add_(
+                    R.grad.sign(),
+                    alpha=-config.oracle_traj_residual_lr,
+                )
+                R.data.clamp_(
+                    -config.oracle_traj_residual_eps,
+                    config.oracle_traj_residual_eps,
+                )
 
         # Project trajectory after optimizer step (Codex R5: keep optimizer
         # free, project after).
@@ -3804,6 +3891,22 @@ def build_argparser() -> argparse.ArgumentParser:
                         "with the dark-halo bug. Inpainter variants (lama/sd) "
                         "rejected by gpt-5.4 review under current Stage 14 "
                         "math; see BUNDLE_B_INPAINTER_REVIEW.md.")
+    # Bundle B sub-session 4: masked residual R_k (codex Loop 3 R5,
+    # gpt-5.4 design verdict thread 019dc51a-c71a-7971-bece-116a592de2f5).
+    p.add_argument("--oracle-traj-no-residual", action="store_true",
+                   help="Disable Bundle B masked residual R_k (ablation).")
+    p.add_argument("--oracle-traj-residual-eps", type=float, default=8.0/255.0,
+                   help="ε_R hard bound for sign-PGD updates (default 8/255).")
+    p.add_argument("--oracle-traj-residual-lr", type=float, default=2.0/255.0,
+                   help="Sign-PGD step size for R (default 2/255).")
+    p.add_argument("--oracle-traj-residual-dilate-px", type=int, default=4,
+                   help="Dilation for residual support mask (default 4).")
+    p.add_argument("--oracle-traj-residual-feather-sigma", type=float,
+                   default=3.0,
+                   help="Gaussian feather sigma for residual support mask.")
+    p.add_argument("--oracle-traj-lambda-residual-tv", type=float,
+                   default=0.001,
+                   help="TV smoothness weight on R (default 0.001).")
     p.add_argument("--use-profiled-placement", type=str, default=None,
                    help="Path to placement-profile root; per-clip "
                         "<path>/<clip>/profile.json's best.subset is used "
@@ -3913,6 +4016,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             oracle_traj_off_switch=(
                 not args.oracle_traj_no_off_switch),
             oracle_traj_compositor=args.oracle_traj_compositor,
+            oracle_traj_use_residual=(not args.oracle_traj_no_residual),
+            oracle_traj_residual_eps=args.oracle_traj_residual_eps,
+            oracle_traj_residual_lr=args.oracle_traj_residual_lr,
+            oracle_traj_residual_dilate_px=(
+                args.oracle_traj_residual_dilate_px),
+            oracle_traj_residual_feather_sigma=(
+                args.oracle_traj_residual_feather_sigma),
+            oracle_traj_lambda_residual_tv=args.oracle_traj_lambda_residual_tv,
             profiled_placement_path=args.use_profiled_placement,
         )
 

@@ -2239,9 +2239,89 @@ redundancy.
 |---|---|---|
 | 1 | oracle_trajectory.py + placement_profiler.py | DONE (f8518b0) |
 | 2 | polish_gating + v5_score_fn + run_placement_profile + Stage 14 | DONE (b0967ea) |
-| **3** | **alpha_paste compositor + Stage 14 wiring** | **DONE (this commit)** |
-| 4 | masked residual R_k + final integration | NEXT |
+| 3 | alpha_paste compositor + Stage 14 wiring | DONE (a7f1c6c) |
+| **4** | **masked residual R_k + Stage 14 integration** | **DONE (this commit)** |
 | 5 | 3-clip pilot Stage 14 + Bundle B + profiled placement | BLOCKED on profile complete |
 | 6 | end-to-end joint opt + LPIPS-native ν | PENDING |
 | 7 | final pilot + decision | PENDING |
+
+
+
+## Loop 3 Round 5 sub-session 4 — Phase E documentation (2026-04-25)
+
+### Sub-session 4 Topic
+Bundle B masked residual R_k. Per-bridge-frame [K, L, H, W, 3] learnable
+residual, applied AFTER `apply_continuation_overlay`, sign-PGD bounded by
+ε_R hard clamp, mask-supported via DETACHED `soften_decoy_mask`. Phase A
+frozen at 0; Phase B sign-PGD updates.
+
+### gpt-5.4 xhigh design verdicts (thread `019dc51a-c71a-7971-bece-116a592de2f5`)
+9 design questions resolved with one blocking item: detach the residual
+support mask, otherwise R creates a second gradient path into anchor/delta
+and starts steering geometry instead of refining pixels.
+
+| Q | Verdict |
+|---|---|
+| Q1 apply order | (a) additive after overlay |
+| Q2 support mask | s2: dilate=4, sigma=3.0 — modest expansion of soft_decoy |
+| Q3 optimizer | sign-PGD with hard ε_R = 8/255 (NOT 16/255) |
+| Q4 phase | freeze R in Phase A, train in Phase B only |
+| Q5 LPIPS budget | single combined budget; no separate R-only hinge |
+| Q6 sparsity reg | tiny normalized TV only; skip L1 + inter-bridge smooth |
+| Q7 init | zeros |
+| Q8 OOM | 44 MB per polish, no concern on 96 GB GPU |
+| Q9 watch items | per-frame support (no path union); monitor α-collapse vs R-ramp |
+
+### Phase C — implementation
+1. `memshield/semantic_compositor.py` (extended): `apply_masked_residual` helper
+   (~30 LOC) with detached-support invariant **enforced** via input validation
+   (codex pre-commit recommendation accepted). 5 new unit tests added (basic,
+   localization, clamps, grad_paths, input_validation including detach
+   check). 12/12 self-tests pass.
+2. `scripts/run_vadi_v5.py` (modified):
+   - 6 new `VADIv5Config` fields (oracle_traj_use_residual / _eps / _lr /
+     _dilate_px / _feather_sigma / _lambda_residual_tv)
+   - 6 new CLI args wired through `main()`
+   - `_run_oracle_trajectory_pgd`: R allocation (zeros [K, L_max, H, W, 3]),
+     Phase B unfreeze (parallel to ν), inner-loop residual application
+     after `apply_continuation_overlay`, L_R_tv added to total loss,
+     sign-PGD update after the existing ν step, R baked into best-state
+     `x_edited_full` snapshot, residual diagnostics (L_R_tv, R_max_abs,
+     R_active) added to step log.
+
+### Critical design invariant: detached support mask
+```python
+support_R = soften_decoy_mask(decoy_mask_diff, dilate_px=4, feather_sigma=3.0).detach()
+x_edited = apply_masked_residual(x_edited, R[k, l], support_R)
+```
+The `.detach()` cuts R's gradient path into anchor/delta. Without it, the
+high-dim 11M-element R could absorb optimization pressure that should go
+to traj geometry. `apply_masked_residual` enforces `support_mask.requires_grad
+== False` via ValueError to prevent silent regression.
+
+### Phase D — codex pre-commit code review (continuation thread)
+gpt-5.4 GO with **no HIGH or MEDIUM bugs**. 3 LOW-priority cleanups deferred
+to sub-session 5:
+- TV under-normalized vs design-note "active support pixels" (cosmetic; small
+  λ=0.001 keeps it inert anyway)
+- (Now ENFORCED in this commit) detached-support invariant
+- `R.data.add_/clamp_` could be `R.add_/clamp_` (canonical style; both work)
+
+### Phase E — deployment
+- 12/12 self-tests on Windows: `python -m memshield.semantic_compositor`
+- Driver _self_test PASS: `python scripts/run_vadi_v5.py`
+- 6 new CLI args visible: `python scripts/run_vadi_v5.py --help | grep residual`
+- VADIv5Config defaults verified: eps=8/255 ≈ 0.0314, lr=2/255 ≈ 0.00784,
+  dilate=4, sigma=3.0, tv_weight=0.001
+- Sync + commit + push from Pro 6000 (Windows has no GitHub key).
+
+### Status (end of sub-session 4)
+- Bundle B FULLY implemented (sub-sessions 3+4). Stage 14 + alpha_paste
+  compositor + R_k masked residual all wired and self-test-validated.
+- Bundle B sub-session 5 = NEXT but BLOCKED on profile completion (~17:30
+  2026-04-26 ETA).
+- **Pre-committed Round 5 6th-and-FINAL criterion**: mean ΔJ ≥ +0.05 over
+  A0 (~0.50) → continue 10-clip + ablations + paper goes; < +0.02 → cut δ
+  permanently. Mid-zone [+0.02, +0.05) → Pareto synergy ablation paper.
+
 
