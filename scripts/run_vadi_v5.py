@@ -185,6 +185,25 @@ class VADIv5Config:
     hiera_steering_off_switch: bool = True
     hiera_steering_min_improvement: float = 0.0
 
+    # Decoy State Continuation polish (codex Loop 3 R3 design, 2026-04-25).
+    # Targets SAM2's persistent recurrent state (maskmem_features +
+    # obj_ptr) instead of transient Hiera. Per-insert teacher cached
+    # from A0 forward; bridge originals are δ-pushed to write decoy-
+    # compatible state (cos-sim alignment in pooled decoy region).
+    # Codex falsification criterion: state-alignment lift >= 0.15 AND
+    # mean J-drop < +0.02 → cut δ permanently.
+    state_continuation: bool = False
+    state_continuation_n_steps: int = 30
+    state_continuation_eta_step: float = 2.0 / 255.0   # δ sign-PGD step
+    state_continuation_eps_delta: float = 4.0 / 255.0  # δ ℓ∞ ε
+    state_continuation_bridge_length: int = 3          # B_k = w_k+1..w_k+L
+    state_continuation_lambda_M: float = 1.0           # weight on L_M (maskmem)
+    state_continuation_lambda_P: float = 1.0           # weight on L_P (obj_ptr)
+    state_continuation_lambda_margin: float = 1.0      # weight on L_margin
+    state_continuation_lambda_fid: float = 10.0        # initial λ_fid (escalates)
+    state_continuation_off_switch: bool = True
+    state_continuation_min_improvement: float = 0.0
+
     # STE quantization during training (codex R2 post-fix: v4 pipeline
     # always applied fake_uint8_quantize in _apply_{delta,nu} which
     # simulated the export-time uint8 round-trip during every forward.
@@ -1185,6 +1204,243 @@ def _run_hiera_steering_pgd(
 
 
 # =============================================================================
+# Decoy State Continuation polish (codex Loop 3 R3 design, 2026-04-25)
+# =============================================================================
+
+
+def _run_state_continuation_pgd(
+    x_clean: Tensor,
+    decoy_seeds: Tensor,
+    nu_init: Tensor,
+    W_attacked: Sequence[int],
+    bridge_frames_by_k: Dict[int, List[int]],   # {k → [t_proc...]}
+    teacher_M_by_k: Dict[int, Tensor],          # {k → M̄_k} (no grad)
+    teacher_p_by_k: Dict[int, Tensor],          # {k → p̄_k} (no grad)
+    forward_fn,                                  # VADIForwardFn (forward_with_state)
+    lpips_fn: Callable,
+    m_decoy_by_t: Dict[int, Tensor],
+    m_true_by_t: Dict[int, Tensor],
+    config: VADIv5Config,
+    *,
+    student_decoy_mask_by_t: Optional[Dict[int, Tensor]] = None,
+    teacher_decoy_mask_by_k: Optional[Dict[int, Tensor]] = None,
+) -> Tuple[Optional[Tensor], Optional[Tensor],
+           List[Dict[str, Any]], Optional[int]]:
+    """State-continuation polish PGD: warm-start ν from A0 (frozen), δ=0
+    on bridge originals, optimize δ to align bridge-frame `maskmem_features`
+    + `obj_ptr` to per-insert teacher states via cosine distance.
+
+    Loss:
+        L = λ_margin · L_margin   (v4 contrastive on insert ∪ bridge)
+          + λ_M     · L_M         (state_continuation_loss maskmem term)
+          + λ_P     · L_P         (state_continuation_loss obj_ptr term)
+          + λ_fid   · L_fid       (LPIPS_polish_clean + LPIPS_inserts + TV_inserts)
+
+    δ is support-masked to bridge originals (clean-space). ν is frozen.
+    Strict ε ℓ∞ clamp on δ. Best-state PRE-update snapshot keyed on
+    (margin + λ_M·L_M + λ_P·L_P) when feasible.
+
+    Returns (δ*, ν*, step_logs); (None, None, logs) if no feasible step.
+    """
+    from memshield.state_continuation import state_continuation_loss
+    from memshield.vadi_loss import (
+        aggregate_margin_loss, decoy_margin_per_frame,
+        lpips_cap_hinge, tv_hinge,
+    )
+
+    if student_decoy_mask_by_t is None or teacher_decoy_mask_by_k is None:
+        raise ValueError(
+            "_run_state_continuation_pgd: student_decoy_mask_by_t and "
+            "teacher_decoy_mask_by_k are required (codex R3-fix1: per-"
+            "bridge-frame masks for spatial correctness on moving clips)")
+
+    device = x_clean.device
+    T_clean = x_clean.shape[0]
+    K = len(W_attacked)
+    W_set = set(int(w) for w in W_attacked)
+    W_sorted = sorted(W_set)
+
+    # δ in clean-space; support mask = bridge originals only.
+    delta = torch.zeros_like(x_clean, device=device, requires_grad=True)
+    nu = nu_init.detach().clone().to(device)  # FROZEN — no requires_grad
+
+    # Flatten bridge frames + build bridge → insert k map.
+    from memshield.state_continuation import build_bridge_to_insert_k
+    bridge_to_k = build_bridge_to_insert_k(bridge_frames_by_k)
+    bridge_t_proc_set = sorted(bridge_to_k.keys())
+
+    # Polish-clean indices for δ LPIPS hinge + support mask.
+    polish_clean = sorted({
+        _attacked_to_clean_same_space(int(t), W_attacked)
+        for t in bridge_t_proc_set if int(t) not in W_set
+    })
+    support_mask = torch.zeros(
+        (T_clean, 1, 1, 1), dtype=delta.dtype, device=device,
+    )
+    for c in polish_clean:
+        if 0 <= c < T_clean:
+            support_mask[c] = 1.0
+
+    # Loss-query frames for L_margin: insert ∪ bridge (insert is k itself).
+    insert_polish = list(W_sorted)
+    bridge_polish = sorted(t for t in bridge_t_proc_set if t not in W_set)
+    margin_query_frames = sorted(set(insert_polish + bridge_polish))
+
+    # state_at = bridge frames only (insert teachers are pre-cached, no
+    # need to re-extract during polish).
+    state_at = sorted(bridge_polish)
+
+    best: Optional[Tuple[Tensor, Tensor, float]] = None
+    step_logs: List[Dict[str, Any]] = []
+    lambda_val = config.state_continuation_lambda_fid
+
+    for step in range(config.state_continuation_n_steps):
+        x_prime = torch.clamp(x_clean + delta, 0.0, 1.0)
+        inserts = torch.clamp(decoy_seeds + nu, 0.0, 1.0)
+        if config.train_ste_quantize:
+            from memshield.losses import fake_uint8_quantize
+            x_prime = fake_uint8_quantize(x_prime)
+            inserts = fake_uint8_quantize(inserts)
+        processed = build_processed(x_prime, inserts, W_attacked)
+
+        # Single forward returning logits at margin-query frames + state at bridges.
+        logits_by_t, maskmem_by_t, obj_ptr_by_t = \
+            forward_fn.forward_with_state(
+                processed, return_at=margin_query_frames, state_at=state_at,
+            )
+
+        # Decoy margin loss.
+        margins_by_t = {}
+        for t in margin_query_frames:
+            if int(t) not in m_true_by_t or int(t) not in m_decoy_by_t:
+                continue
+            margins_by_t[int(t)] = decoy_margin_per_frame(
+                logits_by_t[int(t)],
+                m_true_by_t[int(t)], m_decoy_by_t[int(t)],
+                margin=config.margin_threshold,
+            )
+        agg = aggregate_margin_loss(
+            margins_by_t,
+            insert_ids=insert_polish,
+            neighbor_ids=bridge_polish,
+            neighbor_weight=config.margin_neighbor_weight,
+        )
+        L_margin = agg.L_margin
+
+        # State-continuation loss (only bridge frames; teachers are insert-keyed).
+        bridge_to_k_only_present = {
+            t: bridge_to_k[t] for t in maskmem_by_t.keys() if t in bridge_to_k
+        }
+        L_state, state_log = state_continuation_loss(
+            student_M_by_t={t: maskmem_by_t[t] for t in
+                            bridge_to_k_only_present},
+            student_p_by_t={t: obj_ptr_by_t[t] for t in
+                            bridge_to_k_only_present},
+            teacher_M_by_k=teacher_M_by_k,
+            teacher_p_by_k=teacher_p_by_k,
+            student_decoy_mask_by_t=student_decoy_mask_by_t,
+            teacher_decoy_mask_by_k=teacher_decoy_mask_by_k,
+            bridge_to_insert_k=bridge_to_k_only_present,
+            lambda_M=config.state_continuation_lambda_M,
+            lambda_P=config.state_continuation_lambda_P,
+        )
+
+        # Fidelity hinges (unchanged from hiera-steering pattern).
+        L_fid_orig = torch.zeros((), dtype=x_prime.dtype, device=device)
+        for c in polish_clean:
+            if 0 <= c < T_clean:
+                lp = lpips_fn(x_prime[c], x_clean[c])
+                L_fid_orig = L_fid_orig + lpips_cap_hinge(
+                    lp, config.lpips_orig_cap)
+        L_fid_ins = torch.zeros_like(L_fid_orig)
+        L_fid_TV = torch.zeros_like(L_fid_orig)
+        for k_, w_ in enumerate(W_sorted):
+            c_k_ = int(w_ - k_)
+            if not (0 <= c_k_ < T_clean):
+                continue
+            x_ref = x_clean[c_k_]
+            lp = lpips_fn(inserts[k_], x_ref)
+            L_fid_ins = L_fid_ins + lpips_cap_hinge(
+                lp, config.lpips_insert_cap)
+            ins_chw = inserts[k_].permute(2, 0, 1)
+            ref_chw = x_ref.permute(2, 0, 1)
+            L_fid_TV = L_fid_TV + tv_hinge(
+                ins_chw, ref_chw, multiplier=config.tv_multiplier)
+
+        L = (
+            config.state_continuation_lambda_margin * L_margin
+            + L_state
+            + lambda_val * (L_fid_orig + L_fid_ins + L_fid_TV)
+        )
+
+        # Best-state PRE-update snapshot.
+        tol = 1e-6
+        feas = (
+            float(L_fid_orig.detach().item()) <= tol
+            and float(L_fid_ins.detach().item()) <= tol
+            and float(L_fid_TV.detach().item()) <= tol
+        )
+        if feas:
+            score = -float(
+                config.state_continuation_lambda_margin
+                * L_margin.detach().item()
+                + L_state.detach().item()
+            )
+            if best is None or score > best[2]:
+                # Codex Loop3-R3-fix2: also record the step number so the
+                # driver can attribute falsification metrics (cos_M/cos_P)
+                # to the same checkpoint the polish actually returned.
+                best = (delta.detach().cpu().clone(),
+                        nu.detach().cpu().clone(), score, step + 1)
+
+        # Invariant tripwire — δ outside support should stay 0.
+        with torch.no_grad():
+            outside_mask = (1.0 - support_mask)
+            delta_outside_linf = float(
+                (delta.detach() * outside_mask).abs().max().item()
+            ) if outside_mask.any() else 0.0
+
+        log = {
+            "step": step + 1, "stage": "state_continuation",
+            "L": float(L.detach().item()),
+            "L_margin": float(L_margin.detach().item()),
+            "L_state": float(L_state.detach().item()),
+            "L_M": state_log["L_M"], "L_P": state_log["L_P"],
+            "mean_cos_M": state_log["mean_cos_M"],
+            "mean_cos_P": state_log["mean_cos_P"],
+            "n_bridge": state_log["n_bridge"],
+            "L_fid_orig": float(L_fid_orig.detach().item()),
+            "L_fid_ins": float(L_fid_ins.detach().item()),
+            "L_fid_TV": float(L_fid_TV.detach().item()),
+            "feasible": feas,
+            "delta_outside_support_linf": delta_outside_linf,
+        }
+        step_logs.append(log)
+
+        if delta.grad is not None:
+            delta.grad.zero_()
+        L.backward()
+
+        with torch.no_grad():
+            if delta.grad is not None:
+                delta.grad.mul_(support_mask)
+                delta.add_(
+                    -config.state_continuation_eta_step
+                    * delta.grad.sign())
+                delta.mul_(support_mask)         # off-support → 0
+                delta.clamp_(
+                    -config.state_continuation_eps_delta,
+                    +config.state_continuation_eps_delta)
+
+        if (not feas) and (step + 1) % config.lambda_growth_period == 0:
+            lambda_val *= config.lambda_growth_factor
+
+    if best is None:
+        return None, None, step_logs, None
+    return best[0], best[1], step_logs, int(best[3])
+
+
+# =============================================================================
 # Per-clip orchestrator
 # =============================================================================
 
@@ -1581,8 +1837,11 @@ def run_v5_for_clip(
     # run. Without it, the preflight + exported-fidelity gates become no-ops
     # and acceptance degrades to J-drop only — fine for debugging but unsafe
     # for a decision run. Record skip reason if ssim_fn missing.
+    # state_continuation (Stage 12) takes precedence over hiera_steering
+    # (Stage 11) when both flags are set.
     _hiera_eligible = (
         config.hiera_steering
+        and not config.state_continuation
         and not result.infeasible
         and not polish_applied
         and sam2_eval_fn is not None
@@ -1775,6 +2034,238 @@ def run_v5_for_clip(
             polish_stats["skipped"] = (
                 "a0_clean_ref_infeasible_polish_cannot_recover_with_frozen_nu")
 
+    # --- Stage 12: Decoy State Continuation polish (codex Loop 3 R3, 2026-04-25)
+    _state_eligible = (
+        config.state_continuation
+        and not result.infeasible
+        and not polish_applied
+        and sam2_eval_fn is not None
+        and result.nu_star is not None
+    )
+    if _state_eligible and ssim_fn is None:
+        polish_stats["skipped"] = (
+            "state_continuation_requires_ssim_fn_for_fidelity_gate")
+    if _state_eligible and ssim_fn is not None:
+        from memshield.state_continuation import (
+            select_bridge_frames, build_bridge_to_insert_k,
+            downsample_decoy_mask,
+        )
+        # Build clean-source per-insert refs (preflight + remeasure share).
+        W_sorted_int = sorted(int(w) for w in W_attacked)
+        for k_, w_ in enumerate(W_sorted_int):
+            c_k_ = w_ - k_
+            if not (0 <= c_k_ < x_clean.shape[0]):
+                raise RuntimeError(
+                    f"State continuation: invalid c_k={c_k_} for "
+                    f"W_sorted[{k_}]={w_} (T_clean={x_clean.shape[0]})")
+        sc_clean_refs_for_inserts = torch.stack([
+            x_clean[w_ - k_] for k_, w_ in enumerate(W_sorted_int)
+        ], dim=0).to(x_clean.device)
+
+        # A0 clean-ref preflight (same logic as Stage 11): with frozen ν
+        # the polish cannot improve insert TV/LPIPS, so if A0 already
+        # fails clean-ref export feasibility we skip immediately.
+        sc_preflight_ok = True
+        sc_preflight = remeasure_exported_feasibility(
+            x_clean, sc_clean_refs_for_inserts, exported, W_attacked,
+            lpips_fn, ssim_fn, config,
+        )
+        polish_stats["sc_a0_clean_ref_feasibility"] = sc_preflight
+        sc_preflight_ok = bool(
+            sc_preflight.get("step_feasible_on_export", False))
+
+        if not sc_preflight_ok:
+            polish_stats["skipped"] = (
+                "state_continuation_a0_clean_ref_infeasible")
+        else:
+            # Step 1: cache A0 teachers (M̄_k, p̄_k) at insert positions.
+            # Codex Loop3-R3-fix2: extract from the EXPORTED uint8 artifact
+            # (`exported`), not the pre-export float tensor — ensures
+            # threat-model parity (the delivered bytes write the same
+            # state we're teaching toward).
+            with torch.no_grad():
+                _, teacher_M_dict_t, teacher_p_dict_t = \
+                    forward_fn.forward_with_state(
+                        exported, return_at=[],
+                        state_at=W_sorted_int,
+                    )
+            teacher_M_by_k = {
+                k_: teacher_M_dict_t[w_].detach()
+                for k_, w_ in enumerate(W_sorted_int)
+            }
+            teacher_p_by_k = {
+                k_: teacher_p_dict_t[w_].detach()
+                for k_, w_ in enumerate(W_sorted_int)
+            }
+
+            # Step 2: project decoy masks to memory resolution.
+            sample_M = next(iter(teacher_M_by_k.values()))
+            if sample_M.dim() == 4:
+                _, _, h_mem, w_mem = sample_M.shape
+            elif sample_M.dim() == 3:
+                # [HW, B, C] layout — derive h_mem assuming square.
+                HW = sample_M.shape[0]
+                h_mem = w_mem = int(round(HW ** 0.5))
+                if h_mem * w_mem != HW:
+                    raise RuntimeError(
+                        f"State continuation: non-square HW={HW} in "
+                        f"maskmem token layout; need explicit shape")
+            else:
+                raise RuntimeError(
+                    f"State continuation: unsupported maskmem shape "
+                    f"{tuple(sample_M.shape)}")
+
+            # Codex Loop3-R3-fix1: per-bridge-frame STUDENT masks from
+            # m_decoy_by_t[t] (decoy's apparent location at frame t,
+            # which tracks the moving object). Per-insert TEACHER masks
+            # from m_decoy_by_t[w_k]. On moving clips the duplicate
+            # region drifts, so a single insert-time mask spatially
+            # mis-specifies the student pool.
+            teacher_decoy_mask_by_k: Dict[int, Tensor] = {}
+            for k_, w_ in enumerate(W_sorted_int):
+                if int(w_) in m_decoy_by_t:
+                    teacher_decoy_mask_by_k[k_] = downsample_decoy_mask(
+                        m_decoy_by_t[int(w_)], int(h_mem), int(w_mem)
+                    ).to(x_clean.device)
+
+            # Step 3: select bridge frames (per insert, first L post-insert).
+            bridge_frames_by_k = select_bridge_frames(
+                W_attacked, T_proc,
+                bridge_length=config.state_continuation_bridge_length,
+            )
+            n_bridge_total = sum(
+                len(v) for v in bridge_frames_by_k.values())
+            polish_stats["sc_bridge_frames_by_k"] = {
+                int(k): list(v) for k, v in bridge_frames_by_k.items()}
+            polish_stats["sc_n_bridge_total"] = n_bridge_total
+
+            # Per-bridge-frame student masks (uses m_decoy_by_t at the
+            # bridge frame's own T_proc index).
+            student_decoy_mask_by_t: Dict[int, Tensor] = {}
+            for k_, t_list in bridge_frames_by_k.items():
+                for t in t_list:
+                    if int(t) in m_decoy_by_t:
+                        student_decoy_mask_by_t[int(t)] = \
+                            downsample_decoy_mask(
+                                m_decoy_by_t[int(t)],
+                                int(h_mem), int(w_mem)
+                            ).to(x_clean.device)
+
+            if n_bridge_total == 0:
+                polish_stats["skipped"] = (
+                    "state_continuation_no_bridge_frames_in_window")
+            else:
+                # Step 4: run state-continuation polish PGD.
+                nu_a0 = result.nu_star.to(x_clean.device)
+                delta_sc, nu_sc, sc_logs, best_step = \
+                    _run_state_continuation_pgd(
+                        x_clean=x_clean, decoy_seeds=decoy_seeds,
+                        nu_init=nu_a0, W_attacked=W_attacked,
+                        bridge_frames_by_k=bridge_frames_by_k,
+                        teacher_M_by_k=teacher_M_by_k,
+                        teacher_p_by_k=teacher_p_by_k,
+                        forward_fn=forward_fn, lpips_fn=lpips_fn,
+                        m_decoy_by_t=m_decoy_by_t,
+                        m_true_by_t=m_true_by_t,
+                        config=config,
+                        student_decoy_mask_by_t=student_decoy_mask_by_t,
+                        teacher_decoy_mask_by_k=teacher_decoy_mask_by_k,
+                    )
+                polish_logs = sc_logs
+
+                if delta_sc is None or nu_sc is None:
+                    polish_stats["skipped"] = (
+                        "state_continuation_no_feasible_step")
+                else:
+                    polish_dir = out_root / clip_name \
+                        / f"{config_name}__sc" / "processed"
+                    export_processed_uint8(
+                        x_clean, delta_sc.to(x_clean.device),
+                        nu_sc.to(x_clean.device), decoy_seeds,
+                        W_attacked, polish_dir,
+                    )
+                    exported_polish = load_processed_uint8(
+                        polish_dir).to(x_clean.device)
+                    polish_eval = eval_exported_j_drop(
+                        sam2_eval_fn=sam2_eval_fn,
+                        prompt_mask=prompt_mask,
+                        x_clean=x_clean,
+                        base_inserts=decoy_seeds,
+                        exported=exported_polish,
+                        W=W_attacked,
+                        m_hat_true_by_t=m_true_by_t,
+                        m_hat_decoy_by_t=m_decoy_by_t,
+                        decoy_offsets=decoy_offsets,
+                    )
+                    sc_j_drop = float(polish_eval["J_drop_mean"])
+                    a0_j_drop = (exported_j_drop_val
+                                 if exported_j_drop_val is not None else 0.0)
+                    delta_j = sc_j_drop - a0_j_drop
+                    polish_stats["a0_j_drop"] = a0_j_drop
+                    polish_stats["sc_j_drop"] = sc_j_drop
+                    polish_stats["delta_j_drop"] = delta_j
+
+                    # Falsification metrics (codex pre-committed): mean
+                    # cos(M_t, M̄_k) and cos(p_t, p̄_k) at the SELECTED
+                    # checkpoint (the snapshot the polish actually
+                    # returned, identified by best_step) vs warm-start
+                    # (step 1, δ=0). Lift ≥ 0.15 = state alignment achieved.
+                    # Codex Loop3-R3-fix3: tie reported metrics to the
+                    # actual returned checkpoint, NOT a separate max-cos
+                    # log entry — that would overstate alignment vs the
+                    # exported δ*.
+                    if sc_logs:
+                        first_step = sc_logs[0]
+                        baseline_cos_M = float(first_step.get(
+                            "mean_cos_M", 0.0))
+                        baseline_cos_P = float(first_step.get(
+                            "mean_cos_P", 0.0))
+                        # Find the log corresponding to best_step (1-based).
+                        if best_step is not None and 1 <= best_step <= len(sc_logs):
+                            chosen_log = sc_logs[best_step - 1]
+                            sel_cos_M = float(chosen_log.get("mean_cos_M", 0.0))
+                            sel_cos_P = float(chosen_log.get("mean_cos_P", 0.0))
+                        else:
+                            sel_cos_M = baseline_cos_M
+                            sel_cos_P = baseline_cos_P
+                        polish_stats["sc_baseline_cos_M"] = baseline_cos_M
+                        polish_stats["sc_baseline_cos_P"] = baseline_cos_P
+                        polish_stats["sc_selected_step"] = best_step
+                        polish_stats["sc_selected_cos_M"] = sel_cos_M
+                        polish_stats["sc_selected_cos_P"] = sel_cos_P
+                        polish_stats["sc_lift_cos_M"] = sel_cos_M - baseline_cos_M
+                        polish_stats["sc_lift_cos_P"] = sel_cos_P - baseline_cos_P
+
+                    # Re-check exported fidelity (clean-ref aligned).
+                    polish_remeasure = remeasure_exported_feasibility(
+                        x_clean, sc_clean_refs_for_inserts, exported_polish,
+                        W_attacked, lpips_fn, ssim_fn, config,
+                    )
+                    polish_export_feasible = bool(
+                        polish_remeasure.get("step_feasible_on_export", False))
+                    polish_stats["exported_feasibility"] = polish_remeasure
+                    polish_stats["polish_export_feasible"] = polish_export_feasible
+                    accept = (
+                        polish_export_feasible
+                        and (
+                            (not config.state_continuation_off_switch)
+                            or (delta_j >= config.state_continuation_min_improvement)
+                        )
+                    )
+                    polish_stats["accepted"] = accept
+                    if accept:
+                        polish_applied = True
+                        export_dir = polish_dir
+                        exported_j_drop_val = sc_j_drop
+                        exported_j_drop_details = polish_eval
+                        result = V5Result(
+                            delta_star=delta_sc, nu_star=nu_sc,
+                            best_surrogate_loss=float("nan"),
+                            infeasible=False, step_logs=result.step_logs,
+                        )
+                    else:
+                        polish_reverted = True
+
     summary_logs: List[Dict[str, Any]] = [asdict(log) for log in result.step_logs]
     if polish_logs:
         polish_stats["step_logs"] = polish_logs
@@ -1850,6 +2341,19 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--hiera-steering-loss-type",
                    choices=["l2", "cosine"], default="l2")
     p.add_argument("--hiera-steering-no-off-switch", action="store_true")
+    # Decoy State Continuation polish (Loop 3 R3)
+    p.add_argument("--state-continuation", action="store_true",
+                   help="After A0 ν-only run, run Decoy State Continuation "
+                        "polish: cache A0's per-insert maskmem_features + "
+                        "obj_ptr as teachers, optimize δ on bridge originals "
+                        "to align bridge state to teachers via cosine loss. "
+                        "Takes precedence over --hiera-steering when both set.")
+    p.add_argument("--state-continuation-n-steps", type=int, default=30)
+    p.add_argument("--state-continuation-bridge-length", type=int, default=3)
+    p.add_argument("--state-continuation-lambda-M", type=float, default=1.0)
+    p.add_argument("--state-continuation-lambda-P", type=float, default=1.0)
+    p.add_argument("--state-continuation-lambda-margin", type=float, default=1.0)
+    p.add_argument("--state-continuation-no-off-switch", action="store_true")
     return p
 
 
@@ -1922,6 +2426,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             hiera_steering_loss_type=args.hiera_steering_loss_type,
             hiera_steering_off_switch=(
                 not args.hiera_steering_no_off_switch),
+            state_continuation=args.state_continuation,
+            state_continuation_n_steps=args.state_continuation_n_steps,
+            state_continuation_bridge_length=(
+                args.state_continuation_bridge_length),
+            state_continuation_lambda_M=args.state_continuation_lambda_M,
+            state_continuation_lambda_P=args.state_continuation_lambda_P,
+            state_continuation_lambda_margin=(
+                args.state_continuation_lambda_margin),
+            state_continuation_off_switch=(
+                not args.state_continuation_no_off_switch),
         )
         out = run_v5_for_clip(
             clip_name=clip_name, config_name=config_name,
