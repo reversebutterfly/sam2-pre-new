@@ -91,6 +91,10 @@ class VADIv5Config:
     lpips_orig_cap: float = 0.20
     lpips_insert_cap: float = 0.35        # vs x_ref (source frame), NOT vs seed
     tv_multiplier: float = 1.2
+    # f0 (mask-prompt frame) two-tier high-fidelity SSIM floor (matches
+    # VADIv4Config canonical 0.98). Required by remeasure_exported_feasibility
+    # when the polish stage rechecks exported fidelity.
+    f0_ssim_floor: float = 0.98
 
     # Decoy-tracking loss weights. Split γ by insert vs post-insert
     # (codex R1 review fix): γ=0.5 on insert can push ν to erase the
