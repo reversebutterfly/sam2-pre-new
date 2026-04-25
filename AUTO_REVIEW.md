@@ -1961,3 +1961,154 @@ Per pre-committed criterion: **+0.0006 ≪ +0.05 AND 0 ≪ 2 → cut δ permanen
 - User over-rides codex verdict for the 3rd time: "design STRONGER perturbation, maintain high fidelity" (auto-review-loop Round 2 directive 2026-04-25)
 - A0 (no δ) remains the empirically-validated method at mean J_drop ~0.48-0.51 across 10 clips
 
+
+
+## Loop 3 Round 2 — Phase E documentation (2026-04-25)
+
+### Round 2 Topic
+"Design STRONGER perturbation maintaining high fidelity" (user override of Round 1 cut-δ verdict).
+
+### Codex Round 2 Phase A → B (4-design pitch)
+Codex (gpt-5.4 xhigh, threadId 019dbfe0) ranked 4 alternatives:
+1. **Hiera feature-steering δ** (+0.04~+0.08 forecast) — pull post-insert Hiera tokens toward synthetic-decoy teacher Hiera via L2 loss
+2. Motion-template δ (+0.02~+0.05) — δ shaped by optical-flow prior
+3. Low-rank decomposition δ (+0.02~+0.04) — restrict δ to low-rank spatial basis
+4. Deterministic photometric δ (+0.01~+0.03) — global brightness/contrast nudges
+
+User chose option D = parallel: implement Track A (Hiera feature-steering) + run Track C placement scan.
+
+### Phase C — Hiera-steering δ v0 implementation
+
+3 files modified (~989 lines insertions): `memshield/hiera_features.py` (NEW), `memshield/vadi_sam2_wiring.py` (extension), `scripts/run_vadi_v5.py` (extension). 5 codex pre-commit review rounds caught 7 bugs (2 critical, 2 high, 2 medium, 1 low). Commit `1307ebb`.
+
+### Phase D v0 — 3-clip pilot (dog/camel/blackswan)
+
+| clip | A0 J-drop | Hiera J-drop | Δ | f0_ssim | per_insert_tv_excess | accepted |
+|------|-----------|--------------|---|---------|----------------------|----------|
+| dog | 0.319 | 0.805 | +0.486 | 0.958 | [15854, 1357, 18315] | False |
+| camel | 0.984 | 0.899 | -0.085 | 0.965 | [20849, 25161, 26532] | False |
+| blackswan | 0.727 | 0.782 | +0.055 | 0.956 | [8923, 16283, 18103] | False |
+
+Raw mean Δ = +0.152 (above R5 +0.02 bar) BUT all 3 clips reverted by off-switch — fidelity gates failed:
+- **f0 SSIM 0.956-0.965 < 0.98 floor**
+- **per_insert_tv_excess 8k-26k > 0**
+
+### Phase D — Bug post-mortem (codex thread 019dc395)
+
+Codex confirmed 3 bugs:
+1. **f0 leak via SAM2 memory backprop**: δ at f0 saturated to ε=4/255 because SAM2's causal memory propagation backprop'd loss through f0 → δ[0].grad ≠ 0 → polish PGD updated δ[0] every step.
+2. **Reference mismatch (TV blowup)**: opt-time L_fid_TV used `x_clean[c_k]`, remeasure used `decoy_seeds`. Apples-to-oranges → opt feasibility ≠ remeasure feasibility.
+3. **A0 not export-validated**: A0's `infeasible=False` was effectiveness-only; never called `remeasure_exported_feasibility`.
+
+Codex verdict: "+0.152 not decision-grade — illegal-shortcut contaminated". One clean rerun mandated.
+
+### Phase D v0.1 — Re-implementation with 6 fixes
+
+Commit `4b6e275`. Fixes:
+1. δ support_mask (clean-space, post-insert-only) → δ.grad.mul_(mask) + δ.mul_(mask) projection
+2. Frozen ν during polish (codex confirmed L_hiera has no ν gradient path)
+3. Reference-aligned: build `clean_refs_for_inserts = stack(x_clean[w-k])` shared by preflight + remeasure
+4. A0 clean-ref preflight: skip polish if A0 already infeasible vs clean-ref TV/LPIPS (frozen ν cannot recover)
+5. assert→RuntimeError (survives `python -O`)
+6. Stage 11 entry gate on `ssim_fn is not None` (no-op-blind-polish guard)
+
+### Phase D v0.1 — Decision-grade pilot
+
+| clip | A0 J-drop | Hiera J-drop | Δ | accepted | preflight_ssim_f0 | delta_outside_support_linf |
+|------|-----------|--------------|---|----------|-------------------|---------------------------|
+| dog | 0.391 | 0.334 | **−0.057** | False (reverted) | 0.99998 | 0.0 |
+| camel | 0.982 | 0.982 | +0.0005 | True | 0.99996 | 0.0 |
+| blackswan | 0.7265 | 0.7266 | +0.00008 | True | 0.99994 | 0.0 |
+
+**Mean Δ = −0.019** (was +0.152 with bugs; bug-free signal is negative).
+
+All invariants clean: 30/30 feasible polish steps, δ_outside_support_linf=0.0, preflight passed on all clips.
+
+### Codex R5 pre-committed criterion verdict applied
+"if mean lift < +0.02, cut δ permanently". Result: −0.019 ≪ +0.02 → cut δ.
+
+### Status (end of Round 2)
+
+- Codex 4th cut-δ recommendation
+- User 4th override: "现在的插帧策略没有和修改原有帧形成良好的配合，仔细研究 sam2 的机制，设计出好的方法" (Round 3 directive 2026-04-25)
+- Validated method remains: `K3_top_R8_b-mid_l-mg_o-pg_d-off_s-io100` (insert-only, no δ on originals), mean J-drop 0.48-0.51
+
+
+
+## Loop 3 Round 3 — Phase E documentation (2026-04-25)
+
+### Round 3 Topic
+"User says insertion + frame-modification not coordinating; study SAM2 mechanism, design coordinated δ + insert" (4th override of cut-δ).
+
+### Codex Round 3 Phase A → B (mechanism study + 5 designs)
+Deep SAM2 source review. Key finding: SAM2 carries persistent state via `maskmem_features` + `obj_ptr` (encoded by `_encode_new_memory`, read by `memory_attention`). Past δ designs (boundary-bridge, hiera-steering) attacked transient features which DON'T persist; the actual amplifier is the recurrent state.
+
+5 designs ranked: Decoy State Continuation #1 (+0.02-0.04, outside +0.05); Insert-Slot Attention Routing #2; Pointer Persistence Bootstrap #3; f0 Anchor Softening #4; Mask-Decoder Token Handoff #5.
+
+Codex pre-committed falsification: **state alignment lift ≥ 0.15 AND mean ΔJ < +0.02 → cut δ permanently**.
+
+### Phase C — Decoy State Continuation v0 implementation (~1100 lines)
+3 files: `memshield/state_continuation.py` (NEW), `memshield/vadi_sam2_wiring.py` (forward_with_state), `scripts/run_vadi_v5.py` (Stage 12). Codex pre-commit review caught 3 bugs: per-bridge-frame masks (HIGH, fixed), teacher caching from EXPORTED uint8 (MEDIUM, fixed), best_step bookkeeping (MEDIUM, fixed). Self-tests 6/6 pass.
+
+### Phase D — 3-clip pilot (commit f163d15)
+
+| clip | A0 | SC | ΔJ | accepted | cos_M lift | cos_P lift |
+|---|---|---|---|---|---|---|
+| dog | 0.071 (A0 collapsed via cuDNN nondeterm) | — | — | preflight skipped | — | — |
+| camel | 0.983 | 0.982 | -0.001 | False | +0.176 ✓ | +0.137 |
+| blackswan | 0.726 | **0.566** | **-0.159** | False | +0.221 ✓ | +0.359 ✓ |
+
+Mean Δ on testable clips = **-0.080** (camel + blackswan). Off-switch reverted both.
+
+### Falsification verdict applied (codex R3 pre-committed)
+State alignment achieved as designed (3 of 4 cos lifts ≥ 0.15), 30/30 feasible polish steps, `delta_outside_support_linf=0.0`, but J-drop did NOT follow → coordination hypothesis empirically falsified in its mechanism-aligned form.
+
+### Round 3 → Round 4 transition
+
+User reframes: "对原有帧的修改一定要通过优化δ吗，有没有其他方法？" + "设计方案时不应该考虑预算"
+
+Codex re-ranks WITHOUT LOC constraint: Trajectory-Consistent Bridge Editor (localized duplicate continuation overlay + local warp + joint optimization with inserts) is best-in-principle. Forecast: 0.60-0.66 mean, best 0.62. Mechanism: PGD δ failed because it only nudged originals in feature space; the new design makes originals BECOME bridge states in the false trajectory (semantic edit, NOT ε-ball perturbation).
+
+**Pre-committed Round 4 criterion**: mean Δ ≥ +0.05 over A0 → continue to full 10-clip + ablations; < +0.02 → cut δ permanently (final, 5th attempt). 5 user overrides exhausted.
+
+
+
+## Loop 3 Round 5 — Phase E documentation (2026-04-25)
+
+### Round 5 Topic
+"User can modify both insertion + frame-modify strategies. Both must produce synergy. No budget cap." (5th cut-δ override + scope expansion).
+
+### Codex Round 5 Phase A → B (joint design space exploration)
+After scope expansion, codex's true top design (placement+content+modify joint): **Curriculum Burst-and-Refresh False Trajectory** at K=5-7. User pushed back: K too high (fidelity), focus shifted to insert content. Codex re-ranked under K=3 + LPIPS budget: **Trajectory-Predicted Semantic Scaffold + Localized Free-Form Residual** is best, forecast 0.58-0.62.
+
+User then questioned proxies in implementation. Codex revealed: in publisher-side offline threat model, "trajectory predictor" is itself a proxy — full no-proxy uses **oracle future clean trace**. Path 1 (full no-proxy) forecast 0.60-0.64 mean (+0.10-0.12 over A0 ~0.50).
+
+### Phase A.5: Full proxy audit
+Codex enumerated all proxies in current pipeline. 5 high-impact + 3 medium + several "not actually proxies". Bundled into 3 work units:
+- **Bundle A: Trajectory oracleization** (placement profiling, oracle false trajectory, per-frame oracle decoy masks, per-clip bridge length)
+- **Bundle B: Semantic content upgrade** (insert scaffold via inpainting model, semantic bridge compositor, soft-mask residual)
+- **Bundle C: Optimization cleanup** (end-to-end joint opt, LPIPS-native ν)
+
+### CLAUDE.md hard rule added (2026-04-25)
+"No-Proxy Implementation": when implementing, do NOT downgrade components to proxies for LOC reasons. Default = full spec. Any proxy substitution requires explicit user approval with documented capacity loss.
+
+### Phase C — Bundle A sub-session 1 (commit f8518b0)
+2 new modules pushed:
+- `memshield/oracle_trajectory.py` (~370 LOC): FalseTrajectoryParams (anchor + delta decomposition), trajectory_offset_at, project_trajectory_to_budget, shift_mask_torch (differentiable), build_oracle_decoy_masks_for_clip, trajectory_smoothness_loss, select_bridge_length_per_insert. **7/7 self-tests pass**.
+- `memshield/placement_profiler.py` (~440 LOC): beam_search_K3 (K=1 → top-B → K=2 → top-B → K=3, ~850 evals/clip vs C(50,3)=19600 naive), feasible_candidates, expand_beam, make_cached_scorer, random_K3_subsets (with strict mode), serialize/deserialize. **6/6 self-tests pass**.
+
+Codex pre-integration review GO after 3 fixes:
+- HIGH: oracle_trajectory refused silent sort of W_clean_positions (raises ValueError if unsorted, caller must reorder anchor/delta/bridge_lengths consistently)
+- HIGH: placement_profiler explicit empty-layer error in beam_search_K3 + strict mode in random_K3_subsets
+- LOW: preserve metadata in all serialized layers (not just best)
+
+### Status (end of Round 5 sub-session 1)
+- Bundle A modules implemented + tested (locally + Pro 6000)
+- Sub-session 2 (next): driver integration + placement profiling preprocessing (overnight GPU)
+- Sub-session 3-7: Bundle B + Bundle C + final pilot
+
+### Pre-committed Round 5 criterion (6th and FINAL δ attempt)
+- mean ΔJ ≥ +0.05 over A0 → continue full 10-clip + ablations, paper goes
+- mean ΔJ < +0.02 → cut δ permanently (final)
+- middle: Pareto synergy ablation paper
+
