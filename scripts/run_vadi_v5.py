@@ -204,6 +204,37 @@ class VADIv5Config:
     state_continuation_off_switch: bool = True
     state_continuation_min_improvement: float = 0.0
 
+    # Joint Trajectory-Consistent Decoy Attack (codex Loop 3 R4 locked design,
+    # 2026-04-25). Replaces ε∞-PGD δ with semantic bridge editing: per-bridge-
+    # frame duplicate-object overlay (learnable α) + decoy-direction translation
+    # warp on true-object ROI. Joint optimization with insert ν (Phase A frozen
+    # ν, Phase B joint refinement). Drops ε∞ on non-prompt frames; keeps
+    # LPIPS ≤ 0.20 perceptual budget. Falsification criterion (5th and FINAL):
+    # mean Δ ≥ +0.05 → continue; < +0.02 → cut δ permanently.
+    joint_trajectory: bool = False
+    joint_traj_bridge_length: int = 3
+    joint_traj_alpha_max: float = 0.30           # max overlay strength (sigmoid bound)
+    joint_traj_max_disp_px: float = 2.0          # max warp magnitude in pixels
+    joint_traj_alpha_lr: float = 0.05            # Adam LR for α_logits
+    joint_traj_warp_lr: float = 0.1              # Adam LR for warp_s, warp_r
+    joint_traj_phase_a_steps: int = 20           # frozen-ν bridge-edit steps
+    joint_traj_phase_b_steps: int = 10           # joint ν+bridge refinement steps
+    joint_traj_nu_lr_phase_b: float = 0.5 / 255.0  # ν step in joint phase (low)
+    joint_traj_lambda_margin: float = 1.0
+    joint_traj_lambda_obj: float = 0.5           # positive-objectness weight
+    joint_traj_lambda_area: float = 0.25         # area-preservation weight
+    joint_traj_lambda_fid: float = 10.0          # fidelity hinge (escalates)
+    joint_traj_lambda_alpha: float = 0.05        # α regularizer
+    joint_traj_lambda_warp: float = 0.02         # warp regularizer
+    joint_traj_obj_threshold: float = 0.5        # positive-objectness floor
+    joint_traj_area_min: float = 0.6
+    joint_traj_area_max: float = 1.4
+    joint_traj_overlay_dilate_px: int = 2
+    joint_traj_overlay_feather_sigma: float = 2.5
+    joint_traj_true_mask_feather_sigma: float = 2.0
+    joint_traj_off_switch: bool = True
+    joint_traj_min_improvement: float = 0.0
+
     # STE quantization during training (codex R2 post-fix: v4 pipeline
     # always applied fake_uint8_quantize in _apply_{delta,nu} which
     # simulated the export-time uint8 round-trip during every forward.
@@ -1441,6 +1472,377 @@ def _run_state_continuation_pgd(
 
 
 # =============================================================================
+# Joint Trajectory-Consistent Decoy Attack (codex Loop 3 R4 locked design)
+# =============================================================================
+
+
+def _run_joint_trajectory_pgd(
+    x_clean: Tensor,
+    decoy_seeds: Tensor,
+    nu_init: Tensor,
+    W_attacked: Sequence[int],
+    bridge_frames_by_k: Dict[int, List[int]],
+    softened_decoy_masks_by_t: Dict[int, Tensor],   # {t → [H, W]} for overlay placement
+    softened_true_masks_by_t: Dict[int, Tensor],    # {t → [H, W]} for warp ROI
+    duplicate_frames_by_t: Dict[int, Tensor],       # {t → [H, W, 3]} pre-built duplicates
+    decoy_offsets_unit: Tensor,                     # [K, 2] unit (dy, dx)
+    forward_fn,                                      # VADIForwardFn
+    lpips_fn: Callable,
+    m_decoy_by_t: Dict[int, Tensor],
+    m_true_by_t: Dict[int, Tensor],
+    config: VADIv5Config,
+) -> Tuple[Optional[Tensor], Optional[Tensor], Optional[Dict[str, Any]],
+           List[Dict[str, Any]], Optional[int]]:
+    """Joint trajectory-consistent decoy attack PGD (codex Loop 3 R4).
+
+    Replaces ε∞-PGD δ with: localized continuation overlay + decoy-direction
+    translation warp on bridge originals. Both controlled by learnable
+    parameters (α_logits, warp_s, warp_r) optimized via Adam.
+
+    Phase A (config.joint_traj_phase_a_steps, default 20): freeze ν, optimize
+    α + warp on bridge frames. Validates whether semantic bridge edits help
+    without destabilizing the insert anchor.
+    Phase B (config.joint_traj_phase_b_steps, default 10): unfreeze ν at low
+    LR for joint refinement.
+
+    Returns:
+      (x_edited_star, nu_star, edit_params, step_logs, best_step)
+
+      x_edited_star: [T_clean, H, W, 3] — the bridge-edited clean tensor at
+        the best snapshot. Exporter passes this directly as `x_clean` with
+        delta=0 to maintain compatibility.
+      edit_params: dict of α_logits, warp_s, warp_r at best snapshot
+        (for downstream interpretability/debugging).
+    """
+    from memshield.decoy_continuation import (
+        init_bridge_edit_params, alpha_from_logits, displacement_from_warp,
+        apply_continuation_overlay, apply_translation_warp_roi,
+        positive_objectness_loss, area_preservation_loss,
+        alpha_regularizer, warp_regularizer,
+    )
+    from memshield.vadi_loss import (
+        aggregate_margin_loss, decoy_margin_per_frame,
+        lpips_cap_hinge, tv_hinge,
+    )
+
+    device = x_clean.device
+    T_clean = x_clean.shape[0]
+    K = len(W_attacked)
+    W_set = set(int(w) for w in W_attacked)
+    W_sorted = sorted(W_set)
+
+    # Bridge frame flat list + map to (k, l_idx).
+    bridge_t_list: List[Tuple[int, int, int]] = []   # (t_proc, k, l_idx)
+    for k_, t_list in bridge_frames_by_k.items():
+        for l_idx, t in enumerate(t_list):
+            bridge_t_list.append((int(t), int(k_), int(l_idx)))
+    if not bridge_t_list:
+        return None, None, None, [], None
+    bridge_t_proc_set = sorted(t for t, _, _ in bridge_t_list)
+    L_max = max(len(v) for v in bridge_frames_by_k.values()) if \
+        bridge_frames_by_k else 0
+
+    # Initialize learnable parameters.
+    edit_params = init_bridge_edit_params(
+        K, L_max,
+        alpha_max=config.joint_traj_alpha_max,
+        s_init_px=1.0, r_init_px=0.0,
+        device=device, dtype=x_clean.dtype,
+    )
+    decoy_unit = decoy_offsets_unit.to(device).to(x_clean.dtype)
+
+    # ν: frozen in Phase A.
+    nu = nu_init.detach().clone().to(device)
+    nu_requires_grad = False
+
+    opt_alpha = torch.optim.Adam(
+        [edit_params.alpha_logits], lr=config.joint_traj_alpha_lr,
+    )
+    opt_warp = torch.optim.Adam(
+        [edit_params.warp_s, edit_params.warp_r],
+        lr=config.joint_traj_warp_lr,
+    )
+
+    # Loss-query frames: insert ∪ bridge.
+    insert_polish = sorted(W_set)
+    bridge_polish = [t for t, _, _ in bridge_t_list]
+    margin_query_frames = sorted(set(insert_polish + bridge_polish))
+
+    best: Optional[Tuple[Tensor, Tensor, Dict[str, Tensor], float, int]] = \
+        None
+    step_logs: List[Dict[str, Any]] = []
+    lambda_fid_val = config.joint_traj_lambda_fid
+
+    total_steps = (
+        config.joint_traj_phase_a_steps + config.joint_traj_phase_b_steps)
+
+    for step in range(total_steps):
+        # Phase B switch: unfreeze ν at low LR (sign-PGD applied manually).
+        if step == config.joint_traj_phase_a_steps and not nu_requires_grad:
+            nu = nu.detach().clone().requires_grad_(True)
+            nu_requires_grad = True
+
+        # Build edited bridge frames (differentiable via list+stack).
+        alphas = alpha_from_logits(
+            edit_params.alpha_logits, alpha_max=config.joint_traj_alpha_max,
+        )                                              # [K, L]
+        d_xy = displacement_from_warp(
+            edit_params.warp_s, edit_params.warp_r,
+            u_dir=decoy_unit, max_disp_px=config.joint_traj_max_disp_px,
+        )                                              # [K, L, 2] (dy, dx)
+
+        # Build a per-clean-index edit dict so we can stack.
+        edited_by_c: Dict[int, Tensor] = {}
+        for t, k_, l_idx in bridge_t_list:
+            c_t = _attacked_to_clean_same_space(int(t), W_attacked)
+            if not (0 <= c_t < T_clean):
+                continue
+            x_t = x_clean[c_t]
+            if t not in softened_true_masks_by_t or \
+                    t not in softened_decoy_masks_by_t or \
+                    t not in duplicate_frames_by_t:
+                continue
+            true_mask = softened_true_masks_by_t[int(t)].to(device)
+            decoy_mask = softened_decoy_masks_by_t[int(t)].to(device)
+            duplicate = duplicate_frames_by_t[int(t)].to(device)
+            d_yx = d_xy[k_, l_idx]
+            x_warped = apply_translation_warp_roi(x_t, true_mask, d_yx)
+            x_edited = apply_continuation_overlay(
+                x_warped, duplicate, decoy_mask, alphas[k_, l_idx],
+            )
+            edited_by_c[int(c_t)] = x_edited
+
+        # Stack into a full [T_clean, H, W, 3] tensor (non-bridge frames =
+        # original x_clean).
+        frames: List[Tensor] = []
+        for c in range(T_clean):
+            if c in edited_by_c:
+                frames.append(edited_by_c[c])
+            else:
+                frames.append(x_clean[c])
+        x_edited_full = torch.stack(frames, dim=0)
+
+        # ν is frozen in Phase A; in Phase B it has grad.
+        inserts = (decoy_seeds + nu).clamp(0.0, 1.0)
+        if config.train_ste_quantize:
+            from memshield.losses import fake_uint8_quantize
+            x_edited_full = fake_uint8_quantize(x_edited_full)
+            inserts = fake_uint8_quantize(inserts)
+
+        processed = build_processed(x_edited_full, inserts, W_attacked)
+
+        # Forward — logits at margin frames + objectness at bridge frames.
+        logits_by_t, obj_score_by_t = forward_fn.forward_with_objectness(
+            processed, return_at=margin_query_frames,
+            objectness_at=bridge_polish,
+        )
+
+        # Decoy margin loss (existing v4 contrastive).
+        margins_by_t = {}
+        for t in margin_query_frames:
+            if int(t) not in m_true_by_t or int(t) not in m_decoy_by_t:
+                continue
+            margins_by_t[int(t)] = decoy_margin_per_frame(
+                logits_by_t[int(t)],
+                m_true_by_t[int(t)], m_decoy_by_t[int(t)],
+                margin=config.margin_threshold,
+            )
+        agg = aggregate_margin_loss(
+            margins_by_t,
+            insert_ids=insert_polish,
+            neighbor_ids=bridge_polish,
+            neighbor_weight=config.margin_neighbor_weight,
+        )
+        L_margin = agg.L_margin
+
+        # Positive objectness (no-suppression guard).
+        obj_logits_stack = torch.stack(
+            [obj_score_by_t[t].flatten().mean() for t in bridge_polish],
+            dim=0,
+        ) if bridge_polish else torch.zeros(0, device=device)
+        L_obj = positive_objectness_loss(
+            obj_logits_stack, threshold=config.joint_traj_obj_threshold,
+        )
+
+        # Area preservation (no empty-mask collapse).
+        bridge_logits_2d: Dict[int, Tensor] = {}
+        bridge_true_2d: Dict[int, Tensor] = {}
+        for t in bridge_polish:
+            if int(t) not in m_true_by_t:
+                continue
+            l = logits_by_t[int(t)]
+            bridge_logits_2d[int(t)] = l
+            bridge_true_2d[int(t)] = m_true_by_t[int(t)]
+        L_area, area_ratios = area_preservation_loss(
+            bridge_logits_2d, bridge_true_2d,
+            area_min=config.joint_traj_area_min,
+            area_max=config.joint_traj_area_max,
+        )
+
+        # Fidelity hinges — bridge originals (LPIPS), inserts (LPIPS + TV),
+        # f0 SSIM is enforced implicitly because we don't edit f0.
+        L_fid_bridge = torch.zeros((), dtype=x_edited_full.dtype, device=device)
+        for c in sorted(edited_by_c.keys()):
+            lp = lpips_fn(x_edited_full[c], x_clean[c])
+            L_fid_bridge = L_fid_bridge + lpips_cap_hinge(
+                lp, config.lpips_orig_cap)
+        L_fid_ins = torch.zeros_like(L_fid_bridge)
+        L_fid_TV = torch.zeros_like(L_fid_bridge)
+        for k_, w_ in enumerate(W_sorted):
+            c_k_ = int(w_ - k_)
+            if not (0 <= c_k_ < T_clean):
+                continue
+            x_ref = x_clean[c_k_]
+            lp = lpips_fn(inserts[k_], x_ref)
+            L_fid_ins = L_fid_ins + lpips_cap_hinge(
+                lp, config.lpips_insert_cap)
+            ins_chw = inserts[k_].permute(2, 0, 1)
+            ref_chw = x_ref.permute(2, 0, 1)
+            L_fid_TV = L_fid_TV + tv_hinge(
+                ins_chw, ref_chw, multiplier=config.tv_multiplier)
+        L_fid_total = L_fid_bridge + L_fid_ins + L_fid_TV
+
+        # Edit parameter regularizers.
+        L_alpha = alpha_regularizer(
+            alphas, l1_weight=1.0, smoothness_weight=1.0,
+        )
+        L_warp = warp_regularizer(
+            edit_params.warp_s, edit_params.warp_r,
+            l2_weight=1.0, orthogonal_weight=1.0, smoothness_weight=1.0,
+        )
+
+        # Total loss.
+        L = (
+            config.joint_traj_lambda_margin * L_margin
+            + config.joint_traj_lambda_obj * L_obj
+            + config.joint_traj_lambda_area * L_area
+            + lambda_fid_val * L_fid_total
+            + config.joint_traj_lambda_alpha * L_alpha
+            + config.joint_traj_lambda_warp * L_warp
+        )
+
+        # Diagnostics.
+        with torch.no_grad():
+            decoy_overlap_list: List[float] = []
+            true_overlap_list: List[float] = []
+            obj_score_list: List[float] = []
+            valid_t_list: List[int] = []
+            for t in bridge_polish:
+                if int(t) not in m_decoy_by_t or int(t) not in m_true_by_t:
+                    continue
+                pred = torch.sigmoid(logits_by_t[int(t)]).flatten()
+                m_d = m_decoy_by_t[int(t)].flatten().float()
+                m_tr = m_true_by_t[int(t)].flatten().float()
+                d_ov = float(((pred * m_d).sum()
+                              / m_d.sum().clamp_min(1e-4)).item())
+                t_ov = float(((pred * m_tr).sum()
+                              / m_tr.sum().clamp_min(1e-4)).item())
+                decoy_overlap_list.append(d_ov)
+                true_overlap_list.append(t_ov)
+                # Per-frame object_score for the wrong-but-present check.
+                obj_score_list.append(float(
+                    obj_score_by_t[int(t)].flatten().mean().item()))
+                valid_t_list.append(int(t))
+            mean_decoy_overlap = (
+                sum(decoy_overlap_list) / max(1, len(decoy_overlap_list)))
+            mean_true_overlap = (
+                sum(true_overlap_list) / max(1, len(true_overlap_list)))
+            mean_obj_score = (
+                float(obj_logits_stack.mean().item())
+                if obj_logits_stack.numel() > 0 else 0.0)
+            # Codex Loop3-R4 fix (low): wrong-but-present requires positive
+            # object_score per frame, otherwise the metric overlaps with
+            # suppression cases (negative score → "no object" → empty mask).
+            wrong_but_present = sum(
+                1 for d, tr, ar, obj in zip(
+                    decoy_overlap_list, true_overlap_list,
+                    [area_ratios.get(t, 1.0) for t in valid_t_list],
+                    obj_score_list)
+                if d > tr and ar > 0.5 and obj > 0.0
+            )
+
+        # Feasibility (only fidelity hinges; J-drop is checked at export).
+        tol = 1e-6
+        feas = (
+            float(L_fid_bridge.detach().item()) <= tol
+            and float(L_fid_ins.detach().item()) <= tol
+            and float(L_fid_TV.detach().item()) <= tol
+        )
+        if feas:
+            # Codex Loop3-R4 fix (medium): include L_alpha + L_warp in the
+            # best-state ranking. Optimizer minimizes the full feasible
+            # objective; the snapshot must reflect the same trade-offs.
+            score = -float(
+                config.joint_traj_lambda_margin
+                * L_margin.detach().item()
+                + config.joint_traj_lambda_obj * L_obj.detach().item()
+                + config.joint_traj_lambda_area * L_area.detach().item()
+                + config.joint_traj_lambda_alpha * L_alpha.detach().item()
+                + config.joint_traj_lambda_warp * L_warp.detach().item()
+            )
+            if best is None or score > best[3]:
+                best = (
+                    x_edited_full.detach().cpu().clone(),
+                    nu.detach().cpu().clone(),
+                    {
+                        "alpha_logits":
+                            edit_params.alpha_logits.detach().cpu().clone(),
+                        "warp_s": edit_params.warp_s.detach().cpu().clone(),
+                        "warp_r": edit_params.warp_r.detach().cpu().clone(),
+                    },
+                    score,
+                    step + 1,
+                )
+
+        log = {
+            "step": step + 1,
+            "phase": "A" if step < config.joint_traj_phase_a_steps else "B",
+            "L": float(L.detach().item()),
+            "L_margin": float(L_margin.detach().item()),
+            "L_obj": float(L_obj.detach().item()),
+            "L_area": float(L_area.detach().item()),
+            "L_fid_bridge": float(L_fid_bridge.detach().item()),
+            "L_fid_ins": float(L_fid_ins.detach().item()),
+            "L_fid_TV": float(L_fid_TV.detach().item()),
+            "L_alpha": float(L_alpha.detach().item()),
+            "L_warp": float(L_warp.detach().item()),
+            "mean_decoy_overlap": float(mean_decoy_overlap),
+            "mean_true_overlap": float(mean_true_overlap),
+            "delta_overlap": float(mean_decoy_overlap - mean_true_overlap),
+            "mean_obj_score": mean_obj_score,
+            "wrong_but_present_count": int(wrong_but_present),
+            "feasible": feas,
+            "alpha_mean": float(alphas.mean().detach().item()),
+            "alpha_max_step": float(alphas.max().detach().item()),
+            "warp_disp_max": float(d_xy.norm(dim=-1).max().detach().item()),
+            "n_bridge": len(bridge_polish),
+        }
+        step_logs.append(log)
+
+        # Backward + step.
+        opt_alpha.zero_grad()
+        opt_warp.zero_grad()
+        if nu_requires_grad and nu.grad is not None:
+            nu.grad.zero_()
+        L.backward()
+        opt_alpha.step()
+        opt_warp.step()
+        if nu_requires_grad and nu.grad is not None:
+            with torch.no_grad():
+                # ν: low-LR sign-PGD for joint Phase B.
+                nu.add_(
+                    -config.joint_traj_nu_lr_phase_b * nu.grad.sign())
+                nu.clamp_(-config.eps_nu, config.eps_nu)
+
+        if (not feas) and (step + 1) % config.lambda_growth_period == 0:
+            lambda_fid_val *= config.lambda_growth_factor
+
+    if best is None:
+        return None, None, None, step_logs, None
+    return best[0], best[1], best[2], step_logs, int(best[4])
+
+
+# =============================================================================
 # Per-clip orchestrator
 # =============================================================================
 
@@ -2035,8 +2437,10 @@ def run_v5_for_clip(
                 "a0_clean_ref_infeasible_polish_cannot_recover_with_frozen_nu")
 
     # --- Stage 12: Decoy State Continuation polish (codex Loop 3 R3, 2026-04-25)
+    # Joint Trajectory (Stage 13) takes precedence over State Continuation.
     _state_eligible = (
         config.state_continuation
+        and not config.joint_trajectory
         and not result.infeasible
         and not polish_applied
         and sam2_eval_fn is not None
@@ -2266,6 +2670,249 @@ def run_v5_for_clip(
                     else:
                         polish_reverted = True
 
+    # --- Stage 13: Joint Trajectory-Consistent Decoy Attack (codex Loop 3 R4)
+    # Locked design 2026-04-25. Replaces ε∞-PGD δ with semantic bridge edits:
+    # learnable per-bridge-frame duplicate-object overlay (α) + decoy-direction
+    # translation warp on true-object ROI. ν warm-started from A0, frozen for
+    # Phase A (20 steps), unfrozen at low LR for Phase B joint refinement (10).
+    _jt_eligible = (
+        config.joint_trajectory
+        and not result.infeasible
+        and not polish_applied
+        and sam2_eval_fn is not None
+        and result.nu_star is not None
+    )
+    if _jt_eligible and ssim_fn is None:
+        polish_stats["skipped"] = (
+            "joint_trajectory_requires_ssim_fn_for_fidelity_gate")
+    if _jt_eligible and ssim_fn is not None:
+        from memshield.decoy_continuation import (
+            select_bridge_frames as jt_select_bridge_frames,
+            soften_decoy_mask, unit_decoy_direction,
+        )
+        from memshield.decoy_seed import build_duplicate_object_decoy_frame
+
+        # Build clean-ref refs (shared with preflight + remeasure).
+        W_sorted_int = sorted(int(w) for w in W_attacked)
+        for k_, w_ in enumerate(W_sorted_int):
+            c_k_ = w_ - k_
+            if not (0 <= c_k_ < x_clean.shape[0]):
+                raise RuntimeError(
+                    f"Joint trajectory: invalid c_k={c_k_} for "
+                    f"W_sorted[{k_}]={w_} (T_clean={x_clean.shape[0]})")
+        jt_clean_refs_for_inserts = torch.stack([
+            x_clean[w_ - k_] for k_, w_ in enumerate(W_sorted_int)
+        ], dim=0).to(x_clean.device)
+
+        # Preflight: A0 export passes clean-ref fidelity? Joint trajectory
+        # has bridge-frame edits, so it CAN improve insert TV/LPIPS via ν
+        # in Phase B — but if A0 is already infeasible, the start point
+        # is bad and Phase B has limited budget to fix.
+        jt_preflight_ok = True
+        jt_preflight = remeasure_exported_feasibility(
+            x_clean, jt_clean_refs_for_inserts, exported, W_attacked,
+            lpips_fn, ssim_fn, config,
+        )
+        polish_stats["jt_a0_preflight"] = jt_preflight
+        jt_preflight_ok = bool(
+            jt_preflight.get("step_feasible_on_export", False))
+
+        if not jt_preflight_ok:
+            polish_stats["skipped"] = (
+                "joint_trajectory_a0_preflight_infeasible")
+        else:
+            # Build bridge frames per insert.
+            bridge_frames_by_k = jt_select_bridge_frames(
+                W_attacked, T_proc,
+                bridge_length=config.joint_traj_bridge_length,
+            )
+            n_bridge_total = sum(
+                len(v) for v in bridge_frames_by_k.values())
+            polish_stats["jt_bridge_frames_by_k"] = {
+                int(k): list(v) for k, v in bridge_frames_by_k.items()}
+            polish_stats["jt_n_bridge_total"] = n_bridge_total
+
+            if n_bridge_total == 0:
+                polish_stats["skipped"] = (
+                    "joint_trajectory_no_bridge_frames")
+            else:
+                # Pre-build per-bridge-frame duplicates + softened masks.
+                duplicate_frames_by_t: Dict[int, Tensor] = {}
+                softened_decoy_masks_by_t: Dict[int, Tensor] = {}
+                softened_true_masks_by_t: Dict[int, Tensor] = {}
+
+                # decoy_offsets keyed by W_clean order; rebuild by-insert-k order.
+                W_clean_sorted = sorted(W_clean)
+                offsets_for_sorted_W = [
+                    decoy_offsets[i] for i, _ in
+                    sorted(enumerate(W_clean), key=lambda kv: int(kv[1]))
+                ]
+                for k_, t_list in bridge_frames_by_k.items():
+                    if k_ >= len(offsets_for_sorted_W):
+                        continue
+                    dy_k, dx_k = offsets_for_sorted_W[k_]
+                    for t in t_list:
+                        c_t = _attacked_to_clean_same_space(int(t), W_attacked)
+                        if not (0 <= c_t < x_clean.shape[0]):
+                            continue
+                        if int(c_t) >= len(clean_out.pseudo_masks):
+                            continue
+                        m_true_c = torch.as_tensor(
+                            clean_out.pseudo_masks[int(c_t)],
+                            dtype=x_clean.dtype, device=x_clean.device,
+                        )
+                        # Build per-bridge duplicate using THIS frame's clean
+                        # content + true mask + same offset as parent insert.
+                        # Codex Loop3-R4 fix: builder returns ONE tensor.
+                        dup_frame = build_duplicate_object_decoy_frame(
+                            x_ref=x_clean[int(c_t)].to(x_clean.device),
+                            object_mask=m_true_c,
+                            decoy_offset=(int(dy_k), int(dx_k)),
+                            feather_radius=config.feather_radius,
+                            feather_sigma=config.feather_sigma,
+                        )
+                        duplicate_frames_by_t[int(t)] = dup_frame.to(
+                            x_clean.device)
+                        # Softened decoy mask (for overlay placement).
+                        # Source: m_decoy_by_t[t] — the v5 driver's
+                        # already-projected duplicate region at frame t in
+                        # processed space (codex R4 recommendation b).
+                        if int(t) in m_decoy_by_t:
+                            decoy_mask_src = m_decoy_by_t[int(t)].to(
+                                x_clean.device)
+                        else:
+                            # Fallback (rare — m_decoy_by_t is built for all
+                            # T_proc indices in the v5 pipeline). If it
+                            # triggers we use the un-shifted true mask as a
+                            # weak best-effort source; the overlay then sits
+                            # at the original object location, which weakens
+                            # but does not break the attack.
+                            decoy_mask_src = m_true_c
+                        softened_decoy_masks_by_t[int(t)] = soften_decoy_mask(
+                            decoy_mask_src,
+                            dilate_px=config.joint_traj_overlay_dilate_px,
+                            feather_sigma=config.joint_traj_overlay_feather_sigma,
+                        )
+                        # Softened true-object mask (for warp ROI).
+                        softened_true_masks_by_t[int(t)] = soften_decoy_mask(
+                            m_true_c, dilate_px=1,
+                            feather_sigma=config.joint_traj_true_mask_feather_sigma,
+                        )
+
+                # Unit decoy directions per insert.
+                jt_decoy_offsets_unit = unit_decoy_direction(
+                    offsets_for_sorted_W).to(x_clean.device)
+
+                # Run joint trajectory PGD.
+                nu_a0 = result.nu_star.to(x_clean.device)
+                x_edited_star, nu_jt, edit_params, jt_logs, best_step = \
+                    _run_joint_trajectory_pgd(
+                        x_clean=x_clean,
+                        decoy_seeds=decoy_seeds,
+                        nu_init=nu_a0,
+                        W_attacked=W_attacked,
+                        bridge_frames_by_k=bridge_frames_by_k,
+                        softened_decoy_masks_by_t=softened_decoy_masks_by_t,
+                        softened_true_masks_by_t=softened_true_masks_by_t,
+                        duplicate_frames_by_t=duplicate_frames_by_t,
+                        decoy_offsets_unit=jt_decoy_offsets_unit,
+                        forward_fn=forward_fn, lpips_fn=lpips_fn,
+                        m_decoy_by_t=m_decoy_by_t, m_true_by_t=m_true_by_t,
+                        config=config,
+                    )
+                polish_logs = jt_logs
+
+                if x_edited_star is None or nu_jt is None:
+                    polish_stats["skipped"] = (
+                        "joint_trajectory_no_feasible_step")
+                else:
+                    polish_dir = out_root / clip_name \
+                        / f"{config_name}__jt" / "processed"
+                    # Export: pass x_edited_star AS x_clean with delta=0.
+                    # The semantic bridge edits ARE the modification.
+                    delta_zero = torch.zeros_like(
+                        x_edited_star, device=x_edited_star.device)
+                    export_processed_uint8(
+                        x_edited_star.to(x_clean.device),
+                        delta_zero.to(x_clean.device),
+                        nu_jt.to(x_clean.device),
+                        decoy_seeds, W_attacked, polish_dir,
+                    )
+                    exported_polish = load_processed_uint8(
+                        polish_dir).to(x_clean.device)
+                    polish_eval = eval_exported_j_drop(
+                        sam2_eval_fn=sam2_eval_fn,
+                        prompt_mask=prompt_mask,
+                        x_clean=x_clean,
+                        base_inserts=decoy_seeds,
+                        exported=exported_polish,
+                        W=W_attacked,
+                        m_hat_true_by_t=m_true_by_t,
+                        m_hat_decoy_by_t=m_decoy_by_t,
+                        decoy_offsets=decoy_offsets,
+                    )
+                    jt_j_drop = float(polish_eval["J_drop_mean"])
+                    a0_j_drop = (exported_j_drop_val
+                                 if exported_j_drop_val is not None else 0.0)
+                    delta_j = jt_j_drop - a0_j_drop
+                    polish_stats["a0_j_drop"] = a0_j_drop
+                    polish_stats["jt_j_drop"] = jt_j_drop
+                    polish_stats["delta_j_drop"] = delta_j
+
+                    # Falsification metrics from the SELECTED checkpoint.
+                    if jt_logs and best_step is not None and \
+                            1 <= best_step <= len(jt_logs):
+                        chosen = jt_logs[best_step - 1]
+                        polish_stats["jt_selected_step"] = best_step
+                        polish_stats["jt_selected_decoy_overlap"] = \
+                            chosen.get("mean_decoy_overlap")
+                        polish_stats["jt_selected_true_overlap"] = \
+                            chosen.get("mean_true_overlap")
+                        polish_stats["jt_selected_delta_overlap"] = \
+                            chosen.get("delta_overlap")
+                        polish_stats["jt_selected_obj_score"] = \
+                            chosen.get("mean_obj_score")
+                        polish_stats["jt_selected_wrong_but_present"] = \
+                            chosen.get("wrong_but_present_count")
+                        polish_stats["jt_selected_alpha_mean"] = \
+                            chosen.get("alpha_mean")
+                        polish_stats["jt_selected_warp_disp_max"] = \
+                            chosen.get("warp_disp_max")
+
+                    # Re-check exported fidelity (clean-ref aligned).
+                    polish_remeasure = remeasure_exported_feasibility(
+                        x_clean, jt_clean_refs_for_inserts, exported_polish,
+                        W_attacked, lpips_fn, ssim_fn, config,
+                    )
+                    polish_export_feasible = bool(
+                        polish_remeasure.get(
+                            "step_feasible_on_export", False))
+                    polish_stats["exported_feasibility"] = polish_remeasure
+                    polish_stats["polish_export_feasible"] = polish_export_feasible
+                    accept = (
+                        polish_export_feasible
+                        and (
+                            (not config.joint_traj_off_switch)
+                            or (delta_j >= config.joint_traj_min_improvement)
+                        )
+                    )
+                    polish_stats["accepted"] = accept
+                    if accept:
+                        polish_applied = True
+                        export_dir = polish_dir
+                        exported_j_drop_val = jt_j_drop
+                        exported_j_drop_details = polish_eval
+                        # Joint trajectory doesn't produce a δ; result.delta
+                        # stays zero (semantic edits are baked into export).
+                        result = V5Result(
+                            delta_star=torch.zeros_like(x_clean),
+                            nu_star=nu_jt,
+                            best_surrogate_loss=float("nan"),
+                            infeasible=False, step_logs=result.step_logs,
+                        )
+                    else:
+                        polish_reverted = True
+
     summary_logs: List[Dict[str, Any]] = [asdict(log) for log in result.step_logs]
     if polish_logs:
         polish_stats["step_logs"] = polish_logs
@@ -2354,6 +3001,19 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--state-continuation-lambda-P", type=float, default=1.0)
     p.add_argument("--state-continuation-lambda-margin", type=float, default=1.0)
     p.add_argument("--state-continuation-no-off-switch", action="store_true")
+    # Joint Trajectory-Consistent Decoy Attack (Loop 3 R4)
+    p.add_argument("--joint-trajectory", action="store_true",
+                   help="After A0, run Joint Trajectory-Consistent Decoy "
+                        "Attack: semantic bridge edits (per-frame duplicate "
+                        "overlay + decoy-direction translation warp) jointly "
+                        "optimized with insert ν. Replaces ε-PGD δ. Takes "
+                        "precedence over --state-continuation and --hiera-steering.")
+    p.add_argument("--joint-traj-bridge-length", type=int, default=3)
+    p.add_argument("--joint-traj-alpha-max", type=float, default=0.30)
+    p.add_argument("--joint-traj-max-disp-px", type=float, default=2.0)
+    p.add_argument("--joint-traj-phase-a-steps", type=int, default=20)
+    p.add_argument("--joint-traj-phase-b-steps", type=int, default=10)
+    p.add_argument("--joint-traj-no-off-switch", action="store_true")
     return p
 
 
@@ -2436,6 +3096,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 args.state_continuation_lambda_margin),
             state_continuation_off_switch=(
                 not args.state_continuation_no_off_switch),
+            joint_trajectory=args.joint_trajectory,
+            joint_traj_bridge_length=args.joint_traj_bridge_length,
+            joint_traj_alpha_max=args.joint_traj_alpha_max,
+            joint_traj_max_disp_px=args.joint_traj_max_disp_px,
+            joint_traj_phase_a_steps=args.joint_traj_phase_a_steps,
+            joint_traj_phase_b_steps=args.joint_traj_phase_b_steps,
+            joint_traj_off_switch=(
+                not args.joint_traj_no_off_switch),
         )
         out = run_v5_for_clip(
             clip_name=clip_name, config_name=config_name,
