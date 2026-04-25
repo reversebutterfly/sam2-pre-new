@@ -2112,3 +2112,41 @@ Codex pre-integration review GO after 3 fixes:
 - mean ΔJ < +0.02 → cut δ permanently (final)
 - middle: Pareto synergy ablation paper
 
+
+
+## Loop 3 Round 5 sub-session 2 — Phase E documentation (2026-04-25)
+
+### Sub-session 2 Topic
+Bundle A continuation: integrate sub-session 1 modules into v5 driver + add placement-profiling preprocessing driver. Codex Q1-Q4 verdicts established before code (12-step cheap K=1/K=2, full 100-step K=3; full beam + raw K=1 cache; Stage 14 fully replaces Stage 13 via shared gating helper; profile.subset already sorted for direct W_clean_override consumption).
+
+### User extension to sub-session 2 plan
+"也把 Stage 13 迁过来" — full Stage 13 refactor to use the new polish_gating helper (zero regression goal), not just expose helper for Stage 14 use.
+
+### Phase C — implementation (commit b0967ea)
+4 files. ~2630 insertions / 282 deletions:
+- `memshield/polish_gating.py` (NEW, 674 LOC, 8/8 tests): `PolishGatingResult` dataclass + `run_perceptual_gated_polish` shared shell. State A (preflight infeasible) / B (polish failed) / C (export evaluated) lifecycle. Skip-reason naming via prefix parameter for stage-specific identification.
+- `memshield/v5_score_fn.py` (NEW, 439 LOC, 6/6 tests): Codex Q1c two-pass policy. `clone_config_for_n_steps` forces insert-only A0 (no polish, delta_support_mode="off"). `metadata_sink` captures per-subset W_attacked/decoy_offsets for profile.json.
+- `scripts/run_placement_profile.py` (NEW, 473 LOC): 4-phase profiler driver. Phase A explicit raw K=1 over ALL candidates (Codex Q2c full cache); Phase B+C beam_search_K3 with cached scorer; Phase D random K=3 baseline at FULL budget; persists `profile.json` per clip.
+- `scripts/run_vadi_v5.py` (modified, +756 net LOC): added `_run_oracle_trajectory_pgd` (~330 LOC) — Stage 14 PGD with FalseTrajectoryParams jointly optimized with α/warp/ν, trajectory_smoothness_loss + project_trajectory_to_budget after each step. Refactored Stage 13 outer block to use polish_gating helper while preserving all `jt_*` polish_stats keys + skip-reason strings (zero regression goal). Added Stage 14 outer block as Stage 13's twin (`ot_*` keys). New CLI flags + main() wiring + mutual exclusivity guard.
+
+### Phase D — codex pre-commit review
+Codex (gpt-5.2 xhigh, fresh thread `019dc4bd-a6f6-7343-ac04-4f193040bd71` because old `019dbfe0` expired with MCP restart) reviewed all 4 files. Verdict GO after 2 HIGH-severity fixes (codex applied them via workspace-write sandbox):
+- HIGH 1: `_run_oracle_trajectory_pgd` off-by-one — `trajectory_offset_at(traj, k_, l_idx + 1)` misaligned the duplicate placement vs the oracle softened mask. Fixed by using `l_idx` (not l_idx+1) to match `build_oracle_decoy_masks_for_clip`'s clean-frame `c_k+i ↔ bridge_step=i` indexing convention.
+- HIGH 2: CLI mutual-exclusion guard (`--joint-trajectory` vs `--oracle-trajectory`) was inside per-clip loop; moved to pre-loop validation.
+H1-H4 review items confirmed clean: Stage 13 polish_stats keys preserved, gradient flow through anchor+delta via shift_mask_torch sound, profile-init alignment correct.
+Medium/low fix list deferred (cleanup race for parallel use, --oracle-traj-bridge-search uses placeholder score, dict has 1 unused entry per insert, L_traj in best-state ranking optional).
+
+### Phase E — deployment
+- Synced 4 files to Pro 6000 (md5 verified).
+- Self-tests on Pro 6000 in `memshield` env: polish_gating 8/8, v5_score_fn 6/6, run_vadi_v5 _self_test PASS.
+- Commit `b0967ea` on Pro 6000 + push to origin/main.
+- Profile job started 22:16:56 with `--beam-width 8 --full-n-steps 100 --clips dog camel blackswan` on GPU 1.
+- First eval timing measurement (22:17:34) showed **32s/cheap-eval** (vs my 12s estimate), recomputed ETA = ~95h. Killed and restarted at 22:26:01 with `--beam-width 4 --full-n-steps 30` → revised ETA ~19h.
+- Heartbeat screen `heartbeat-profile` running 8min cadence per CLAUDE.md.
+
+### Status (end of Round 5 sub-session 2)
+- Bundle A FULLY implemented (sub-sessions 1+2). Profile job running on Pro 6000 (ETA ~17:30 2026-04-26).
+- Bundle B sub-session 3 = NEXT (inpainting model selection — LaMa lead candidate).
+- Bundle B sub-session 4 = PENDING (semantic_compositor.py + masked residual).
+- Bundle B sub-session 5 = BLOCKED on profile completion (3-clip pilot Stage 14 + Bundle B + profiled placement).
+

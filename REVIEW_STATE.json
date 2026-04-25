@@ -2,27 +2,52 @@
   "round": 5,
   "rounds_used": 5,
   "max_rounds": 7,
-  "threadId": "019dbfe0-d348-7c72-8e46-ba1139e00347",
+  "threadId": "019dc4bd-a6f6-7343-ac04-4f193040bd71",
+  "thread_note": "May expire on MCP restart. Fresh thread OK with context recap.",
   "status": "in_progress",
   "difficulty": "medium",
   "topic": "redesign_both_insert_and_modify_strategies_for_synergy",
   "last_score": 6.5,
-  "last_verdict": "Round 5 Bundle A sub-session 1: 2 modules implemented + tested. Codex GO after 3 fixes. Pushed f8518b0. Forecast +0.10-0.12 for full path 1 if completed.",
-  "pending_experiments": [],
-  "user_directive": "2026-04-25 Round 5: Path 1 full no-proxy, Option C multi-session. Bundle A trajectory oracleization in progress.",
-  "sub_session": "1/7",
-  "next_sub_session": "2: driver integration + placement profiling preprocessing (overnight GPU)",
+  "last_verdict": "Round 5 Bundle A sub-session 2 DONE: polish_gating helper + v5_score_fn + run_placement_profile + Stage 14 PGD + Stage 13 refactor. Codex GO with 2 HIGH fixes applied (l_idx off-by-one + CLI mutex pre-loop). Pushed b0967ea. Profile job running on Pro 6000 (beam=4 full=30, ETA ~19h).",
+  "pending_experiments": [
+    "placement_profile dog/camel/blackswan beam=4 full=30 — running on Pro 6000 GPU 1, ETA ~17:30 on 2026-04-26"
+  ],
+  "user_directive": "2026-04-25 Round 5: Path 1 full no-proxy, Option C multi-session. Bundle A done. Bundle B = next.",
+  "sub_session": "2/7",
+  "next_sub_session": "3: Bundle B inpainting model selection + integration (codex consult on LaMa/MAT, then memshield/inpainter.py + semantic_compositor.py + Stage 14 wiring)",
   "rejected_designs": [
     "v4_symmetric delta",
     "post_insert_R8 delta",
-    "duplicate_seed insert",
+    "duplicate_seed insert (now retained as Bundle A interim — Bundle B will replace via inpainter)",
     "Dice/BCE direct decoy loss",
     "Adam optimizer for nu",
     "boundary-bridge delta",
     "Hiera feature-steering v0/v0.1",
     "Decoy State Continuation v0",
-    "Joint Trajectory v0/v1 (mechanism works camel +0.59 delta_overlap, ��J +0.007 saturated)"
+    "Joint Trajectory v0/v1 (mechanism works camel +0.59 delta_overlap, ΔJ +0.007 saturated)"
   ],
   "validated_method": "A0 K3_top mean 0.48-0.51 (insert-only)",
-  "timestamp": "2026-04-25T20:30:00"
+  "stage_14_status": "implemented (Bundle A only, Bundle B compositor pending). Forecast 0.55-0.60 standalone, 0.60-0.64 with Bundle B.",
+  "round5_pre_committed_criterion_6th_and_final": {
+    "accept": "mean ΔJ ≥ +0.05 over A0 → continue 10-clip + ablations, paper goes",
+    "reject": "mean ΔJ < +0.02 → cut δ permanently (5 user overrides exhausted)",
+    "middle": "Pareto synergy ablation paper"
+  },
+  "bundle_status": {
+    "A_trajectory_oracleization": {
+      "sub_session_1": "DONE (commit f8518b0 — oracle_trajectory.py + placement_profiler.py)",
+      "sub_session_2": "DONE (commit b0967ea — polish_gating.py + v5_score_fn.py + run_placement_profile.py + Stage 14 + Stage 13 refactor)",
+      "running": "placement_profile beam=4 full=30 on Pro 6000 (ETA ~17:30 2026-04-26)"
+    },
+    "B_semantic_content_upgrade": {
+      "sub_session_3": "NEXT — inpainting model selection (LaMa lead candidate) + memshield/inpainter.py wrapper",
+      "sub_session_4": "PENDING — semantic_compositor.py + masked residual R_k + Stage 14 integration",
+      "sub_session_5": "BLOCKED on Bundle A profile completion — 3-clip pilot dog/camel/blackswan with --use-profiled-placement --oracle-trajectory"
+    },
+    "C_optimization_cleanup": {
+      "sub_session_6": "PENDING — end-to-end joint opt + LPIPS-native ν",
+      "sub_session_7": "PENDING — final 3-clip pilot + decision"
+    }
+  },
+  "timestamp": "2026-04-25T22:30:00"
 }
