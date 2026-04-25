@@ -144,6 +144,41 @@ bash wifi.sh       # or: bash wifi-run
 
 这条写进 CLAUDE.md 是因为 VADI 项目里有过 v1→v2→v3→v4 的方法迭代路径，每次重设计都是因为**正确性/有效性**问题（v2 bank-poisoning 被 B2 证伪、v3 pure-δ 用户拒绝）。这种场景下不要因为"改动小"就保留失败方案的残骸。
 
+## No-Proxy Implementation (2026-04-25，**硬规则**)
+
+**实现一个方法时不要因为 LOC / 工程成本而把任何组件降级为代理（proxy / stand-in / heuristic substitute）**。设计层面已经决定的组件，实现层面要完整提供。不要悄悄缩水。
+
+触发背景：Round 5 codex 给出 trajectory scaffold + localized residual 设计后，Claude 的实现规划自动写成了"最小可行版本 ~600-800 LOC"，把"trajectory predictor"降级为"用光流估计 c_k-2 → c_k-1 → c_k 的运动外推一帧"。光流是**对象轨迹的代理**，不是真正的 trajectory predictor —— 它只描述像素级对应关系，不理解对象语义。这种"为节省 LOC 用 proxy"的隐性降级正是 design degradation 的来源，违反 §"Design Philosophy"原则。
+
+**Mandatory 流程**（method/experiment 实现）：
+
+1. **设计 → 完整规格**：codex 或 user 给出方法设计后，写实现规格之前先列**每个组件的完整版本**：trajectory predictor 是什么模型，scaffold 是怎么构造的，residual 是怎么参数化的，joint optimizer 是怎么联合的。每个组件都按"如果不限 LOC 怎么写"列。
+2. **不要主动提"最小可行版本"**：除非 user 明确要求 ablation 或 phase 化推进，**默认全量实现**。
+3. **代理识别清单**（这些都是常见的隐性降级）：
+   - 用光流当 trajectory predictor → 应该用学习的预测器（或 SAM2 内部 motion 估计若暴露）
+   - 用同帧平移当 future-pose composite → 应该用真未来帧的 pose（前提是 attacker 模型允许 lookahead）
+   - 用 phase A → phase B alternating 当 joint optimization → 应该用真正的 joint（端到端梯度，如果设计要求）
+   - 用 grid_sample translation 当 dense flow warp → 应该用学习的 dense displacement field（如果设计要求）
+   - 用 hand-crafted feather 当 perceptual blending → 应该用学习的 alpha matting / harmonization
+4. **实现规格审稿**：写 spec 前先问 codex："这个组件的完整无代理实现是什么？" 别让自己的 LOC 偏好主导设计。
+5. **如果某个完整组件成本太高**（例如需要训练新模型 + 几小时数据准备）：明确告诉 user "完整版本需要 X，能力允许的代理是 Y，差距是 Z"，让 user 决定是否接受降级。**user 的决定要明确写下来**（"用代理 Y 接受 Z 程度的降级"），不能默认。
+
+**违反本规则**（已知的"为了快"用 proxy）→ 视为方法降级，**必须**用 codex review 或 user explicit approval 升级或确认接受。
+
+举例（这次 round 5 trajectory scaffold 设计的完整无代理实现是什么样）：
+- Trajectory predictor: 不是光流，是基于 pseudo_masks 序列学习的 object-trajectory predictor（可以是简单的 LSTM / GRU 用 mask centroid 序列做输入，端到端预测下一帧 centroid）
+- Future-pose composite: 不是同帧 paste，是用真实 c_k+future_window 帧的对象 crop 做 harmonization（color/illumination matching）后 composite 到预测位置
+- Localized residual R_k: 完整 [H, W, 3] 学习张量，仅靠 LPIPS 约束，不预设支持区域（让优化器自己学会该改哪里）
+- Joint optimizer: 真正的端到端 joint，所有可学习参数（trajectory predictor weights, residual, ν, bridge edits）一次反传一次更新，不分 phase
+
+降级版本（如果 user 同意）：
+- Trajectory predictor → 光流（FastFlowNet 或 RAFT）
+- Future-pose composite → 同帧平移
+- Localized residual R_k → 仅在 decoy ROI 上的 [H_roi, W_roi, 3]
+- Joint optimizer → phase A / phase B
+
+降级带来的预期能力损失：codex Round 5 forecast 0.58-0.62 mean，如果走全降级版本可能落到 0.55-0.58（损失 0.03-0.04 ΔJ）。
+
 ## Paper Direction Constraint (2026-04-24，**硬约束**)
 
 **永远保持 decoy 方向的正向方法论文。不写 audit / 负面 / falsification-only 论文。**
@@ -199,3 +234,37 @@ bash wifi.sh       # or: bash wifi-run
 
 此约束下的默认新方向（待用户进一步确认）：
 **VADI-lite** = "vulnerability-informed decoy-frame insertion"，freeze δ=0（或 δ 只加在 prompt 帧周围做防御性 budget），主攻 ν on inserted decoy content，placement 用 top-K 的鲁棒性变体（例如 top-3 丢弃命中前 5 帧的，或与 random 混合）。
+
+## Monitor Progress Reporting Cadence (2026-04-25，**硬规则**)
+
+**所有长任务的 Monitor 必须每 8 分钟主动汇报一次进度（heartbeat），无论文件本身有没有匹配行。**
+
+触发背景：之前的 Monitor 只在 grep 匹配的"事件行"上汇报（per-clip exported_j_drop / Traceback / done 等）。如果某段时间没有匹配行（A0 100 步内部循环 / 长 forward / hang），用户会看不到任何信号，无法判断是"在跑"还是"卡死"。8 分钟 cadence 兜底，保证用户至少每 8 分钟有一次"还活着"的证据。
+
+**Monitor 实现要求**：
+1. 仍然 grep 关键事件行（exported_j_drop / Traceback / done / OOM / Killed 等）即时汇报。
+2. **同时**额外起一个并行的进度 emitter，每 480s（8 min）emit 一次：
+   - 当前时间
+   - python 进程 PID + alive/dead
+   - GPU 显存占用 + 当前进程 CPU%
+   - 日志最后 1-2 行的摘要（即便不匹配关键 grep）
+3. 用 `&` + `wait -n` 或 `tail -F ... & sleep_loop &` 把两路 stdout 合并到 monitor 的输出。
+
+**典型实现模板**（bash）：
+```bash
+( tail -F LOG | grep -E --line-buffered "PATTERN" ) &
+TAIL_PID=$!
+( while true; do
+    sleep 480
+    PYPID=$(pgrep -f "PYTHON_CMD" | head -1)
+    ALIVE=$([ -n "$PYPID" ] && echo "alive=$PYPID" || echo "DEAD")
+    GPU=$(nvidia-smi --query-compute-apps=used_memory --format=csv,noheader,nounits 2>/dev/null | head -1)
+    LASTLINE=$(tail -1 LOG | tr -d '\n' | cut -c-120)
+    echo "[heartbeat] $(date +%H:%M:%S) $ALIVE gpu=${GPU}MiB last=\"$LASTLINE\""
+done ) &
+wait
+```
+
+**适用范围**：所有 GPU 训练 / 长推理 / 多 clip 实验 monitor。短任务（< 10 min 总时长）可省略 heartbeat（用普通 grep monitor 即可）。
+
+**为什么不依赖 ScheduleWakeup 兜底**：ScheduleWakeup 是"我自己醒一次"，不输出文字；用户在终端看不到任何动静。Heartbeat 走 stdout → notification，用户能直接看到"在跑"的证据。两者都保留：heartbeat 给用户看，wakeup 给我自己重新进入循环。
