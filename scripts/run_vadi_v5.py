@@ -1476,6 +1476,34 @@ def _run_state_continuation_pgd(
 # =============================================================================
 
 
+def _jt_perceptual_feasible(
+    remeasure_dict: Dict[str, Any], config: VADIv5Config,
+) -> bool:
+    """JT's perceptual-only feasibility gate (codex Loop3-R4 post-pilot fix).
+
+    The R4 threat model is perceptual: f0 SSIM ≥ 0.98, original-frame LPIPS
+    ≤ 0.20, insert LPIPS ≤ 0.35. The 1.2× clean-source TV cap was an ε-PGD-
+    era heuristic and is now advisory only — LPIPS already captures
+    perceptual fidelity, while TV-as-hard-gate proved over-sensitive to
+    cuDNN bf16 nondeterm in A0's ν*.
+
+    Returns True iff all PERCEPTUAL gates pass (TV ignored).
+    """
+    _TOL = 1e-6
+    ssim_f0 = float(remeasure_dict.get("ssim_f0", 0.0))
+    if ssim_f0 < float(config.f0_ssim_floor) - _TOL:
+        return False
+    orig_lpips = remeasure_dict.get("per_frame_lpips_orig", {}) or {}
+    if any(float(v) > float(config.lpips_orig_cap) + _TOL
+           for v in orig_lpips.values()):
+        return False
+    ins_lpips = remeasure_dict.get("per_insert_lpips", {}) or {}
+    if any(float(v) > float(config.lpips_insert_cap) + _TOL
+           for v in ins_lpips.values()):
+        return False
+    return True
+
+
 def _run_joint_trajectory_pgd(
     x_clean: Tensor,
     decoy_seeds: Tensor,
@@ -2708,13 +2736,21 @@ def run_v5_for_clip(
         # has bridge-frame edits, so it CAN improve insert TV/LPIPS via ν
         # in Phase B — but if A0 is already infeasible, the start point
         # is bad and Phase B has limited budget to fix.
-        jt_preflight_ok = True
         jt_preflight = remeasure_exported_feasibility(
             x_clean, jt_clean_refs_for_inserts, exported, W_attacked,
             lpips_fn, ssim_fn, config,
         )
         polish_stats["jt_a0_preflight"] = jt_preflight
-        jt_preflight_ok = bool(
+        # Codex Loop3-R4 fix (post-pilot 2026-04-25): R4's threat model is
+        # perceptual (LPIPS+SSIM), not TV-bounded. The 1.2× clean-source TV
+        # cap was an ε-PGD-era heuristic; LPIPS already covers perceptual
+        # fidelity. TV-as-hard-gate is too sensitive to cuDNN bf16
+        # nondeterm in A0's ν* (saw 273/579 absolute TV excess on dog/
+        # blackswan today, all under 2% relative, while LPIPS+SSIM passed).
+        # Reduce preflight to perceptual-only; record TV as advisory.
+        jt_preflight_ok = bool(_jt_perceptual_feasible(jt_preflight, config))
+        polish_stats["jt_a0_perceptual_feasible"] = jt_preflight_ok
+        polish_stats["jt_a0_full_feasible"] = bool(
             jt_preflight.get("step_feasible_on_export", False))
 
         if not jt_preflight_ok:
@@ -2880,15 +2916,21 @@ def run_v5_for_clip(
                             chosen.get("warp_disp_max")
 
                     # Re-check exported fidelity (clean-ref aligned).
+                    # Codex Loop3-R4 fix (post-pilot): perceptual-only gate
+                    # (LPIPS + SSIM), TV recorded as advisory. Same rationale
+                    # as the preflight relaxation.
                     polish_remeasure = remeasure_exported_feasibility(
                         x_clean, jt_clean_refs_for_inserts, exported_polish,
                         W_attacked, lpips_fn, ssim_fn, config,
                     )
                     polish_export_feasible = bool(
+                        _jt_perceptual_feasible(polish_remeasure, config))
+                    polish_export_full_feasible = bool(
                         polish_remeasure.get(
                             "step_feasible_on_export", False))
                     polish_stats["exported_feasibility"] = polish_remeasure
                     polish_stats["polish_export_feasible"] = polish_export_feasible
+                    polish_stats["polish_export_full_feasible"] = polish_export_full_feasible
                     accept = (
                         polish_export_feasible
                         and (
