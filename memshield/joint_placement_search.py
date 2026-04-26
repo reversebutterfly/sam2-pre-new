@@ -1320,19 +1320,22 @@ def joint_curriculum_search(
     lambda_fid_val = float(config.joint_traj_lambda_fid)
     R_lr = float(config.oracle_traj_residual_lr)
     R_eps = float(config.oracle_traj_residual_eps)
-    # v2.1 (codex research-review fix): blackswan v2 dog parity revealed
-    # surrogate-gradient misalignment in the curriculum (Adam collapsed
-    # spread prescreen [4,13,21] → cluster [7,9,21]). The simplex
-    # parameterization is healthy (no v1 saturation) but the schedule
-    # loss prefers cluster on blackswan's score landscape.
+    # v2.2 (after blackswan v2.1 retest): empirical comparison shows
+    # that even tau_lr_phase3=0.002 hurts on blackswan
+    # (v2.1 [4,12,21] J-drop=0.4127 < fixed-W [4,13,21] J-drop=0.4469).
+    # The phase-3 motion harms more than helps when the surrogate is
+    # misaligned. Default → full freeze (all 3 phases): joint search
+    # becomes "smart prescreen + Stage 14 on prescreen-decided W"
+    # with no τ motion in any phase.
     #
-    # Codex remedy: phase-freeze τ in phases 1-2 (don't include p_raw
-    # in optimizer); phase 3 only, allow tiny lr (0.002) for last-mile
-    # local adjustment. Prescreen-dominant placement.
+    # Backwards compat:
+    # - oracle_traj_tau_freeze_phases=[1, 2] + tau_lr_phase3=0.002 → v2.1
+    # - oracle_traj_tau_freeze_phases=[]   + oracle_traj_tau_lr=0.05    → v2 (curriculum on)
+    #   (also requires oracle_traj_tau_lr_force_legacy=True)
     tau_lr_phase3 = float(getattr(
-        config, "oracle_traj_tau_lr_phase3", 0.002))
+        config, "oracle_traj_tau_lr_phase3", 0.0))
     tau_freeze_phases: Sequence[int] = list(getattr(
-        config, "oracle_traj_tau_freeze_phases", [1, 2]))
+        config, "oracle_traj_tau_freeze_phases", [1, 2, 3]))
     # Legacy v2 single-LR knob (used only if user explicitly sets
     # oracle_traj_tau_lr; otherwise the v2.1 phase-freeze takes over).
     tau_lr_legacy: Optional[float] = (
