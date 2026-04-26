@@ -102,127 +102,258 @@ from memshield.stage14_helpers import (
 
 
 @dataclass
-class TauGapParams:
-    """Learnable ordered τ parameterization via cumulative softplus gaps.
+class TauPhaseParams:
+    """Phase-local τ parameterization via simplex slack allocation (v2).
 
-    Fields:
-      g: [K] raw learnable gaps.  g[0] drives τ[0] via sigmoid; g[k>=1]
-         drives the ADDITIONAL gap on top of d_min via softplus.
-      K, T_clean: integer constants.
-      clamp_left: τ[0] lower bound (≥ 1 to keep x_clean[c_0] with neighbors).
-      bridge_budget: bridge_length + 1 (right margin so τ[K-1] + L_k stays
-                     within [0, T_clean - 1]).
-      d_min: minimum integer gap between consecutive τ (≥ 2).
+    Replaces the v1 cumulative-softplus parameterization, which had a
+    saturation pathology: when prescreen produced a `d_min`-spaced
+    cluster, the inverse-softplus init landed `g[k]` at ≈ -13.8 where
+    `softplus'(g) ≈ 1e-6`, killing all gradient signal to gap variables
+    and locking the curriculum at the cluster (codex R6 R3 GO missed
+    this; ss7-v1 dog parity test J-drop=0.326 was the empirical
+    falsification).
 
-    The recurrence guarantees:
-      τ[0] ∈ [clamp_left, T_clean - bridge_budget]
-      τ[k] ≥ τ[k-1] + d_min  (strict, so floor(τ[k]) > floor(τ[k-1]) when
-                              fractional parts are nonzero; ties resolved
-                              by the schedule-enumeration filter)
+    The v2 design (codex R6 follow-up): per phase, allocate the usable
+    "slack" budget as a probability simplex over (m+1) bins, where `m`
+    is the number of *active* inserts in this phase. Each bin maps to
+    a slack `s_j = U_m * p_j` that augments the minimum-gap structure:
 
-    g is FULL [K] always (no per-phase resizing). The curriculum controls
-    which g_k are in the optimizer's parameter list at each phase.
+        τ_0 = clamp_left + s_0
+        τ_i = clamp_left + i * d_min + Σ_{j=0..i} s_j     (i = 1..m-1)
+        τ_i = tau_fixed_tail[i - m]                         (i = m..K-1)
+
+    where `U_m = B_m - clamp_left - (m - 1) * d_min` is the usable
+    slack and `B_m` is the phase right boundary
+    (B_m = tau_fixed_full[m] - d_min  if m < K
+    B_m = T_clean - 1 - bridge_budget if m == K).
+
+    Mathematical guarantees by construction:
+      * τ_0 ≥ clamp_left
+      * τ_i - τ_{i-1} = d_min + s_i ≥ d_min
+      * τ_{m-1} ≤ B_m  (so the next-fixed insert is not violated)
+      * if m == K: τ_{K-1} + bridge_budget ≤ T_clean - 1
+
+    Backward sanity (the property v1 lacked):
+      ∂τ_i/∂p_j = U_m   if j ≤ i
+      ∂τ_i/∂p_j = 0     if j > i
+    The Jacobian is **constant** in the interior — no saturation at
+    any feasible point. With T_clean≈58, K=3 ⇒ U_3 ≈ 50, so a 0.02
+    simplex-mass shift produces a ~1-frame τ shift; Adam lr=0.05 over
+    10 steps moves placement by ~5 frames easily.
+
+    Curriculum semantics (different from v1):
+      * Inactive τ values are *fixed constants* during this phase
+        (not "frozen but coupled via recurrence"). At each phase
+        transition the wrapper rebuilds TauPhaseParams from the
+        current full τ.
+      * `_zero_inactive_grads` no longer touches tau (fixed-tail
+        already enforces inactive-slice freezing); it still gates
+        traj/edit/R/nu inactive slices.
     """
 
-    g: Tensor                 # [K] learnable
-    K: int
+    p_raw: Tensor                # [m+1] learnable, projected onto simplex
+    active_K: int                # m, number of active inserts in this phase
+    full_K: int                  # K, total inserts (K=3)
     T_clean: int
     clamp_left: float
     bridge_budget: int
-    d_min: float
+    d_min: int                   # integer in v2 (was float in v1)
+    tau_fixed_tail: Tensor       # [K - m], detached constants for inactive τ
 
 
-def init_tau_gap_params(
-    K: int, T_clean: int, init_tau_values: Sequence[float],
+def _phase_boundary_and_slack(
+    T_clean: int, bridge_budget: int, clamp_left: float,
+    d_min: int, m: int,
+    tau_fixed_full: Optional[Sequence[float]],
+) -> Tuple[float, float]:
+    """Compute (B_m, U_m) — phase right boundary and usable slack."""
+    if m < 1:
+        raise ValueError(f"phase active_K m={m} must be ≥ 1")
+    if m < int(len(tau_fixed_full or [])):
+        # m < K case: B_m reserves room for the next fixed insert.
+        B_m = float(tau_fixed_full[m]) - float(d_min)
+    else:
+        # m == K case: B_m is clip end minus right margin.
+        B_m = float(T_clean - 1 - bridge_budget)
+    U_m = B_m - float(clamp_left) - float(m - 1) * float(d_min)
+    if U_m <= 1e-6:
+        raise ValueError(
+            f"degenerate U_m={U_m:.4f} for phase m={m}, T_clean={T_clean}, "
+            f"bridge_budget={bridge_budget}, clamp_left={clamp_left}, "
+            f"d_min={d_min}, tau_fixed_full={tau_fixed_full}. Clip too "
+            "short for K inserts at this d_min.")
+    return B_m, U_m
+
+
+def project_simplex_inplace(x: Tensor) -> None:
+    """Project ``x`` onto the probability simplex {z ≥ 0, Σz = 1}.
+
+    Standard Duchi et al. (2008) projection. Operates in-place on
+    ``x.data`` under no_grad. After projection, ``x`` is non-negative
+    and sums to 1.0 within float tolerance.
+    """
+    with torch.no_grad():
+        v = x.detach().reshape(-1).clone()
+        n = int(v.numel())
+        if n == 0:
+            return
+        u, _ = torch.sort(v, descending=True)
+        cssv = torch.cumsum(u, dim=0) - 1.0
+        ind = torch.arange(
+            1, n + 1, device=v.device, dtype=v.dtype)
+        cond = (u - cssv / ind) > 0
+        nz = torch.nonzero(cond, as_tuple=False)
+        if nz.numel() == 0:
+            # Degenerate: all entries pull below zero. Fall back to uniform.
+            x.copy_(torch.full_like(x, 1.0 / n))
+            return
+        rho = int(nz[-1].item())
+        theta = cssv[rho] / float(rho + 1)
+        w = torch.clamp(v - theta, min=0.0)
+        x.copy_(w.view_as(x))
+
+
+def init_tau_phase_params(
+    active_K: int, full_K: int, T_clean: int,
+    init_tau_values_full: Sequence[float],
     *,
     clamp_left: float = 1.0,
     bridge_budget: int = 4,
-    d_min: float = 2.0,
+    d_min: int = 2,
     device: Optional[torch.device] = None,
     dtype: torch.dtype = torch.float32,
-) -> TauGapParams:
-    """Initialize TauGapParams so that the recurrence reproduces
-    init_tau_values within tolerance.
+) -> TauPhaseParams:
+    """Initialize TauPhaseParams from a full valid τ vector.
 
-    init_tau_values must be strictly ordered with gap ≥ d_min, and
-    init_tau_values[0] ≥ clamp_left, init_tau_values[K-1] + bridge_budget
-    ≤ T_clean - 1.
+    `active_K` (m) is the number of inserts active in this phase;
+    `full_K` is K=3. The first m entries of `init_tau_values_full` are
+    used as targets for the simplex slacks; the remaining (K-m) become
+    the detached tail constants.
+
+    Recovers the simplex point that exactly produces `init_tau_values
+    _full[:m]` under the forward formula, then renormalizes for float
+    safety.
     """
-    if len(init_tau_values) != K:
+    K = int(full_K)
+    m = int(active_K)
+    if m < 1 or m > K:
+        raise ValueError(f"active_K={m} not in [1, full_K={K}]")
+    if len(init_tau_values_full) != K:
         raise ValueError(
-            f"init_tau_values length {len(init_tau_values)} != K {K}")
-    iv = [float(v) for v in init_tau_values]
-    if iv[0] < clamp_left - 1e-6:
+            f"init_tau_values_full length {len(init_tau_values_full)} "
+            f"!= full_K {K}")
+    iv = [float(v) for v in init_tau_values_full]
+    # Validate ordered + boundaries.
+    if iv[0] < float(clamp_left) - 1e-6:
         raise ValueError(
-            f"init_tau_values[0]={iv[0]:.4f} < clamp_left={clamp_left}")
+            f"iv[0]={iv[0]:.4f} < clamp_left={clamp_left}")
     if iv[-1] + bridge_budget > T_clean - 1 + 1e-6:
         raise ValueError(
-            f"init_tau_values[-1]={iv[-1]:.4f} + bridge_budget={bridge_budget} "
-            f"> T_clean-1={T_clean-1}")
+            f"iv[-1]={iv[-1]:.4f} + bridge_budget={bridge_budget} > "
+            f"T_clean-1={T_clean-1}")
     for i in range(1, K):
         if iv[i] - iv[i - 1] < d_min - 1e-6:
             raise ValueError(
-                f"init_tau_values gap [{i-1}, {i}] = "
-                f"{iv[i] - iv[i-1]:.4f} < d_min={d_min}")
+                f"iv gap [{i-1},{i}]={iv[i] - iv[i-1]:.4f} < d_min={d_min}")
+
+    B_m, U_m = _phase_boundary_and_slack(
+        T_clean, bridge_budget, clamp_left, d_min, m,
+        tau_fixed_full=iv,
+    )
+
+    # Recover slacks from active iv prefix.
+    s = [0.0] * (m + 1)
+    s[0] = iv[0] - float(clamp_left)
+    for i in range(1, m):
+        s[i] = iv[i] - iv[i - 1] - float(d_min)
+    s[m] = B_m - iv[m - 1]
+    # Clamp tiny float-noise negatives.
+    s = [max(0.0, v) for v in s]
+    p = [v / U_m for v in s]
+    p_total = float(sum(p))
+    if p_total <= 1e-6:
+        # Degenerate: fall back to uniform.
+        p = [1.0 / (m + 1)] * (m + 1)
+    else:
+        p = [v / p_total for v in p]
 
     device = device or torch.device("cpu")
-    g = torch.zeros(K, dtype=dtype, device=device)
+    p_tensor = torch.tensor(
+        p, dtype=dtype, device=device).detach().clone().requires_grad_(True)
 
-    # g[0]: invert tau[0] = clamp_left + span * sigmoid(g[0])
-    span = float(T_clean - bridge_budget - clamp_left)
-    if span <= 1e-6:
-        raise ValueError(
-            f"degenerate span={span:.4f}; "
-            f"T_clean={T_clean}, bridge_budget={bridge_budget}, "
-            f"clamp_left={clamp_left}")
-    p0 = (iv[0] - clamp_left) / span
-    p0 = min(max(p0, 1e-6), 1.0 - 1e-6)
-    g[0] = math.log(p0 / (1.0 - p0))
+    tail = iv[m:]
+    if tail:
+        tau_fixed_tail = torch.tensor(tail, dtype=dtype, device=device)
+    else:
+        tau_fixed_tail = torch.zeros(0, dtype=dtype, device=device)
 
-    # g[k>=1]: invert tau[k] = tau[k-1] + d_min + softplus(g[k])
-    for k in range(1, K):
-        extra = iv[k] - iv[k - 1] - d_min
-        # softplus(g) = log(1 + exp(g)); inverse: g = log(exp(extra) - 1)
-        # Numerically stable via log-expm1.
-        extra_safe = max(float(extra), 1e-6)
-        g[k] = math.log(math.expm1(extra_safe))
-
-    return TauGapParams(
-        g=g.detach().clone().requires_grad_(True),
-        K=int(K), T_clean=int(T_clean),
-        clamp_left=float(clamp_left),
-        bridge_budget=int(bridge_budget),
-        d_min=float(d_min),
+    return TauPhaseParams(
+        p_raw=p_tensor,
+        active_K=m, full_K=K, T_clean=int(T_clean),
+        clamp_left=float(clamp_left), bridge_budget=int(bridge_budget),
+        d_min=int(d_min),
+        tau_fixed_tail=tau_fixed_tail,
     )
 
 
-def tau_from_gaps(params: TauGapParams) -> Tensor:
-    """Compute τ[0..K-1] from g[0..K-1] via the ordered cumulative
-    sigmoid+softplus recurrence. Differentiable in g. Returns [K]."""
-    span = params.T_clean - params.bridge_budget - params.clamp_left
-    tau_list: List[Tensor] = []
-    t0 = params.clamp_left + span * torch.sigmoid(params.g[0])
-    tau_list.append(t0)
-    for k in range(1, params.K):
-        tk = tau_list[-1] + params.d_min + F.softplus(params.g[k])
-        tau_list.append(tk)
-    return torch.stack(tau_list, dim=0)
+def tau_from_phase_params(params: TauPhaseParams) -> Tensor:
+    """Compute full τ[0..K-1] from phase-local p_raw + tau_fixed_tail.
 
-
-def project_tau_inward(params: TauGapParams, *, slack: float = 0.5) -> None:
-    """Inward projection of τ if it has drifted to a region where most
-    floor/ceil corners produce invalid orderings (guardrail #2 fallback).
-
-    Concretely, this resets g toward the parameterization's "interior"
-    (sigmoid → 0.5 for τ[0]; softplus(g[k]) → log(2) for k>0 so the gap
-    above d_min equals log(2) ≈ 0.69). The post-projection τ is well
-    away from boundary integers, restoring at least 2 valid corners on
-    the next enumeration.
+    The first m entries are differentiable in p_raw; the trailing K-m
+    entries are detached constants (the "fixed tail" enforced by
+    curriculum semantics — codex R6 follow-up v2 spec).
     """
+    m = params.active_K
+    K = params.full_K
+    if m < 1:
+        raise ValueError(f"active_K={m} must be ≥ 1")
+    fixed_tail_list = params.tau_fixed_tail.tolist() if K > m else []
+    B_m, U_m = _phase_boundary_and_slack(
+        params.T_clean, params.bridge_budget, params.clamp_left,
+        params.d_min, m,
+        tau_fixed_full=([0.0] * m) + fixed_tail_list,
+    )
+    # Active τ via cumulative sum of slacks.
+    p = params.p_raw                                        # [m+1]
+    if int(p.shape[0]) != m + 1:
+        raise ValueError(
+            f"p_raw length {p.shape[0]} != m+1 {m+1}")
+    prefix = torch.cumsum(p[:-1], dim=0)                    # [m]
+    arange_m = torch.arange(
+        m, device=p.device, dtype=p.dtype)
+    tau_active = (
+        params.clamp_left
+        + params.d_min * arange_m
+        + U_m * prefix
+    )                                                       # [m]
+    if K > m:
+        tau_full = torch.cat([tau_active, params.tau_fixed_tail], dim=0)
+    else:
+        tau_full = tau_active
+    return tau_full
+
+
+def blend_simplex_with_uniform(p_raw: Tensor, *, weight: float = 0.10) -> None:
+    """Degeneracy-recovery primitive: blend p_raw toward uniform.
+
+    Codex R6 v2 spec: when curriculum_joint_step finds <2 valid
+    schedule corners, blend p_raw with the uniform simplex
+    (90% original, 10% uniform) and re-project. Replaces the v1
+    `project_tau_inward` fallback (which moved softplus gaps to log(2),
+    a near-saturation point).
+
+    Operates in-place on p_raw.data; caller should re-project to
+    simplex afterward via project_simplex_inplace.
+    """
+    if not (0.0 <= weight <= 1.0):
+        raise ValueError(f"weight={weight} must be in [0, 1]")
     with torch.no_grad():
-        params.g[0].zero_()
-        for k in range(1, params.K):
-            params.g[k].fill_(math.log(math.expm1(slack)))
+        n = int(p_raw.numel())
+        if n == 0:
+            return
+        uniform_val = 1.0 / float(n)
+        p_raw.data.mul_(1.0 - weight).add_(weight * uniform_val)
+    project_simplex_inplace(p_raw)
 
 
 # ===========================================================================
@@ -404,10 +535,75 @@ class AttackStateCache:
 
 @dataclass
 class PrescreenResult:
-    """Result of the K=1 prescreen sweep."""
-    init_tau_values: List[float]      # K candidates, sorted, with d_min spacing
-    candidate_scores: List[Tuple[int, float]]  # all (c, score) pairs
-    seed_index: int                    # which prescreen seed (0=top, 1=second, ...)
+    """Result of the v2 coverage-aware prescreen sweep."""
+    init_tau_values: List[float]                 # K candidates, sorted, d_min-spaced
+    candidate_raw_scores: List[Tuple[int, float]]   # (c, v_raw=-L_margin)
+    candidate_relevance: List[Tuple[int, float]]    # (c, r=v_rank * h)
+    seed_index: int
+
+
+def _coverage_aware_select(
+    candidates_relevance: Sequence[Tuple[int, float]],
+    *,
+    K: int,
+    d_min: int,
+    target_gap: float,
+    seed_index: int = 0,
+) -> List[int]:
+    """v2 selection: greedy MMR with hard d_min and capped linear
+    diversity (codex R6 follow-up spec).
+
+    Args:
+      candidates_relevance: sorted [(c, r(c))] descending by r.
+      target_gap: usable_span / K — the saturation point for diversity.
+      seed_index: 0 picks top by r; 1 / 2 are fallback restarts.
+
+    Algorithm:
+      1. First pick: candidate at position `seed_index` in the
+         relevance-sorted list.
+      2. Subsequent picks: argmax over candidates with hard d_min
+         spacing of `0.7 * r(c) + 0.3 * div(c, S)` where
+         `div(c, S) = min(1.0, min_{s ∈ S} |c-s| / target_gap)`.
+      3. Stop at K.
+      4. Tie-break: smaller c wins.
+    """
+    if len(candidates_relevance) < K:
+        raise RuntimeError(
+            f"prescreen: only {len(candidates_relevance)} candidates for "
+            f"K={K}")
+    sorted_by_r = list(candidates_relevance)  # already r-desc
+    # First pick: seed_index-th highest-r.
+    if seed_index >= len(sorted_by_r):
+        raise RuntimeError(
+            f"seed_index={seed_index} out of range for "
+            f"{len(sorted_by_r)} candidates")
+    chosen: List[int] = [int(sorted_by_r[seed_index][0])]
+    relevance: Dict[int, float] = {
+        int(c): float(r) for c, r in sorted_by_r}
+
+    while len(chosen) < K:
+        best_c = None
+        best_score = -float("inf")
+        for c, _ in sorted_by_r:
+            c_int = int(c)
+            if c_int in chosen:
+                continue
+            if any(abs(c_int - s) < d_min for s in chosen):
+                continue
+            min_dist = min(abs(c_int - s) for s in chosen)
+            div = min(1.0, float(min_dist) / max(1e-6, float(target_gap)))
+            score = 0.7 * relevance[c_int] + 0.3 * div
+            if (score > best_score
+                    or (score == best_score
+                        and (best_c is None or c_int < best_c))):
+                best_score = score
+                best_c = c_int
+        if best_c is None:
+            raise RuntimeError(
+                f"prescreen MMR: cannot find {K - len(chosen)} more "
+                f"candidates with d_min={d_min} from chosen={chosen}")
+        chosen.append(best_c)
+    return sorted(chosen)
 
 
 def prescreen_tau_init(
@@ -422,46 +618,76 @@ def prescreen_tau_init(
     bridge_length: int,
     seed_index: int = 0,
     candidate_stride: int = 1,
+    prescreen_horizon: int = 12,
 ) -> PrescreenResult:
-    """K=1 cheap-default prescreen sweep over candidate clean-frame
-    positions. For each c, we build attack_state at K=1 with c, run ONE
-    Stage-14 forward, score = `-L_margin`. Picks the top-K candidates
-    with strict d_min spacing (greedy seed selection: take the highest-
-    score not yet within d_min of any chosen seed).
+    """v2 coverage-aware prescreen (codex R6 follow-up).
 
-    seed_index lets callers fall back to alternative tops (multi-seed
-    fallback per guardrail #6): seed_index=0 picks the global top,
-    seed_index=1 picks the second-best top-K-spaced selection, etc.
+    Replaces the v1 "K=1 cheap defaults + greedy d_min-spaced top-K"
+    procedure that produced two failure modes on dog (ss7-v1):
+      1. Score function (-L_margin from K=1 with bridge_length=3) had
+         a sharp peak at video end where SAM2 has accumulated true-
+         object memory; brief K=1 attack disrupts it locally but has
+         no whole-video J-drop leverage (Failure #1).
+      2. Greedy d_min-spaced top-K is a cluster machine: when scores
+         concentrate in a window, picks all K at d_min spacing inside
+         (Failure #3).
+
+    v2 fixes:
+      * Score = `v_rank(c) * h(c)` where:
+          - v_rank(c): rank-percentile of `-L_margin` (more robust
+            than raw value across clips with different score scales)
+          - h(c): remaining-horizon factor `(T_clean - bridge_budget
+            - c) / (T_clean - bridge_budget - clamp_left)`, clipped to
+            [0, 1]. Multiplicative — late-frame spikes get hard-
+            discounted because they cannot influence whole-video mean
+            J-drop.
+      * Bridge horizon for K=1 forward = `prescreen_horizon=12` (was
+        `bridge_length=3`); makes the proxy more future-aware.
+      * MMR with `target_gap = usable_span / K` and capped linear
+        diversity `min(1, min_dist / target_gap)`. Saturates once
+        spacing is "good enough" — does not reward absurdly far
+        extreme placements.
+
+    Multi-seed fallback (R3 guardrail #6) operates by changing the
+    first pick: `seed_index = 0` uses the global top by r(c);
+    `seed_index = 1, 2` use the next-best by r. Subsequent picks are
+    deterministic given the first.
     """
     T_clean = int(x_clean.shape[0])
     bridge_budget = bridge_length + 1
-    candidates: List[int] = list(range(1, T_clean - bridge_budget,
-                                       max(1, candidate_stride)))
+    clamp_left = 1
+    H_pre = int(prescreen_horizon)
+    if H_pre < 1:
+        H_pre = bridge_length
+
+    # Candidate range matches forward feasibility: c ∈ [clamp_left,
+    # T_clean - bridge_budget). The end of the range is exclusive so
+    # that c + bridge_budget ≤ T_clean - 1.
+    candidates: List[int] = list(range(
+        int(clamp_left), int(T_clean - bridge_budget),
+        max(1, int(candidate_stride))))
     if len(candidates) < K:
         raise RuntimeError(
             f"prescreen: only {len(candidates)} candidate positions for "
             f"K={K} inserts (T_clean={T_clean}, bridge_budget="
             f"{bridge_budget})")
 
-    # Allocate single-insert traj/edit/R/nu defaults (cheap — these are
-    # only used for the prescreen forward pass).
     device = x_clean.device
     H, W = int(x_clean.shape[1]), int(x_clean.shape[2])
     nu = torch.zeros(1, H, W, 3, device=device, dtype=x_clean.dtype)
-    R = (torch.zeros(1, bridge_length, H, W, 3, device=device,
+    R = (torch.zeros(1, H_pre, H, W, 3, device=device,
                      dtype=x_clean.dtype)
          if config.oracle_traj_use_residual else None)
 
-    scores: List[Tuple[int, float]] = []
+    raw_scores: List[Tuple[int, float]] = []
     for c in candidates:
         try:
             state = build_attack_state_from_W(
                 [int(c)], x_clean, pseudo_masks_clean, config,
-                bridge_length=bridge_length,
+                bridge_length=H_pre,
             )
         except ValueError:
             continue
-        # Cheap defaults for traj + edit_params.
         traj = init_false_trajectory(
             K=1, L=state.L_max,
             init_anchor_offsets=[(float(state.decoy_offsets_init[0][0]),
@@ -487,41 +713,46 @@ def prescreen_tau_init(
                 )
             except RuntimeError:
                 continue
-        score = -float(diag.L_margin.detach().item())
-        scores.append((int(c), score))
+        v_raw = -float(diag.L_margin.detach().item())
+        raw_scores.append((int(c), v_raw))
 
-    if not scores:
+    if not raw_scores:
         raise RuntimeError(
             "prescreen: every candidate failed to build attack_state or "
             "Stage-14 forward")
 
-    # Sort candidates by score descending.
-    sorted_scores = sorted(scores, key=lambda kv: -kv[1])
+    # Convert v_raw -> v_rank ∈ [0, 1] (rank percentile). Use simple
+    # rank/(n-1) so the worst maps to 0 and the best maps to 1.
+    sorted_by_v = sorted(raw_scores, key=lambda kv: kv[1])
+    n = len(sorted_by_v)
+    v_rank: Dict[int, float] = {}
+    for rank, (c, _) in enumerate(sorted_by_v):
+        v_rank[int(c)] = float(rank) / float(max(1, n - 1))
 
-    # Greedy d_min-spaced top-K selection. seed_index lets us pick the
-    # next-best alternative if the global top has been tried already.
-    chosen: List[int] = []
-    skip_count = 0
-    for c, _ in sorted_scores:
-        if any(abs(c - x) < d_min for x in chosen):
-            continue
-        if skip_count < seed_index and len(chosen) == 0:
-            # Skip first `seed_index` candidates from being picked as seed 0.
-            skip_count += 1
-            continue
-        chosen.append(c)
-        if len(chosen) == K:
-            break
+    # Coverage factor h(c) — multiplicative penalty for late frames.
+    span_denom = max(1.0, float(T_clean - bridge_budget - clamp_left))
+    relevance: List[Tuple[int, float]] = []
+    for c, _ in raw_scores:
+        h_c = max(0.0, min(1.0,
+                           float(T_clean - bridge_budget - c) / span_denom))
+        r_c = v_rank[int(c)] * h_c
+        relevance.append((int(c), r_c))
+    # Sort relevance descending by r for the selector.
+    relevance.sort(key=lambda kv: -kv[1])
 
-    if len(chosen) < K:
-        raise RuntimeError(
-            f"prescreen: only {len(chosen)} candidates with d_min="
-            f"{d_min} spacing; need K={K}. seed_index={seed_index}.")
+    usable_span = float(T_clean - 1 - bridge_budget) - float(clamp_left)
+    target_gap = max(1.0, usable_span / float(K))
+
+    chosen = _coverage_aware_select(
+        relevance, K=K, d_min=int(d_min),
+        target_gap=target_gap, seed_index=int(seed_index),
+    )
 
     init_tau_values = sorted(float(c) for c in chosen)
     return PrescreenResult(
         init_tau_values=init_tau_values,
-        candidate_scores=scores,
+        candidate_raw_scores=raw_scores,
+        candidate_relevance=relevance,
         seed_index=int(seed_index),
     )
 
@@ -644,7 +875,7 @@ def curriculum_joint_step(
     forward_fn: Any,
     lpips_fn: Callable[[Tensor, Tensor], Tensor],
     state_cache: AttackStateCache,
-    tau_params: TauGapParams,
+    tau_params: TauPhaseParams,
     traj_params: Any,                  # FalseTrajectoryParams
     edit_params: Any,                  # BridgeEditParams
     R: Optional[Tensor],
@@ -657,12 +888,26 @@ def curriculum_joint_step(
     R_lr: float,
     R_eps: float,
 ) -> CurriculumStepDiagnostics:
-    """One joint step of the curriculum: enumerate schedules, run
-    Stage-14 forwards, weighted-sum loss, single backward, zero inactive
-    Adam grads (codex R3 HIGH fix), single optimizer step, R sign-PGD
-    restricted to active slices, τ inward-projection fallback if
-    degenerate."""
-    tau = tau_from_gaps(tau_params)         # [K] differentiable
+    """One joint step of the v2 curriculum.
+
+    Differences from v1:
+      * `tau_params` is `TauPhaseParams` (phase-local simplex), not
+        `TauGapParams` (cumulative softplus). `tau_from_phase_params`
+        returns a [K] tensor where the first m entries are
+        differentiable in `p_raw` and the trailing K-m entries are
+        detached fixed constants from the prior phase.
+      * Degeneracy fallback (`<2 valid corners`) blends `p_raw` with
+        the uniform simplex (90/10) instead of resetting g to a
+        softplus interior — this avoids the dead-zone retry trap
+        that v1 had at the d_min lower bound.
+      * After `optimizer.step()`, `project_simplex_inplace` ensures
+        `p_raw` stays on the (m+1)-simplex.
+      * `_zero_inactive_grads` no longer touches τ params — fixed-
+        tail constants in `TauPhaseParams` enforce inactive-τ
+        freezing structurally, so the gradient hook is unneeded for
+        τ. It still guards traj/edit/R/nu inactive slices.
+    """
+    tau = tau_from_phase_params(tau_params)         # [K] differentiable
     schedules, raw_weight_mass = enumerate_neighbor_schedules(
         tau, active_inserts,
         T_clean=tau_params.T_clean,
@@ -672,16 +917,14 @@ def curriculum_joint_step(
     valid_corner_count = len(schedules)
     inward_projected = False
 
-    # Guardrail #2 fallback: if degenerate (<2 surviving corners), project
-    # τ inward and retry. After retry we accept whatever survives —
-    # singleton corner means τ has no gradient this step, but we record
-    # `singleton_corner=True` so callers can detect the degeneracy. If
-    # zero corners survive even after projection, raise (config is
+    # Guardrail #2 fallback (v2): if degenerate (<2 surviving corners),
+    # blend p_raw with the uniform simplex and retry once. If zero
+    # corners survive even after the blend, raise (config is
     # incompatible — caller should reduce K or d_min).
     if valid_corner_count < 2:
-        project_tau_inward(tau_params)
+        blend_simplex_with_uniform(tau_params.p_raw, weight=0.10)
         inward_projected = True
-        tau = tau_from_gaps(tau_params)
+        tau = tau_from_phase_params(tau_params)
         schedules, raw_weight_mass = enumerate_neighbor_schedules(
             tau, active_inserts,
             T_clean=tau_params.T_clean,
@@ -691,9 +934,9 @@ def curriculum_joint_step(
         valid_corner_count = len(schedules)
         if valid_corner_count == 0:
             raise RuntimeError(
-                "joint search: no valid schedule corners after τ inward "
-                "projection. T_clean / bridge_length / d_min combination "
-                "is incompatible.")
+                "joint search: no valid schedule corners after simplex "
+                "uniform-blend retry. T_clean / bridge_length / d_min "
+                "combination is incompatible.")
 
     singleton_corner = (valid_corner_count == 1)
 
@@ -758,6 +1001,10 @@ def curriculum_joint_step(
     # FULL [K, ...] tensors; without this hook the inactive slices would
     # be Adam-stepped on every iteration via gradients flowing through
     # stage14_forward_loss across all schedules.
+    #
+    # v2: tau is no longer in this hook (TauPhaseParams uses fixed-tail
+    # constants for inactive τ; the differentiable prefix is exactly
+    # the active inserts). Only traj/edit/R/nu still need the gating.
     K_total = int(traj_params.anchor_offset.shape[0])
     per_insert_tensors: List[Tensor] = [
         traj_params.anchor_offset,
@@ -770,10 +1017,13 @@ def curriculum_joint_step(
     _zero_inactive_grads(
         active_inserts=active_inserts, K=K_total,
         per_insert_first_dim_tensors=per_insert_tensors,
-        tau_g=tau_params.g,
+        tau_g=None,                                      # v2: no tau gating
     )
 
     optimizer.step()
+
+    # v2: simplex-project p_raw after the Adam step.
+    project_simplex_inplace(tau_params.p_raw)
 
     # R sign-PGD restricted to active slices (Phase B only).
     if R_active_in_phase and R is not None and R.requires_grad:
@@ -786,12 +1036,22 @@ def curriculum_joint_step(
     project_trajectory_to_budget(
         traj_params, max_offset_px=config.oracle_traj_max_offset_px)
 
+    # Codex v2 review fix (2026-04-26 21:00): return POST-step τ.
+    # The earlier `tau` was computed before optimizer.step() + simplex
+    # projection, so using its values for `tau_values` would drop the
+    # last update of every phase — `joint_curriculum_search` carries
+    # `tau_full_state = diag.tau_values` forward, so a stale value
+    # means the next phase initializes from one step behind and the
+    # final W_round is also stale.
+    with torch.no_grad():
+        tau_post = tau_from_phase_params(tau_params)
+
     return CurriculumStepDiagnostics(
         L_step=float(L_step_value),
         valid_corner_count=valid_corner_count,
         valid_weight_mass=float(raw_weight_mass),
         schedules=schedule_logs,
-        tau_values=[float(t.detach().item()) for t in tau],
+        tau_values=[float(t.detach().item()) for t in tau_post],
         inward_projected=inward_projected,
         singleton_corner=singleton_corner,
     )
@@ -964,25 +1224,27 @@ def joint_curriculum_search(
     candidate_stride: int = 1,
     cache_max_size: int = 64,
 ) -> JointSearchResult:
-    """Run the full joint curriculum placement-perturbation search.
+    """Run the full v2 joint curriculum placement-perturbation search.
 
-    Pipeline (auto-review-loop R6 GO design):
-      1. Prescreen (1 fwd × ~T candidates) → init_tau_values.
-      2. Initialize TauGapParams + traj + edit_params + R + nu.
-      3. K=1 phase: optimize {g[0], anchor[0], delta[0,:], α[0,:],
-         warp[0,:], R[0,:], ν[0]} for `phase_steps[0]` steps.
-      4. K=2 phase: optimizer rebuild adds {g[1], anchor[1], delta[1,:],
-         α[1,:], warp[1,:], R[1,:], ν[1]}. `phase_steps[1]` steps.
-      5. K=3 phase: optimizer rebuild adds the rest. `phase_steps[2]`
-         steps.
-      6. Round τ → W_round; 27-triple ±1 local refine via 6-step Stage-14
-         estimates; pick best.
-      7. Return chosen W (caller runs the final 30-step Stage-14 +
-         export via the existing fixed-W path).
+    Pipeline (codex R6 follow-up v2):
+      1. Coverage-aware prescreen (1 fwd × T candidates with horizon
+         H_pre=12, score = v_rank * h(c) for late-frame discount,
+         MMR 0.7/0.3 selector with capped linear diversity).
+      2. Initialize traj + edit_params + R + ν from prescreen W. The
+         **TauPhaseParams is rebuilt at each curriculum phase** from
+         the current full τ — phase-local simplex slack allocation
+         replaces the v1 global cumulative softplus that saturated at
+         the d_min lower bound.
+      3-5. Curriculum K=1, K=2, K=3 with `phase_steps` per phase. At
+         each transition the optimizer + tau_params are rebuilt;
+         inactive τ tail is held as detached constants (structural,
+         not gradient-zeroing).
+      6. Round τ → W_round; 27-triple ±1 local refine via 6-step
+         cheap Stage-14 estimates.
+      7. Return chosen W (caller runs final 30-step Stage-14 + export).
 
-    Bundle C (LPIPS-native ν) MUST be off — the driver enforces this via
-    a mutex guard. The line-search assumes fixed W, which multi-schedule
-    enumeration violates.
+    Bundle C (LPIPS-native ν) is unsupported (multi-schedule violates
+    fixed-W line-search assumption). Driver mutex enforces this.
     """
     if int(K) != len(phase_steps):
         raise ValueError(
@@ -991,7 +1253,7 @@ def joint_curriculum_search(
     if getattr(config, "oracle_traj_nu_lpips_native", False):
         raise ValueError(
             "joint_curriculum_search: Bundle C (oracle_traj_nu_lpips_native) "
-            "is not supported in v1. The LPIPS-native ν line-search "
+            "is not supported in v1/v2. The LPIPS-native ν line-search "
             "assumes fixed W; multi-schedule enumeration violates that. "
             "Disable --oracle-traj-nu-lpips-native or use "
             "--use-profiled-placement instead.")
@@ -1005,32 +1267,33 @@ def joint_curriculum_search(
 
     timings: Dict[str, float] = {}
 
-    # ---- 1. Prescreen ----
+    # ---- 1. Coverage-aware prescreen ----
     t0 = time.time()
     pre = prescreen_tau_init(
         x_clean, pseudo_masks_clean, config,
         forward_fn=forward_fn, lpips_fn=lpips_fn,
-        K=K, d_min=d_min, bridge_length=bridge_len,
+        K=K, d_min=int(d_min), bridge_length=bridge_len,
         seed_index=int(prescreen_seed_index),
         candidate_stride=int(candidate_stride),
+        prescreen_horizon=int(getattr(
+            config, "oracle_traj_prescreen_horizon", 12)),
     )
     timings["prescreen"] = time.time() - t0
 
-    # ---- 2. Initialize state ----
+    # ---- 2. Initialize state cache + traj/edit/ν/R from prescreen W ----
     state_cache = AttackStateCache(
         x_clean, pseudo_masks_clean, config,
         max_size=int(cache_max_size),
         bridge_length=bridge_len,
     )
-    tau_params = init_tau_gap_params(
-        K=K, T_clean=T_clean,
-        init_tau_values=pre.init_tau_values,
-        clamp_left=1.0, bridge_budget=bridge_budget, d_min=float(d_min),
-        device=device, dtype=x_clean.dtype,
-    )
-    # Pre-build the K=3 attack state at the rounded init values so traj
-    # init_anchors come from the prescreen's seed.
-    W_init = tuple(int(round(v)) for v in pre.init_tau_values)
+    # Track the FULL τ (length K) across phases. Initially set to the
+    # prescreen output; updated at each phase transition from the
+    # phase-local TauPhaseParams' produced full τ.
+    tau_full_state: List[float] = [float(v) for v in pre.init_tau_values]
+
+    # Pre-build the K-insert attack state at the prescreen-rounded W so
+    # traj init_anchors come from the right offsets.
+    W_init = tuple(int(round(v)) for v in tau_full_state)
     init_state = state_cache.get(W_init)
     traj = init_false_trajectory(
         K=K, L=init_state.L_max,
@@ -1053,41 +1316,37 @@ def joint_curriculum_search(
 
     curriculum_logs: List[Dict[str, Any]] = []
 
-    # ---- 3-5. Curriculum phases ----
+    # ---- 3-5. Curriculum phases (TauPhaseParams rebuilt per phase) ----
     lambda_fid_val = float(config.joint_traj_lambda_fid)
     R_lr = float(config.oracle_traj_residual_lr)
     R_eps = float(config.oracle_traj_residual_eps)
+    # v2: tau_lr defaults to 0.05 (codex spec). Simplex slack has
+    # stronger leverage than the old softplus gaps, so we lower the LR.
+    tau_lr = float(getattr(config, "oracle_traj_tau_lr", 0.05))
 
     for phase_idx in range(K):
         t_phase = time.time()
         active_inserts = list(range(phase_idx + 1))
-        # Build optimizer for this phase: g[active], anchor[active],
-        # delta[active], alpha_logits[active], warp_s[active],
-        # warp_r[active], nu[active]. We index slices via .data and
-        # treat the underlying tensors as full [K, ...] but include
-        # only the relevant params in the optimizer's param list.
-        param_list: List[Tensor] = [tau_params.g]
-        param_list.append(traj.anchor_offset)
-        param_list.append(traj.delta_offset)
-        param_list.append(edit_params.alpha_logits)
-        param_list.append(edit_params.warp_s)
-        param_list.append(edit_params.warp_r)
-        param_list.append(nu)
-        # NOTE: we pass the FULL tensors to the optimizer; gradients on
-        # inactive insert slices flow through Stage-14 forward but the
-        # weight-mass over inactive corners is degenerate enough that
-        # the inactive-slice gradient is negligible. The R active-slice
-        # mask in `_apply_R_sign_pgd_active` enforces strict locality
-        # for R; we accept the soft-locality on Adam params as a
-        # pragmatic v1 compromise (codex R3 reviewers acknowledged
-        # this in the GO).
+        m = phase_idx + 1
 
-        # Use the existing oracle_traj_anchor_lr for trajectory params,
-        # alpha_lr for α/warp, and a tau_lr default if not configured.
-        tau_lr = float(getattr(config, "oracle_traj_tau_lr",
-                               config.oracle_traj_anchor_lr))
+        # v2: rebuild TauPhaseParams from the current full τ. The
+        # active prefix is whatever the previous phase produced; the
+        # tail (K-m entries) stays as fixed constants from prescreen
+        # initialization (or from prior phases that touched them).
+        tau_params = init_tau_phase_params(
+            active_K=m, full_K=K, T_clean=T_clean,
+            init_tau_values_full=tau_full_state,
+            clamp_left=1.0, bridge_budget=bridge_budget,
+            d_min=int(d_min),
+            device=device, dtype=x_clean.dtype,
+        )
+
+        # Optimizer rebuild per phase. p_raw is the only τ param.
+        # Pass full traj/edit/R/nu but rely on _zero_inactive_grads
+        # for inactive-slice gating (R uses _apply_R_sign_pgd_active
+        # for strict locality; Adam params are soft-locality).
         optimizer = torch.optim.Adam([
-            {"params": [tau_params.g], "lr": tau_lr},
+            {"params": [tau_params.p_raw], "lr": tau_lr},
             {"params": [traj.anchor_offset],
              "lr": float(config.oracle_traj_anchor_lr)},
             {"params": [traj.delta_offset],
@@ -1122,15 +1381,17 @@ def joint_curriculum_search(
                 "valid_weight_mass": diag.valid_weight_mass,
                 "tau_values": diag.tau_values,
                 "inward_projected": diag.inward_projected,
+                "singleton_corner": diag.singleton_corner,
                 "schedules": diag.schedules,
             })
+            # Update full τ state with the active prefix produced this
+            # step; the tail stays at its stored constants.
+            tau_full_state = list(diag.tau_values)
         timings[f"phase_{phase_idx + 1}"] = time.time() - t_phase
 
     # ---- 6. Round + 27-triple local refine ----
     t_refine = time.time()
-    with torch.no_grad():
-        tau_final = tau_from_gaps(tau_params)
-    W_round = [int(round(float(t.detach().item()))) for t in tau_final]
+    W_round = [int(round(float(v))) for v in tau_full_state]
     refine_W, refine_diags = local_refine_27(
         x_clean=x_clean, pseudo_masks_clean=pseudo_masks_clean,
         config=config, forward_fn=forward_fn, lpips_fn=lpips_fn,
@@ -1204,45 +1465,161 @@ class _DummyConfig:
     joint_traj_lambda_fid = 10.0
 
 
-def _test_tau_gap_init_and_recurrence_inverts() -> None:
-    """init_tau_gap_params(init_tau_values) → tau_from_gaps reproduces
-    the input within tolerance (inverse-sigmoid + inverse-softplus
-    correctness)."""
-    cfg = _DummyConfig()
-    targets = [3.0, 7.0, 15.0]
-    p = init_tau_gap_params(
-        K=3, T_clean=30, init_tau_values=targets,
-        clamp_left=1.0, bridge_budget=5, d_min=2.0,
-    )
-    tau = tau_from_gaps(p).detach().cpu().tolist()
-    for got, want in zip(tau, targets):
-        assert abs(got - want) < 1e-3, (got, want, tau)
-    print("  tau-gap init+recurrence inverts cleanly")
+def _test_phase_simplex_inversion_exact() -> None:
+    """init_tau_phase_params(init_tau_values_full) → tau_from_phase_params
+    reproduces the input within tolerance for both clustered and spread
+    configurations (codex v2 spec mandatory test)."""
+    for tag, full_tau in [("clustered", [13.0, 15.0, 17.0]),
+                          ("spread", [8.0, 18.0, 32.0])]:
+        for m in [1, 2, 3]:
+            p = init_tau_phase_params(
+                active_K=m, full_K=3, T_clean=58,
+                init_tau_values_full=full_tau,
+                clamp_left=1.0, bridge_budget=4, d_min=2,
+            )
+            tau = tau_from_phase_params(p).detach().cpu().tolist()
+            for got, want in zip(tau, full_tau):
+                assert abs(got - want) < 1e-5, (
+                    tag, m, got, want, tau, full_tau)
+    print("  phase-simplex inversion exact (clustered + spread)")
 
 
-def _test_tau_ordered_legality() -> None:
-    """For random init in valid range, tau is always ordered with
-    τ[0] >= clamp_left and τ[K-1] + bridge_budget <= T_clean - 1."""
+def _test_phase_simplex_feasibility_under_random_updates() -> None:
+    """Random simplex perturbations stay legal: τ[0] ≥ clamp_left,
+    τ[i] - τ[i-1] ≥ d_min, τ[K-1] + bridge_budget ≤ T_clean - 1
+    (codex v2 spec mandatory test)."""
     torch.manual_seed(0)
-    T_clean = 50
+    T_clean = 58
     clamp_left = 1.0
-    bridge_budget = 5
-    d_min = 2.0
-    init_vals = [3.0, 8.0, 18.0]
-    p = init_tau_gap_params(
-        K=3, T_clean=T_clean, init_tau_values=init_vals,
+    bridge_budget = 4
+    d_min = 2
+    init_full = [8.0, 18.0, 32.0]
+    p = init_tau_phase_params(
+        active_K=3, full_K=3, T_clean=T_clean,
+        init_tau_values_full=init_full,
         clamp_left=clamp_left, bridge_budget=bridge_budget, d_min=d_min,
     )
-    # Try several random g perturbations.
-    for _ in range(20):
+    for _ in range(30):
         with torch.no_grad():
-            p.g.add_(torch.randn_like(p.g))
-        tau = tau_from_gaps(p).detach().cpu().tolist()
+            p.p_raw.add_(torch.randn_like(p.p_raw) * 0.5)
+        project_simplex_inplace(p.p_raw)
+        tau = tau_from_phase_params(p).detach().cpu().tolist()
         assert tau[0] >= clamp_left - 1e-3, tau
-        for k in range(1, len(tau)):
-            assert tau[k] >= tau[k - 1] + d_min - 1e-3, tau
+        for i in range(1, len(tau)):
+            assert tau[i] >= tau[i - 1] + d_min - 1e-3, tau
         assert tau[-1] + bridge_budget <= T_clean - 1 + 1e-3, tau
-    print("  ordered-tau legality holds under random perturbations")
+        # And p_raw is on the simplex.
+        assert (p.p_raw.detach() >= -1e-6).all()
+        assert abs(float(p.p_raw.detach().sum()) - 1.0) < 1e-5
+    print("  phase-simplex feasibility under random updates")
+
+
+def _test_phase_simplex_linear_jacobian() -> None:
+    """The Jacobian dτ/dp is constant: shifting probability mass from
+    p[3] to p[1] increases τ[1] and τ[2] by the same amount (≈ U_m·ε).
+    This is the property v1 lacked — saturation in cumulative softplus
+    made dτ/dg ≈ 0 at clustered d_min init (codex v2 spec mandatory)."""
+    T_clean = 58
+    bridge_budget = 4
+    d_min = 2
+    clustered = [13.0, 15.0, 17.0]
+    p = init_tau_phase_params(
+        active_K=3, full_K=3, T_clean=T_clean,
+        init_tau_values_full=clustered,
+        clamp_left=1.0, bridge_budget=bridge_budget, d_min=d_min,
+    )
+    # B_m = T_clean - 1 - bridge_budget = 53; U_m = 53 - 1 - 2*2 = 48.
+    _, U_m = _phase_boundary_and_slack(
+        T_clean, bridge_budget, 1.0, d_min, 3,
+        tau_fixed_full=clustered,
+    )
+    eps = 0.02
+    tau_before = tau_from_phase_params(p).detach().clone()
+    with torch.no_grad():
+        p.p_raw.data[1] += eps
+        p.p_raw.data[3] -= eps
+    project_simplex_inplace(p.p_raw)
+    tau_after = tau_from_phase_params(p).detach().clone()
+    delta = (tau_after - tau_before).cpu().tolist()
+    # τ[0] depends only on p[0] → unchanged.
+    # τ[1] depends on p[0]+p[1] → +U_m*eps.
+    # τ[2] depends on p[0]+p[1]+p[2] → +U_m*eps (p[2] unchanged).
+    expected = [0.0, U_m * eps, U_m * eps]
+    for k in range(3):
+        assert abs(delta[k] - expected[k]) < 0.05, (
+            k, delta, expected, U_m, eps)
+    print("  phase-simplex linear Jacobian: dτ/dp = U_m (no saturation)")
+
+
+def _test_phase_simplex_optimizer_can_escape_cluster() -> None:
+    """THE missing test from R3: from clustered d_min init, can Adam
+    actually move τ? In v1, cumulative softplus saturated at g≈-13.8
+    → 12 Adam steps moved softplus from 0 to ~4e-4 (effectively 0).
+    v2 simplex parameterization should escape easily.
+
+    Synthetic objective L = -(τ[1] + τ[2]). 10 Adam steps with lr=0.05
+    should push τ[2] up by ≥ 2 frames (a measurable escape from the
+    d_min lower bound)."""
+    T_clean = 58
+    bridge_budget = 4
+    d_min = 2
+    clustered = [13.0, 15.0, 17.0]
+    p = init_tau_phase_params(
+        active_K=3, full_K=3, T_clean=T_clean,
+        init_tau_values_full=clustered,
+        clamp_left=1.0, bridge_budget=bridge_budget, d_min=d_min,
+    )
+    tau_init = tau_from_phase_params(p).detach().clone()
+    opt = torch.optim.Adam([p.p_raw], lr=0.05)
+    for _ in range(10):
+        opt.zero_grad()
+        tau = tau_from_phase_params(p)
+        L = -(tau[1] + tau[2])
+        L.backward()
+        opt.step()
+        project_simplex_inplace(p.p_raw)
+    tau_final = tau_from_phase_params(p).detach().clone()
+    delta_2 = float(tau_final[2] - tau_init[2])
+    delta_1 = float(tau_final[1] - tau_init[1])
+    assert delta_2 >= 2.0, (
+        f"τ[2] must move ≥ 2 frames from clustered init; got Δτ[2]="
+        f"{delta_2:.3f}, tau_init={tau_init.tolist()}, "
+        f"tau_final={tau_final.tolist()}. THE saturation bug is back.")
+    assert delta_1 >= 1.0, (
+        f"τ[1] must move ≥ 1 frame; got Δτ[1]={delta_1:.3f}")
+    print(f"  cluster-escape OK (Δτ[1]={delta_1:.2f}, Δτ[2]={delta_2:.2f})")
+
+
+def _test_simplex_projection_basic() -> None:
+    """project_simplex_inplace produces non-negative entries summing to 1."""
+    torch.manual_seed(0)
+    for _ in range(20):
+        x = torch.randn(5)
+        original_x = x.clone()
+        project_simplex_inplace(x)
+        assert (x >= -1e-6).all(), x
+        assert abs(float(x.sum()) - 1.0) < 1e-5, x
+        # Idempotence: re-projection is a no-op.
+        x_proj = x.clone()
+        project_simplex_inplace(x_proj)
+        assert torch.allclose(x_proj, x, atol=1e-6), (x, x_proj)
+    print("  simplex projection: non-negative, sums to 1, idempotent")
+
+
+def _test_blend_simplex_with_uniform() -> None:
+    """blend_simplex_with_uniform pulls a degenerate one-hot toward
+    uniform, restoring viable corner enumeration after singleton
+    collapse (codex v2 spec degeneracy recovery)."""
+    p = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    p.requires_grad_(True)
+    blend_simplex_with_uniform(p, weight=0.10)
+    # 90% original + 10% uniform of size 4 = 0.025 each
+    expected = torch.tensor([0.925, 0.025, 0.025, 0.025])
+    assert torch.allclose(p.detach(), expected, atol=1e-5), p
+    # Sums to 1, all non-negative.
+    assert abs(float(p.detach().sum()) - 1.0) < 1e-5
+    assert (p.detach() >= -1e-6).all()
+    print("  uniform blend: pulls one-hot toward uniform")
 
 
 def _test_schedule_weight_sum_and_integer_exactness() -> None:
@@ -1500,13 +1877,12 @@ def _test_curriculum_smoke_K1_K2_K3() -> None:
         x_clean, pseudo_masks, cfg, max_size=16,
         bridge_length=cfg.oracle_traj_bridge_length,
     )
-    init_tau = [3.0, 9.0, 16.0]
-    tau_p = init_tau_gap_params(
-        K=3, T_clean=T_clean, init_tau_values=init_tau,
-        clamp_left=1.0, bridge_budget=cfg.oracle_traj_bridge_length + 1,
-        d_min=2.0,
-    )
-    init_state = state_cache.get([3, 9, 16])
+    # v2: tau_full_state tracks the full K-tau across phases. The
+    # TauPhaseParams is rebuilt per phase from this state.
+    tau_full_state: List[float] = [3.0, 9.0, 16.0]
+    bridge_budget = cfg.oracle_traj_bridge_length + 1
+    init_state = state_cache.get(
+        tuple(int(round(v)) for v in tau_full_state))
     traj = init_false_trajectory(
         K=3, L=init_state.L_max,
         init_anchor_offsets=[
@@ -1521,25 +1897,32 @@ def _test_curriculum_smoke_K1_K2_K3() -> None:
     nu = torch.zeros(3, H, W, 3, requires_grad=True)
     R = torch.zeros(3, init_state.L_max, H, W, 3, requires_grad=True)
 
-    def _opt(active_K: int):
-        return torch.optim.Adam([
-            {"params": [tau_p.g], "lr": 0.1},
+    R_baseline_inactive = R.data[1:].clone()
+    anchor_initial = traj.anchor_offset.detach().clone()
+    delta_initial = traj.delta_offset.detach().clone()
+    alpha_initial = edit_p.alpha_logits.detach().clone()
+    nu_initial = nu.detach().clone()
+    tau_initial = list(tau_full_state)
+
+    def _build_phase(active_K: int) -> Tuple[TauPhaseParams,
+                                              torch.optim.Optimizer]:
+        tau_p = init_tau_phase_params(
+            active_K=active_K, full_K=3, T_clean=T_clean,
+            init_tau_values_full=tau_full_state,
+            clamp_left=1.0, bridge_budget=bridge_budget, d_min=2,
+        )
+        opt = torch.optim.Adam([
+            {"params": [tau_p.p_raw], "lr": 0.05},
             {"params": [traj.anchor_offset], "lr": 0.1},
             {"params": [traj.delta_offset], "lr": 0.1},
             {"params": [edit_p.alpha_logits], "lr": 0.1},
             {"params": [edit_p.warp_s, edit_p.warp_r], "lr": 0.1},
             {"params": [nu], "lr": 0.01},
         ])
-
-    R_baseline_inactive = R.data[1:].clone()
-    g_initial = tau_p.g.detach().clone()
-    anchor_initial = traj.anchor_offset.detach().clone()
-    delta_initial = traj.delta_offset.detach().clone()
-    alpha_initial = edit_p.alpha_logits.detach().clone()
-    nu_initial = nu.detach().clone()
+        return tau_p, opt
 
     # K=1 phase: 2 steps. R must NOT be active (phase_idx < K-1).
-    opt = _opt(1)
+    tau_p, opt = _build_phase(1)
     for _ in range(2):
         diag = curriculum_joint_step(
             x_clean=x_clean, pseudo_masks_clean=pseudo_masks,
@@ -1554,13 +1937,20 @@ def _test_curriculum_smoke_K1_K2_K3() -> None:
             R_lr=cfg.oracle_traj_residual_lr,
             R_eps=cfg.oracle_traj_residual_eps,
         )
-        # K=1: 2 active corners (floor/ceil of τ[0]) -> at most 2 schedules.
         assert diag.valid_corner_count <= 2, diag.valid_corner_count
         assert diag.valid_corner_count >= 1, diag.valid_corner_count
+        tau_full_state = list(diag.tau_values)
+
     # R inactive slices unchanged (Phase A).
     assert torch.allclose(R.data[1:], R_baseline_inactive)
-    # codex R3 HIGH fix: inactive insert slices must NOT have moved
-    # under Adam during K=1 phase (only insert 0 is active).
+    # v2: TauPhaseParams' fixed-tail enforces τ[1], τ[2] don't move
+    # in K=1 phase (structural, not gradient gating).
+    assert abs(tau_full_state[1] - tau_initial[1]) < 1e-3, \
+        f"τ[1] (inactive in K=1, fixed-tail) drifted: {tau_full_state[1]} vs {tau_initial[1]}"
+    assert abs(tau_full_state[2] - tau_initial[2]) < 1e-3, \
+        f"τ[2] (inactive in K=1, fixed-tail) drifted: {tau_full_state[2]} vs {tau_initial[2]}"
+    # codex R3 HIGH fix: inactive insert Adam-params must NOT have moved
+    # under K=1 phase (only insert 0 is active).
     assert torch.allclose(traj.anchor_offset[1:], anchor_initial[1:]), \
         "anchor_offset[1:] (inactive in K=1) should be unchanged"
     assert torch.allclose(traj.delta_offset[1:], delta_initial[1:]), \
@@ -1569,16 +1959,10 @@ def _test_curriculum_smoke_K1_K2_K3() -> None:
         "alpha_logits[1:] (inactive in K=1) should be unchanged"
     assert torch.allclose(nu[1:], nu_initial[1:]), \
         "nu[1:] (inactive in K=1) should be unchanged"
-    # And g[1], g[2] (inactive) unchanged.
-    g_after_K1 = tau_p.g.detach().clone()
-    assert torch.allclose(g_after_K1[1:], g_initial[1:]), \
-        f"g[1:] (inactive) must be frozen, got drift {(g_after_K1[1:] - g_initial[1:]).abs().max()}"
-    # Active slices SHOULD have moved.
-    assert (g_after_K1[0] - g_initial[0]).abs() > 1e-6, \
-        "g[0] (active) should have moved during K=1 phase"
 
     # K=2 phase: 2 steps with optimizer rebuild.
-    opt = _opt(2)
+    tau_p, opt = _build_phase(2)
+    tau_2_before = tau_full_state[2]
     for _ in range(2):
         diag = curriculum_joint_step(
             x_clean=x_clean, pseudo_masks_clean=pseudo_masks,
@@ -1593,13 +1977,15 @@ def _test_curriculum_smoke_K1_K2_K3() -> None:
             R_lr=cfg.oracle_traj_residual_lr,
             R_eps=cfg.oracle_traj_residual_eps,
         )
-        # K=2: 4 active corners max.
         assert diag.valid_corner_count <= 4, diag.valid_corner_count
-    # R inactive (Phase A).
+        tau_full_state = list(diag.tau_values)
+    # τ[2] (still inactive in K=2) MUST not move under fixed-tail.
+    assert abs(tau_full_state[2] - tau_2_before) < 1e-3, \
+        f"τ[2] (inactive in K=2) drifted: {tau_full_state[2]} vs {tau_2_before}"
     R_after_K2 = R.data.clone()
 
     # K=3 phase: 2 steps, R active.
-    opt = _opt(3)
+    tau_p, opt = _build_phase(3)
     for _ in range(2):
         diag = curriculum_joint_step(
             x_clean=x_clean, pseudo_masks_clean=pseudo_masks,
@@ -1614,13 +2000,12 @@ def _test_curriculum_smoke_K1_K2_K3() -> None:
             R_lr=cfg.oracle_traj_residual_lr,
             R_eps=cfg.oracle_traj_residual_eps,
         )
-        # K=3: up to 8 active corners.
         assert diag.valid_corner_count <= 8, diag.valid_corner_count
 
     # R must have moved during K=3 (sign-PGD ran).
     assert (R.data - R_after_K2).abs().max() > 0, \
         "R should have moved during K=3 phase"
-    print("  curriculum K1/K2/K3 smoke: corners + tau update + R Phase B OK")
+    print("  curriculum K1/K2/K3 smoke (v2): fixed-tail freeze + R Phase B OK")
 
 
 def _test_attack_state_cache_warmup_in_search() -> None:
@@ -1644,10 +2029,11 @@ def _test_attack_state_cache_warmup_in_search() -> None:
         bridge_length=cfg.oracle_traj_bridge_length,
     )
     init_tau = [3.0, 9.0, 16.0]
-    tau_p = init_tau_gap_params(
-        K=3, T_clean=T_clean, init_tau_values=init_tau,
+    tau_p = init_tau_phase_params(
+        active_K=3, full_K=3, T_clean=T_clean,
+        init_tau_values_full=init_tau,
         clamp_left=1.0, bridge_budget=cfg.oracle_traj_bridge_length + 1,
-        d_min=2.0,
+        d_min=2,
     )
     init_state = cache.get([3, 9, 16])
     traj = init_false_trajectory(
@@ -1660,7 +2046,7 @@ def _test_attack_state_cache_warmup_in_search() -> None:
     nu = torch.zeros(3, H, W, 3, requires_grad=True)
 
     opt = torch.optim.Adam([
-        {"params": [tau_p.g], "lr": 0.01},      # very small lr -> minimal τ drift
+        {"params": [tau_p.p_raw], "lr": 0.001},   # small lr -> minimal τ drift
         {"params": [traj.anchor_offset], "lr": 0.001},
         {"params": [traj.delta_offset], "lr": 0.001},
         {"params": [edit_p.alpha_logits], "lr": 0.001},
@@ -1691,10 +2077,81 @@ def _test_attack_state_cache_warmup_in_search() -> None:
     print("  AttackState cache warm-up: hits accumulate during search")
 
 
+def _test_prescreen_rejects_late_cluster_spike() -> None:
+    """Coverage-aware selector rejects late-frame cluster even when raw
+    relevance peaks there (codex v2 spec mandatory test).
+
+    Construct a synthetic candidate table where late frames 50-54 have
+    the highest raw vulnerability, but earlier frames 8/18/32 also
+    score well. The h(c) factor should pull the late spikes down so
+    MMR picks an early-mid-late spread."""
+    T_clean = 58
+    bridge_budget = 4
+    clamp_left = 1.0
+    d_min = 2
+
+    # Synthetic raw scores with late cluster + scattered earlier signal.
+    # Higher v_raw = better attack at K=1.
+    raw_scores: List[Tuple[int, float]] = []
+    for c in range(int(clamp_left), T_clean - bridge_budget):
+        if c in (50, 51, 52, 53, 54):
+            v = 5.0 + 0.1 * (c - 50)        # late cluster, biggest peak
+        elif c in (8, 9, 10):
+            v = 4.0
+        elif c in (18, 19, 20):
+            v = 3.5
+        elif c in (32, 33, 34):
+            v = 3.0
+        else:
+            v = 1.0 + 0.01 * c              # generic small noise
+        raw_scores.append((c, v))
+
+    # Apply v_rank * h(c) (mirrors prescreen_tau_init internal pipeline).
+    sorted_by_v = sorted(raw_scores, key=lambda kv: kv[1])
+    n = len(sorted_by_v)
+    v_rank = {c: float(rank) / float(max(1, n - 1))
+              for rank, (c, _) in enumerate(sorted_by_v)}
+    span_denom = max(1.0, float(T_clean - bridge_budget - clamp_left))
+    relevance: List[Tuple[int, float]] = []
+    for c, _ in raw_scores:
+        h_c = max(0.0, min(1.0,
+                           float(T_clean - bridge_budget - c) / span_denom))
+        relevance.append((c, v_rank[c] * h_c))
+    relevance.sort(key=lambda kv: -kv[1])
+
+    usable_span = float(T_clean - 1 - bridge_budget) - float(clamp_left)
+    target_gap = max(1.0, usable_span / 3.0)
+    chosen = _coverage_aware_select(
+        relevance, K=3, d_min=d_min, target_gap=target_gap, seed_index=0)
+
+    # PRIMARY assertion: late cluster {50..53} must be REJECTED
+    # (this is the actual dog-failure pattern we're protecting against).
+    assert max(chosen) < 45, (
+        f"prescreen must reject late cluster; got max={max(chosen)} in "
+        f"chosen={chosen}")
+    # SECONDARY: chosen should not be a tight d_min=2 cluster (the v1
+    # failure mode). Any spread > 4 (i.e., not all 3 within d_min=2)
+    # qualifies — MMR can legitimately pick one tight pair and one
+    # spread point under 0.7/0.3 weighting.
+    span = max(chosen) - min(chosen)
+    assert span > 4, (
+        f"chosen must not be a d_min cluster; got span={span} in "
+        f"chosen={chosen} (would be the dog v1 failure pattern)")
+    # No two chosen frames may be d_min-cluster (gap=2) on EVERY pair.
+    gaps = [chosen[i + 1] - chosen[i] for i in range(len(chosen) - 1)]
+    assert max(gaps) >= 5, (
+        f"chosen has all-d_min gaps {gaps}; would replicate dog cluster.")
+    print(f"  prescreen rejects late-cluster spike: chosen={chosen}")
+
+
 def _self_test() -> None:
     print("memshield.joint_placement_search self-tests:")
-    _test_tau_gap_init_and_recurrence_inverts()
-    _test_tau_ordered_legality()
+    _test_simplex_projection_basic()
+    _test_blend_simplex_with_uniform()
+    _test_phase_simplex_inversion_exact()
+    _test_phase_simplex_feasibility_under_random_updates()
+    _test_phase_simplex_linear_jacobian()
+    _test_phase_simplex_optimizer_can_escape_cluster()
     _test_schedule_weight_sum_and_integer_exactness()
     _test_schedule_filtering_invalid_orderings()
     _test_schedule_grad_flows_through_weights()
@@ -1702,9 +2159,10 @@ def _self_test() -> None:
     _test_27_neighbor_enumeration_filters_invalid()
     _test_bundle_C_incompat_guard()
     _test_attack_state_cache_hit_miss()
+    _test_prescreen_rejects_late_cluster_spike()
     _test_curriculum_smoke_K1_K2_K3()
     _test_attack_state_cache_warmup_in_search()
-    print("memshield.joint_placement_search: all self-tests PASSED")
+    print("memshield.joint_placement_search: all v2 self-tests PASSED")
 
 
 if __name__ == "__main__":
