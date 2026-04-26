@@ -434,6 +434,12 @@ class Stage14LossDiagnostics:
     L_warp: Tensor
     L_traj: Tensor
     L_R_tv: Tensor
+    L_suffix: Tensor    # v3 (codex Coverage-Constrained spec): soft-IoU
+                         # of true-mask retention at sparse probe frames
+                         # spanning the full attacked-suffix horizon.
+                         # Zero tensor when suffix probes are not used
+                         # (phase 1-2 of v3 curriculum, or v2 / v2.1
+                         # backwards-compat paths).
 
     # Detached / floated diagnostic scalars.
     mean_decoy_overlap: float
@@ -446,6 +452,7 @@ class Stage14LossDiagnostics:
     alpha_max_step: float
     warp_disp_max: float
     n_bridge: int
+    n_suffix_probes: int
 
 
 def stage14_forward_loss(
@@ -461,6 +468,8 @@ def stage14_forward_loss(
     config: Any,
     lambda_fid_val: float,
     R_active: bool = False,
+    suffix_probe_frames: Optional[Sequence[int]] = None,
+    lambda_suffix: float = 0.0,
 ) -> Tuple[Tensor, Stage14LossDiagnostics, Tensor]:
     """One Stage 14 forward + loss computation.
 
@@ -473,6 +482,15 @@ def stage14_forward_loss(
     NOTE: this function does NOT step optimizers, project trajectory, or
     update nu / R. The caller (legacy wrapper or joint search) is
     responsible for those state mutations between calls.
+
+    v3 (Coverage-Constrained Joint Suffix Optimization):
+      `suffix_probe_frames` (attacked-space frame indices, sparse, e.g.
+      6 evenly spaced in [w_0+1, T_proc-1]) trigger soft-IoU computation
+      of `sigmoid(logits_t) ∩ m_true_t` over those probes. The sum is
+      added to L_total weighted by `lambda_suffix`. The probes are
+      automatically merged into `forward_fn.return_at` so no extra
+      forward call is needed. Defaults (`suffix_probe_frames=None`,
+      `lambda_suffix=0.0`) reproduce the v2 / v2.1 behavior exactly.
     """
     device = x_clean.device
     dtype = x_clean.dtype
@@ -582,8 +600,19 @@ def stage14_forward_loss(
     processed = build_processed(x_edited_full, inserts, state.W_attacked)
 
     # 5. Forward + losses.
+    # v3: extend return_at with suffix probe frames so we get logits for
+    # soft-IoU at suffix-aware probes WITHOUT a second forward call.
+    return_at_set = set(int(t) for t in state.margin_query_frames)
+    suffix_probes_clean: List[int] = []
+    if suffix_probe_frames:
+        for t in suffix_probe_frames:
+            t_int = int(t)
+            if 0 <= t_int < state.T_proc:
+                suffix_probes_clean.append(t_int)
+                return_at_set.add(t_int)
+    return_at_list = sorted(return_at_set)
     logits_by_t, obj_score_by_t = forward_fn.forward_with_objectness(
-        processed, return_at=state.margin_query_frames,
+        processed, return_at=return_at_list,
         objectness_at=state.bridge_polish,
     )
 
@@ -669,6 +698,35 @@ def stage14_forward_loss(
     else:
         L_R_tv = torch.zeros((), dtype=dtype, device=device)
 
+    # v3 (Coverage-Constrained Joint Suffix Optimization, codex spec):
+    # soft-IoU of true-mask retention at sparse probe frames spanning
+    # the attacked-suffix horizon. The inserted-perturbation pipeline
+    # tries to MINIMIZE this term (low IoU = SAM2 lost the true object
+    # at that probe = good attack at that horizon point). The suffix
+    # term aligns the placement gradient with the global mean-J-drop
+    # objective, which the local L_margin surrogate alone misses on
+    # clips with sharp local fragility (e.g. blackswan).
+    if suffix_probes_clean and lambda_suffix > 0.0:
+        suffix_iou_terms: List[Tensor] = []
+        for t in suffix_probes_clean:
+            t_int = int(t)
+            if t_int not in state.m_true_by_t:
+                continue
+            if t_int not in logits_by_t:
+                continue
+            p_t = torch.sigmoid(logits_by_t[t_int]).flatten()
+            m_t = state.m_true_by_t[t_int].flatten().float()
+            inter = (p_t * m_t).sum()
+            union = (p_t + m_t - p_t * m_t).sum()
+            iou = inter / union.clamp_min(1e-6)
+            suffix_iou_terms.append(iou)
+        if suffix_iou_terms:
+            L_suffix = torch.stack(suffix_iou_terms, dim=0).sum()
+        else:
+            L_suffix = torch.zeros((), dtype=dtype, device=device)
+    else:
+        L_suffix = torch.zeros((), dtype=dtype, device=device)
+
     L = (
         config.oracle_traj_lambda_margin * L_margin
         + config.oracle_traj_lambda_obj * L_obj
@@ -678,6 +736,7 @@ def stage14_forward_loss(
         + config.oracle_traj_lambda_warp * L_warp
         + config.oracle_traj_lambda_residual_tv * L_R_tv
         + L_traj
+        + float(lambda_suffix) * L_suffix
     )
 
     # Diagnostics.
@@ -728,6 +787,7 @@ def stage14_forward_loss(
         L_margin=L_margin, L_obj=L_obj, L_area=L_area,
         L_fid_bridge=L_fid_bridge, L_fid_ins=L_fid_ins, L_fid_TV=L_fid_TV,
         L_alpha=L_alpha, L_warp=L_warp, L_traj=L_traj, L_R_tv=L_R_tv,
+        L_suffix=L_suffix,
         mean_decoy_overlap=float(mean_decoy_overlap),
         mean_true_overlap=float(mean_true_overlap),
         delta_overlap=float(mean_decoy_overlap - mean_true_overlap),
@@ -738,6 +798,7 @@ def stage14_forward_loss(
         alpha_max_step=float(alphas.max().detach().item()),
         warp_disp_max=float(d_xy.norm(dim=-1).max().detach().item()),
         n_bridge=len(state.bridge_polish),
+        n_suffix_probes=len(suffix_probes_clean),
     )
     return L, diag, x_edited_full
 

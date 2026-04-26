@@ -361,9 +361,29 @@ def blend_simplex_with_uniform(p_raw: Tensor, *, weight: float = 0.10) -> None:
 # ===========================================================================
 
 
-def _validate_schedule(W_clean: Sequence[int], T_clean: int,
-                       bridge_budget: int, d_min: int) -> bool:
-    """Strict ordering with min gap, in-range upper boundary."""
+def _validate_schedule(
+    W_clean: Sequence[int], T_clean: int,
+    bridge_budget: int, d_min: int,
+    *,
+    W0: Optional[Sequence[int]] = None,
+    trust_radius: Optional[int] = None,
+    span_ratio: Optional[float] = None,
+    gap_ratio: Optional[float] = None,
+) -> bool:
+    """Strict ordering + d_min spacing + boundaries; optional trust region.
+
+    v3 trust region (codex Coverage-Constrained spec): when W0 is given
+    AND any of (trust_radius, span_ratio, gap_ratio) is set, additionally
+    require:
+
+      |W_k - W0_k| ≤ trust_radius                 # bounded movement
+      span(W) ≥ span_ratio · span(W0)             # preserve coverage
+      min_gap(W) ≥ max(d_min, gap_ratio · min_gap(W0))   # forbid cluster
+
+    These hard constraints catch the v2 cluster-collapse pathology
+    (e.g. W0=[4,13,21] → curriculum cluster [7,9,21] would have span=14
+    < 0.85·17=14.45 → REJECTED, gap_min=2 < 0.5·8=4 → REJECTED).
+    """
     K = len(W_clean)
     if K == 0:
         return False
@@ -374,6 +394,33 @@ def _validate_schedule(W_clean: Sequence[int], T_clean: int,
     for i in range(1, K):
         if W_clean[i] - W_clean[i - 1] < d_min:
             return False
+    # v3 trust region (only when caller passes W0 + at least one bound).
+    if W0 is not None and (
+            trust_radius is not None
+            or span_ratio is not None
+            or gap_ratio is not None):
+        W0_int = [int(c) for c in W0]
+        if len(W0_int) != K:
+            return False
+        if trust_radius is not None and trust_radius > 0:
+            for i in range(K):
+                if abs(int(W_clean[i]) - W0_int[i]) > int(trust_radius):
+                    return False
+        if span_ratio is not None and span_ratio > 0:
+            span_W = float(int(W_clean[-1]) - int(W_clean[0]))
+            span_W0 = float(int(W0_int[-1]) - int(W0_int[0]))
+            # Strict float comparison (no int-truncation leniency).
+            if span_W < float(span_ratio) * span_W0 - 1e-6:
+                return False
+        if gap_ratio is not None and gap_ratio > 0:
+            gaps_W0 = [int(W0_int[i + 1] - W0_int[i]) for i in range(K - 1)]
+            min_gap_W0 = float(min(gaps_W0)) if gaps_W0 else float(d_min)
+            min_gap_required = max(float(d_min),
+                                   float(gap_ratio) * min_gap_W0)
+            for i in range(1, K):
+                gap = float(int(W_clean[i]) - int(W_clean[i - 1]))
+                if gap < min_gap_required - 1e-6:
+                    return False
     return True
 
 
@@ -384,6 +431,10 @@ def enumerate_neighbor_schedules(
     T_clean: int,
     bridge_budget: int,
     d_min: int,
+    W0: Optional[Sequence[int]] = None,
+    trust_radius: Optional[int] = None,
+    span_ratio: Optional[float] = None,
+    gap_ratio: Optional[float] = None,
 ) -> Tuple[List[Tuple[Tuple[int, ...], Tensor, int]], float]:
     """Enumerate the 2^|active_inserts| floor/ceil corner schedules of τ.
 
@@ -417,10 +468,23 @@ def enumerate_neighbor_schedules(
     """
     K = int(tau.shape[0])
     active = sorted({int(k) for k in active_inserts})
+    # v3 trust-region kwargs forwarded to _validate_schedule.
+    trust_kwargs: Dict[str, Any] = {}
+    if W0 is not None and (
+            trust_radius is not None
+            or span_ratio is not None
+            or gap_ratio is not None):
+        trust_kwargs = {
+            "W0": list(W0),
+            "trust_radius": trust_radius,
+            "span_ratio": span_ratio,
+            "gap_ratio": gap_ratio,
+        }
     if not active:
         # Nothing learnable; emit single round(τ) schedule with weight 1.
         W_round = tuple(int(torch.round(tau[k]).item()) for k in range(K))
-        if not _validate_schedule(W_round, T_clean, bridge_budget, d_min):
+        if not _validate_schedule(
+                W_round, T_clean, bridge_budget, d_min, **trust_kwargs):
             return [], 0.0
         w = torch.ones((), dtype=tau.dtype, device=tau.device)
         return [(W_round, w, 0)], 1.0
@@ -461,7 +525,8 @@ def enumerate_neighbor_schedules(
                 with torch.no_grad():
                     W_list[k] = int(torch.round(tau[k]).item())
         W_tuple = tuple(W_list)
-        if not _validate_schedule(W_tuple, T_clean, bridge_budget, d_min):
+        if not _validate_schedule(
+                W_tuple, T_clean, bridge_budget, d_min, **trust_kwargs):
             continue
         raw_weights.append(w)
         raw_W.append(W_tuple)
@@ -778,6 +843,13 @@ class CurriculumStepDiagnostics:
     singleton_corner: bool              # True when valid_corner_count == 1
                                         # after retry → τ has zero gradient
                                         # this step (codex R3 medium note).
+    suffix_loss_weighted: float = 0.0   # v3: weighted-mean L_suffix across
+                                        # schedules this step (raw IoU-sum
+                                        # value, not multiplied by lambda).
+                                        # 0.0 when phase doesn't use suffix.
+    trust_region_active: bool = False   # v3: True when phase passed W0 +
+                                        # trust ratios for schedule
+                                        # filtering. Phase 3 only.
 
 
 def _R_active_slice_mask(R: Optional[Tensor], active_k: Sequence[int]
@@ -887,6 +959,19 @@ def curriculum_joint_step(
     R_active_in_phase: bool,
     R_lr: float,
     R_eps: float,
+    # v3 (Coverage-Constrained Joint Suffix Optimization, codex spec).
+    # When `W0_for_trust` is provided AND any of the trust ratios is
+    # set, schedule enumeration applies the trust region (forbid cluster
+    # collapse). When `suffix_probe_frames` + `lambda_suffix > 0`, the
+    # forward loss includes the suffix-IoU term. Both are passed only in
+    # phase 3 by `joint_curriculum_search`; phase 1-2 keeps v2.2 freeze
+    # behavior with these all None / 0 (perturbation warmup).
+    W0_for_trust: Optional[Sequence[int]] = None,
+    trust_radius: Optional[int] = None,
+    span_ratio: Optional[float] = None,
+    gap_ratio: Optional[float] = None,
+    suffix_probe_frames: Optional[Sequence[int]] = None,
+    lambda_suffix: float = 0.0,
 ) -> CurriculumStepDiagnostics:
     """One joint step of the v2 curriculum.
 
@@ -913,6 +998,8 @@ def curriculum_joint_step(
         T_clean=tau_params.T_clean,
         bridge_budget=tau_params.bridge_budget,
         d_min=int(tau_params.d_min),
+        W0=W0_for_trust, trust_radius=trust_radius,
+        span_ratio=span_ratio, gap_ratio=gap_ratio,
     )
     valid_corner_count = len(schedules)
     inward_projected = False
@@ -930,13 +1017,15 @@ def curriculum_joint_step(
             T_clean=tau_params.T_clean,
             bridge_budget=tau_params.bridge_budget,
             d_min=int(tau_params.d_min),
+            W0=W0_for_trust, trust_radius=trust_radius,
+            span_ratio=span_ratio, gap_ratio=gap_ratio,
         )
         valid_corner_count = len(schedules)
         if valid_corner_count == 0:
             raise RuntimeError(
                 "joint search: no valid schedule corners after simplex "
                 "uniform-blend retry. T_clean / bridge_length / d_min "
-                "combination is incompatible.")
+                "(or v3 trust region) combination is incompatible.")
 
     singleton_corner = (valid_corner_count == 1)
 
@@ -962,6 +1051,7 @@ def curriculum_joint_step(
         R.grad.zero_()
 
     L_step_value = 0.0
+    L_suffix_step = 0.0       # diagnostic: avg suffix loss across schedules
     schedule_logs: List[Dict[str, Any]] = []
     n_schedules = len(schedules)
     for sched_idx, (W_tuple, weight, corner_id) in enumerate(schedules):
@@ -973,6 +1063,8 @@ def curriculum_joint_step(
             forward_fn=forward_fn, lpips_fn=lpips_fn,
             config=config, lambda_fid_val=lambda_fid_val,
             R_active=R_active_in_phase,
+            suffix_probe_frames=suffix_probe_frames,
+            lambda_suffix=lambda_suffix,
         )
         weighted = weight * L_sched
         # Last schedule frees the shared tau→weight graph; earlier
@@ -980,14 +1072,18 @@ def curriculum_joint_step(
         # reach tau through their own weight terms.
         weighted.backward(retain_graph=(sched_idx < n_schedules - 1))
         L_step_value += float(weighted.detach().item())
+        L_suffix_step += float(weight.detach().item()) * float(
+            diag_sched.L_suffix.detach().item())
         schedule_logs.append({
             "W": list(W_tuple),
             "weight": float(weight.detach().item()),
             "corner_id": int(corner_id),
             "L_margin": float(diag_sched.L_margin.detach().item()),
+            "L_suffix": float(diag_sched.L_suffix.detach().item()),
             "L_total": float(L_sched.detach().item()),
             "feasible": bool(diag_sched.feasible),
             "delta_overlap": float(diag_sched.delta_overlap),
+            "n_suffix_probes": int(diag_sched.n_suffix_probes),
         })
         # Free per-schedule references that the autograd graph held onto
         # so the next iteration starts with maximum free memory. The
@@ -1054,6 +1150,11 @@ def curriculum_joint_step(
         tau_values=[float(t.detach().item()) for t in tau_post],
         inward_projected=inward_projected,
         singleton_corner=singleton_corner,
+        suffix_loss_weighted=float(L_suffix_step),
+        trust_region_active=bool(W0_for_trust is not None and (
+            trust_radius is not None
+            or span_ratio is not None
+            or gap_ratio is not None)),
     )
 
 
@@ -1065,12 +1166,16 @@ def curriculum_joint_step(
 def _enumerate_27_neighbors(
     W_round: Sequence[int], *,
     T_clean: int, bridge_budget: int, d_min: int,
+    W0: Optional[Sequence[int]] = None,
+    trust_radius: Optional[int] = None,
+    span_ratio: Optional[float] = None,
+    gap_ratio: Optional[float] = None,
 ) -> List[Tuple[int, ...]]:
     """Enumerate 3^K = 27 (K=3) joint ±1 neighbors of W_round; filter
-    invalid orderings."""
+    invalid orderings + optional v3 trust region (codex Coverage-
+    Constrained spec)."""
     K = len(W_round)
     out: List[Tuple[int, ...]] = []
-    # Use base-3 enumeration: each digit in {-1, 0, +1}.
     for code in range(3 ** K):
         offsets = []
         c = code
@@ -1078,7 +1183,10 @@ def _enumerate_27_neighbors(
             offsets.append((c % 3) - 1)
             c //= 3
         cand = tuple(int(W_round[k]) + offsets[k] for k in range(K))
-        if _validate_schedule(cand, T_clean, bridge_budget, d_min):
+        if _validate_schedule(
+                cand, T_clean, bridge_budget, d_min,
+                W0=W0, trust_radius=trust_radius,
+                span_ratio=span_ratio, gap_ratio=gap_ratio):
             out.append(cand)
     return out
 
@@ -1097,6 +1205,16 @@ def local_refine_27(
     sam2_eval_fn: Optional[Callable] = None,
     refine_steps: int = 6,
     traj_init_offsets: Optional[Sequence[Tuple[float, float]]] = None,
+    W0_for_trust: Optional[Sequence[int]] = None,
+    trust_radius: Optional[int] = None,
+    span_ratio: Optional[float] = None,
+    gap_ratio: Optional[float] = None,
+    # v3 codex HIGH fix: refine score must use the same placement-
+    # relevant objective as phase 3, otherwise the final discrete
+    # selector can undo the v3 trust+suffix benefit by picking the
+    # best neighbor under the OLD `-L_margin` surrogate.
+    lambda_suffix_for_score: float = 0.0,
+    suffix_probe_frames_for_score: Optional[Sequence[int]] = None,
 ) -> Tuple[Tuple[int, ...], List[Dict[str, Any]]]:
     """Cheap 6-step Stage-14 estimate per valid neighbor; pick best by
     L_margin (proxy for J-drop, since SAM2 eval is expensive). Returns
@@ -1106,6 +1224,11 @@ def local_refine_27(
     to `config.oracle_traj_d_min` or `2`, which silently disagreed with
     the curriculum's d_min if the caller passed a different value.
 
+    v3 (codex Coverage-Constrained spec): when `W0_for_trust` + any
+    trust ratio are passed, the 27-neighbor enumeration applies the
+    same trust region used during phase-3 schedule enumeration. This
+    prevents local refine from undoing the trust-region benefit.
+
     The full 30-step Stage-14 + export + SAM2 eval is run AFTER local
     refine on the chosen triple by the joint_curriculum_search caller.
     """
@@ -1113,7 +1236,9 @@ def local_refine_27(
     bridge_budget = bridge_length + 1
     candidates = _enumerate_27_neighbors(
         W_round, T_clean=int(x_clean.shape[0]),
-        bridge_budget=bridge_budget, d_min=int(d_min))
+        bridge_budget=bridge_budget, d_min=int(d_min),
+        W0=W0_for_trust, trust_radius=trust_radius,
+        span_ratio=span_ratio, gap_ratio=gap_ratio)
 
     if not candidates:
         raise RuntimeError(
@@ -1162,6 +1287,8 @@ def local_refine_27(
                 config=config,
                 lambda_fid_val=float(config.joint_traj_lambda_fid),
                 R_active=False,
+                suffix_probe_frames=suffix_probe_frames_for_score,
+                lambda_suffix=float(lambda_suffix_for_score),
             )
             opt.zero_grad()
             L.backward()
@@ -1177,11 +1304,22 @@ def local_refine_27(
                 config=config,
                 lambda_fid_val=float(config.joint_traj_lambda_fid),
                 R_active=False,
+                suffix_probe_frames=suffix_probe_frames_for_score,
+                lambda_suffix=float(lambda_suffix_for_score),
             )
-        score = -float(diag_final.L_margin.detach().item())
+        # v3 codex HIGH fix: score uses placement-relevant objective
+        # (margin + suffix), not just L_margin. This keeps the discrete
+        # selector aligned with phase-3's joint objective so it cannot
+        # undo the trust-region + suffix-aware benefit.
+        L_margin_val = float(diag_final.L_margin.detach().item())
+        L_suffix_val = float(diag_final.L_suffix.detach().item())
+        lambda_margin = float(config.oracle_traj_lambda_margin)
+        score = -(lambda_margin * L_margin_val
+                  + float(lambda_suffix_for_score) * L_suffix_val)
         diags.append({
             "W": list(cand), "score": score,
-            "L_margin": float(diag_final.L_margin.detach().item()),
+            "L_margin": L_margin_val,
+            "L_suffix": L_suffix_val,
             "delta_overlap": float(diag_final.delta_overlap),
         })
         if score > best_score:
@@ -1320,22 +1458,41 @@ def joint_curriculum_search(
     lambda_fid_val = float(config.joint_traj_lambda_fid)
     R_lr = float(config.oracle_traj_residual_lr)
     R_eps = float(config.oracle_traj_residual_eps)
-    # v2.2 (after blackswan v2.1 retest): empirical comparison shows
-    # that even tau_lr_phase3=0.002 hurts on blackswan
-    # (v2.1 [4,12,21] J-drop=0.4127 < fixed-W [4,13,21] J-drop=0.4469).
-    # The phase-3 motion harms more than helps when the surrogate is
-    # misaligned. Default → full freeze (all 3 phases): joint search
-    # becomes "smart prescreen + Stage 14 on prescreen-decided W"
-    # with no τ motion in any phase.
+    # v3 (Coverage-Constrained Joint Suffix Optimization, codex spec
+    # 2026-04-26): preserve "joint placement-perturbation" claim by
+    # restoring phase-3 τ motion, but constrain it via:
+    #   1. Trust region around prescreen W0 (forbids cluster collapse)
+    #   2. Suffix-probe loss term in phase 3 (aligns surrogate with
+    #      whole-video J-drop instead of just attacked-window L_margin)
+    #
+    # Default phases-1-2 stay frozen (v2.2 perturbation warmup behavior
+    # which was reliable on dog/camel) — only phase 3 unfreezes for
+    # the joint-search refinement.
     #
     # Backwards compat:
-    # - oracle_traj_tau_freeze_phases=[1, 2] + tau_lr_phase3=0.002 → v2.1
-    # - oracle_traj_tau_freeze_phases=[]   + oracle_traj_tau_lr=0.05    → v2 (curriculum on)
-    #   (also requires oracle_traj_tau_lr_force_legacy=True)
+    # - tau_freeze_phases=[1, 2, 3]                    → v2.2 (full freeze)
+    # - tau_freeze_phases=[1, 2] + lr_phase3=0.002     → v2.1 (no v3 trust + suffix)
+    # - tau_freeze_phases=[] + tau_lr=0.05 + force_legacy → v2 curriculum-on
     tau_lr_phase3 = float(getattr(
-        config, "oracle_traj_tau_lr_phase3", 0.0))
+        config, "oracle_traj_tau_lr_phase3", 0.002))
     tau_freeze_phases: Sequence[int] = list(getattr(
-        config, "oracle_traj_tau_freeze_phases", [1, 2, 3]))
+        config, "oracle_traj_tau_freeze_phases", [1, 2]))
+    # v3 toggles (default ON for new runs).
+    v3_lambda_suffix = float(getattr(
+        config, "oracle_traj_v3_lambda_suffix", 2.0))
+    v3_n_probes = int(getattr(
+        config, "oracle_traj_v3_n_probes", 6))
+    v3_trust_radius = int(getattr(
+        config, "oracle_traj_v3_trust_radius", 6))
+    v3_span_ratio = float(getattr(
+        config, "oracle_traj_v3_span_ratio", 0.85))
+    v3_gap_ratio = float(getattr(
+        config, "oracle_traj_v3_gap_ratio", 0.5))
+    # Disable suffix-probe + trust region by setting these to 0 / None
+    # (gives v2.1 behavior).
+    v3_enable = (v3_lambda_suffix > 0.0
+                 and v3_n_probes > 0
+                 and v3_trust_radius > 0)
     # Legacy v2 single-LR knob (used only if user explicitly sets
     # oracle_traj_tau_lr; otherwise the v2.1 phase-freeze takes over).
     tau_lr_legacy: Optional[float] = (
@@ -1391,6 +1548,67 @@ def joint_curriculum_search(
         optimizer = torch.optim.Adam(param_groups)
         R_active_in_phase = (R is not None and phase_idx == K - 1)
 
+        # v3 phase-3 plumbing: only the LAST phase (= K-1 index) gets the
+        # suffix-probe loss + trust region. Earlier phases keep v2.2
+        # frozen-τ behavior (perturbation warmup).
+        is_last_phase = (phase_idx == K - 1)
+        v3_suffix_probe_frames: Optional[List[int]] = None
+        v3_lambda_suffix_this: float = 0.0
+        v3_W0_for_trust: Optional[List[int]] = None
+        v3_trust_radius_this: Optional[int] = None
+        v3_span_ratio_this: Optional[float] = None
+        v3_gap_ratio_this: Optional[float] = None
+        if is_last_phase and v3_enable:
+            # Probes: M evenly spaced in attacked-space [t0, T_proc-1]
+            # where t0 = W_attacked[0] + 1 ≈ first post-insert frame.
+            # codex MEDIUM fix: EXCLUDE attacked insert positions from
+            # probes — at insert frames, m_true_by_t was overridden to
+            # the seed/decoy mask (NOT the original true mask) so the
+            # IoU there measures attacked-frame retention which would
+            # bleed back into local L_margin territory and defeat the
+            # whole-suffix purpose. Backfill with nearest non-insert
+            # post-suffix frames to maintain M=6 probes.
+            W_init_attacked = sorted(int(round(v)) + i
+                                     for i, v in enumerate(
+                                         sorted(tau_full_state)))
+            insert_set = set(int(w) for w in W_init_attacked)
+            t0 = max(1, W_init_attacked[0] + 1)
+            T_proc_v3 = T_clean + K
+            probe_end = max(t0, T_proc_v3 - 1)
+            # Initial arithmetic progression.
+            if probe_end > t0:
+                step_size = max(
+                    1, (probe_end - t0) // max(1, v3_n_probes - 1))
+                candidates_init = list(range(
+                    t0, probe_end + 1, step_size))[:v3_n_probes]
+            else:
+                candidates_init = [t0]
+            # Filter out insert positions.
+            chosen_probes = [t for t in candidates_init
+                             if int(t) not in insert_set]
+            # Backfill from nearby non-insert frames if filter removed too many.
+            if len(chosen_probes) < v3_n_probes:
+                chosen_set = set(chosen_probes)
+                for t in range(t0, probe_end + 1):
+                    if int(t) in insert_set or int(t) in chosen_set:
+                        continue
+                    chosen_probes.append(int(t))
+                    chosen_set.add(int(t))
+                    if len(chosen_probes) >= v3_n_probes:
+                        break
+                chosen_probes.sort()
+            v3_suffix_probe_frames = chosen_probes[:v3_n_probes]
+            v3_lambda_suffix_this = float(v3_lambda_suffix)
+            # Trust region anchored at prescreen W0 (clean-space), not
+            # the current tau (which already drifted from prescreen due
+            # to phase-1/2 perturbation warmup with frozen τ — drift is
+            # 0 there, so W0 = prescreen output).
+            v3_W0_for_trust = [int(round(float(c)))
+                               for c in pre.init_tau_values]
+            v3_trust_radius_this = int(v3_trust_radius)
+            v3_span_ratio_this = float(v3_span_ratio)
+            v3_gap_ratio_this = float(v3_gap_ratio)
+
         for step in range(int(phase_steps[phase_idx])):
             diag = curriculum_joint_step(
                 x_clean=x_clean,
@@ -1405,6 +1623,12 @@ def joint_curriculum_search(
                 bridge_length=bridge_len,
                 R_active_in_phase=R_active_in_phase,
                 R_lr=R_lr, R_eps=R_eps,
+                W0_for_trust=v3_W0_for_trust,
+                trust_radius=v3_trust_radius_this,
+                span_ratio=v3_span_ratio_this,
+                gap_ratio=v3_gap_ratio_this,
+                suffix_probe_frames=v3_suffix_probe_frames,
+                lambda_suffix=v3_lambda_suffix_this,
             )
             curriculum_logs.append({
                 "phase": phase_idx + 1, "step": step + 1,
@@ -1415,6 +1639,8 @@ def joint_curriculum_search(
                 "inward_projected": diag.inward_projected,
                 "singleton_corner": diag.singleton_corner,
                 "schedules": diag.schedules,
+                "suffix_loss_weighted": diag.suffix_loss_weighted,
+                "trust_region_active": diag.trust_region_active,
             })
             # Update full τ state with the active prefix produced this
             # step; the tail stays at its stored constants.
@@ -1422,13 +1648,59 @@ def joint_curriculum_search(
         timings[f"phase_{phase_idx + 1}"] = time.time() - t_phase
 
     # ---- 6. Round + 27-triple local refine ----
+    # v3: apply same trust region in local refine to prevent it from
+    # undoing the phase-3 trust-region benefit.
     t_refine = time.time()
     W_round = [int(round(float(v))) for v in tau_full_state]
+    refine_W0 = [int(round(float(c))) for c in pre.init_tau_values] \
+        if v3_enable else None
+    # v3 codex HIGH fix: local refine MUST score with the same
+    # placement-relevant objective as phase 3 (margin + suffix),
+    # otherwise the discrete selector can pick a neighbor that the
+    # OLD `-L_margin` surrogate likes but that v3 phase 3 was trying
+    # to avoid. Recompute probes here using the FINAL τ (post-phase-3)
+    # so the refine score reflects the actual chosen placement region.
+    refine_suffix_probes: Optional[List[int]] = None
+    refine_lambda_suffix = 0.0
+    if v3_enable:
+        W_round_attacked = sorted(int(round(v)) + i
+                                  for i, v in enumerate(
+                                      sorted(tau_full_state)))
+        insert_set_refine = set(int(w) for w in W_round_attacked)
+        t0_r = max(1, W_round_attacked[0] + 1)
+        T_proc_r = T_clean + K
+        probe_end_r = max(t0_r, T_proc_r - 1)
+        if probe_end_r > t0_r:
+            step_r = max(1,
+                         (probe_end_r - t0_r) // max(1, v3_n_probes - 1))
+            cand_r = list(range(t0_r, probe_end_r + 1, step_r))[:v3_n_probes]
+        else:
+            cand_r = [t0_r]
+        refine_probes = [t for t in cand_r if int(t) not in insert_set_refine]
+        if len(refine_probes) < v3_n_probes:
+            done = set(refine_probes)
+            for t in range(t0_r, probe_end_r + 1):
+                if int(t) in insert_set_refine or int(t) in done:
+                    continue
+                refine_probes.append(int(t))
+                done.add(int(t))
+                if len(refine_probes) >= v3_n_probes:
+                    break
+            refine_probes.sort()
+        refine_suffix_probes = refine_probes[:v3_n_probes]
+        refine_lambda_suffix = float(v3_lambda_suffix)
+
     refine_W, refine_diags = local_refine_27(
         x_clean=x_clean, pseudo_masks_clean=pseudo_masks_clean,
         config=config, forward_fn=forward_fn, lpips_fn=lpips_fn,
         state_cache=state_cache, W_round=W_round,
         bridge_length=bridge_len, d_min=int(d_min),
+        W0_for_trust=refine_W0,
+        trust_radius=(int(v3_trust_radius) if v3_enable else None),
+        span_ratio=(float(v3_span_ratio) if v3_enable else None),
+        gap_ratio=(float(v3_gap_ratio) if v3_enable else None),
+        lambda_suffix_for_score=refine_lambda_suffix,
+        suffix_probe_frames_for_score=refine_suffix_probes,
     )
     timings["local_refine"] = time.time() - t_refine
 
@@ -2176,6 +2448,96 @@ def _test_prescreen_rejects_late_cluster_spike() -> None:
     print(f"  prescreen rejects late-cluster spike: chosen={chosen}")
 
 
+def _test_v3_trust_region_rejects_blackswan_collapse() -> None:
+    """v3 trust region must REJECT the v2 blackswan failure mode where
+    prescreen W0=[4,13,21] (gap_min=8) was collapsed to [7,9,21]
+    (gap_min=2). With v3 default ratios (gap_ratio=0.5, span_ratio=0.85,
+    trust_radius=6), the bad cluster fails the filter.
+    """
+    W0 = [4, 13, 21]
+    bad_cluster = (7, 9, 21)
+    # span: 14 vs 17, ratio 0.82 < 0.85 → REJECT
+    # gap_min: 2 vs 8·0.5=4 → REJECT
+    assert _validate_schedule(
+        bad_cluster, T_clean=50, bridge_budget=4, d_min=2,
+        W0=W0, trust_radius=6, span_ratio=0.85, gap_ratio=0.5,
+    ) is False, "v3 trust region should reject [7,9,21] under W0=[4,13,21]"
+    # The prescreen output ITSELF should pass (identity).
+    assert _validate_schedule(
+        tuple(W0), T_clean=50, bridge_budget=4, d_min=2,
+        W0=W0, trust_radius=6, span_ratio=0.85, gap_ratio=0.5,
+    ) is True, "W0 must pass its own trust region"
+    # A small perturbation [5,13,21] should pass (radius=1, span=16/17=0.94 OK).
+    assert _validate_schedule(
+        (5, 13, 21), T_clean=50, bridge_budget=4, d_min=2,
+        W0=W0, trust_radius=6, span_ratio=0.85, gap_ratio=0.5,
+    ) is True, "small ±1 perturbation should pass"
+    # A large perturbation outside trust_radius=6: c_0 → c_0+10 = 14
+    assert _validate_schedule(
+        (14, 16, 21), T_clean=50, bridge_budget=4, d_min=2,
+        W0=W0, trust_radius=6, span_ratio=0.85, gap_ratio=0.5,
+    ) is False, "perturbation > trust_radius=6 should fail"
+    print("  v3 trust region: rejects blackswan collapse [7,9,21], "
+          "accepts W0 + small perturbations")
+
+
+def _test_v3_27_neighbor_with_trust() -> None:
+    """27-neighbor enumeration with trust region prunes invalid neighbors.
+
+    Two scenarios:
+    (A) W_round = W0 (good spread): trust filter is mostly inert (all ±1
+        of healthy spread stay healthy).
+    (B) W_round drifted to a collapse-style cluster: trust filter REJECTS
+        all neighbors because base gap is too tight.
+    """
+    # Scenario A: W_round identical to W0 (clean spread)
+    W0 = [4, 13, 21]
+    cands_A = _enumerate_27_neighbors(
+        W0, T_clean=50, bridge_budget=4, d_min=2,
+        W0=W0, trust_radius=6, span_ratio=0.85, gap_ratio=0.5)
+    # Every kept neighbor should satisfy trust constraints.
+    for cand in cands_A:
+        gaps = [cand[i + 1] - cand[i] for i in range(len(cand) - 1)]
+        assert min(gaps) >= 4, (cand, gaps)
+        span = cand[-1] - cand[0]
+        assert span >= 15, (cand, span)
+        for k in range(len(cand)):
+            assert abs(cand[k] - W0[k]) <= 6, (cand, k)
+    assert tuple(W0) in cands_A, "W0 itself must pass filter"
+
+    # Scenario B: W_round = bad cluster (the v2 blackswan collapse).
+    # Most ±1 neighbors of the bad cluster have gap_min ≤ 3 < 4 (the
+    # required floor) and are REJECTED. A few neighbors that *move
+    # toward* W0 may still pass (e.g. (6, 10, 21) has gap=4 boundary +
+    # span=15 boundary). Important: the bad cluster ITSELF must fail.
+    W_bad = (7, 9, 21)
+    cands_B = _enumerate_27_neighbors(
+        list(W_bad), T_clean=50, bridge_budget=4, d_min=2,
+        W0=W0, trust_radius=6, span_ratio=0.85, gap_ratio=0.5)
+    cands_B_no_trust = _enumerate_27_neighbors(
+        list(W_bad), T_clean=50, bridge_budget=4, d_min=2)
+    # Without trust: many valid (gap≥d_min=2 is permissive)
+    assert len(cands_B_no_trust) > 0, "without trust some should pass"
+    # With trust: most filtered out. Tight assertion: bad cluster itself
+    # MUST NOT be in candidates.
+    assert W_bad not in cands_B, (
+        f"trust region must reject bad cluster {W_bad}; got it in {cands_B}")
+    # Filter ratio: at least 70% of no-trust candidates must be filtered.
+    filter_ratio = 1.0 - len(cands_B) / max(1, len(cands_B_no_trust))
+    assert filter_ratio >= 0.70, (
+        f"trust filter too lenient: kept {len(cands_B)} of "
+        f"{len(cands_B_no_trust)} = {(1-filter_ratio):.0%}")
+    # Every kept neighbor must satisfy trust constraints.
+    for cand in cands_B:
+        gaps = [cand[i + 1] - cand[i] for i in range(len(cand) - 1)]
+        assert min(gaps) >= 4, (cand, gaps)
+        span = cand[-1] - cand[0]
+        assert span >= 0.85 * 17 - 1e-6, (cand, span)
+    print(f"  27-neighbor + trust region: scenario A kept {len(cands_A)}, "
+          f"scenario B (bad cluster) kept {len(cands_B)} of "
+          f"{len(cands_B_no_trust)} (filter rate {filter_ratio:.0%})")
+
+
 def _self_test() -> None:
     print("memshield.joint_placement_search self-tests:")
     _test_simplex_projection_basic()
@@ -2192,9 +2554,11 @@ def _self_test() -> None:
     _test_bundle_C_incompat_guard()
     _test_attack_state_cache_hit_miss()
     _test_prescreen_rejects_late_cluster_spike()
+    _test_v3_trust_region_rejects_blackswan_collapse()
+    _test_v3_27_neighbor_with_trust()
     _test_curriculum_smoke_K1_K2_K3()
     _test_attack_state_cache_warmup_in_search()
-    print("memshield.joint_placement_search: all v2 self-tests PASSED")
+    print("memshield.joint_placement_search: all v3 self-tests PASSED")
 
 
 if __name__ == "__main__":
