@@ -697,10 +697,31 @@ def curriculum_joint_step(
 
     singleton_corner = (valid_corner_count == 1)
 
-    # Per-schedule forward + weighted-sum loss.
-    L_step = torch.zeros((), dtype=x_clean.dtype, device=x_clean.device)
+    # Per-schedule forward + per-schedule backward (memory fix, 2026-04-26
+    # 19:55). The original implementation built one big graph
+    # `L_step = Σ weight_i * L_sched_i` and called `L_step.backward()`
+    # ONCE — which kept ALL 2^|active| schedule activations alive in
+    # memory simultaneously. On dog (T_proc≈53, H=W=480) with K=3 phase
+    # (8 schedules), this exceeded the Pro 6000's 95 GB.
+    #
+    # Mathematically `∂(Σ_i wᵢ Lᵢ)/∂θ = Σ_i ∂(wᵢ Lᵢ)/∂θ`, so per-schedule
+    # `(weight * L_sched).backward()` accumulates into the SAME `θ.grad`
+    # buffer (`optimizer.zero_grad()` is called BEFORE the loop). The
+    # only subtlety: weights share a graph rooted at `tau`, so we must
+    # `retain_graph=True` for all but the LAST schedule (otherwise the
+    # second iteration's `weight` would have a freed graph).
+    #
+    # Memory: only ONE schedule's SAM2 activations are alive at a time
+    # (≈8× reduction at K=3). CLAUDE.md categorizes OOM as engineering-
+    # fix territory, so this patch is in scope without method redesign.
+    optimizer.zero_grad()
+    if R is not None and R.requires_grad and R.grad is not None:
+        R.grad.zero_()
+
+    L_step_value = 0.0
     schedule_logs: List[Dict[str, Any]] = []
-    for W_tuple, weight, corner_id in schedules:
+    n_schedules = len(schedules)
+    for sched_idx, (W_tuple, weight, corner_id) in enumerate(schedules):
         state = state_cache.get(W_tuple)
         L_sched, diag_sched, _ = stage14_forward_loss(
             state, x_clean=x_clean,
@@ -710,7 +731,12 @@ def curriculum_joint_step(
             config=config, lambda_fid_val=lambda_fid_val,
             R_active=R_active_in_phase,
         )
-        L_step = L_step + weight * L_sched
+        weighted = weight * L_sched
+        # Last schedule frees the shared tau→weight graph; earlier
+        # schedules retain it so subsequent backward calls can still
+        # reach tau through their own weight terms.
+        weighted.backward(retain_graph=(sched_idx < n_schedules - 1))
+        L_step_value += float(weighted.detach().item())
         schedule_logs.append({
             "W": list(W_tuple),
             "weight": float(weight.detach().item()),
@@ -720,13 +746,12 @@ def curriculum_joint_step(
             "feasible": bool(diag_sched.feasible),
             "delta_overlap": float(diag_sched.delta_overlap),
         })
-
-    # Single backward (drives both placement via dweight/dτ and
-    # perturbation via dL_schedule/dperturbation through state).
-    optimizer.zero_grad()
-    if R is not None and R.requires_grad and R.grad is not None:
-        R.grad.zero_()
-    L_step.backward()
+        # Free per-schedule references that the autograd graph held onto
+        # so the next iteration starts with maximum free memory. The
+        # graph itself is released by .backward() above (last iter) or
+        # by Python ref-cycle GC (earlier iters' state is no longer
+        # referenced after the loop body advances).
+        del L_sched, diag_sched, weighted
 
     # Codex R3 HIGH fix: zero gradients on inactive insert slices BEFORE
     # optimizer.step(). The optimizer rebuild per phase still owns the
@@ -762,7 +787,7 @@ def curriculum_joint_step(
         traj_params, max_offset_px=config.oracle_traj_max_offset_px)
 
     return CurriculumStepDiagnostics(
-        L_step=float(L_step.detach().item()),
+        L_step=float(L_step_value),
         valid_corner_count=valid_corner_count,
         valid_weight_mass=float(raw_weight_mass),
         schedules=schedule_logs,
