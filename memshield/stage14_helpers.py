@@ -1,0 +1,1030 @@
+"""Stage 14 forward-loss + W-dependent state helpers.
+
+Extracted from scripts/run_vadi_v5.py:_run_oracle_trajectory_pgd to enable:
+
+* Joint placement-perturbation curriculum search (memshield.joint_placement_-
+  search), which rebuilds attack state per W candidate while sharing
+  perturbation parameters (traj / edit_params / R / nu) across schedules.
+* The existing fixed-W path keeps bit-equivalent semantics by packing its
+  pre-computed args into AttackState via `assemble_attack_state` and
+  routing through `stage14_forward_loss`.
+
+Auto-review-loop Round 6 R3 GO design (codex thread 019dc51a-c71a-7971-bece-
+116a592de2f5).
+
+Pure-torch state builders (no SAM2 forward inside the builders themselves;
+the SAM2 forward is invoked inside `stage14_forward_loss` via the caller-
+supplied `forward_fn`).
+
+Run `python -m memshield.stage14_helpers` for self-tests.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import torch
+from torch import Tensor
+
+from memshield.decoy_continuation import (
+    alpha_from_logits,
+    apply_continuation_overlay,
+    apply_translation_warp_roi,
+    area_preservation_loss,
+    alpha_regularizer,
+    displacement_from_warp,
+    positive_objectness_loss,
+    select_bridge_frames,
+    soften_decoy_mask,
+    warp_regularizer,
+)
+from memshield.decoy_seed import (
+    build_decoy_insert_seeds,
+    build_duplicate_object_decoy_frame,
+    compute_decoy_offset_from_mask,
+    shift_mask_np,
+)
+from memshield.oracle_trajectory import (
+    FalseTrajectoryParams,
+    build_oracle_decoy_masks_for_clip,
+    trajectory_offset_at,
+    trajectory_smoothness_loss,
+)
+from memshield.semantic_compositor import (
+    apply_masked_residual,
+    compose_decoy_alpha_paste,
+)
+from memshield.vadi_loss import (
+    aggregate_margin_loss,
+    decoy_margin_per_frame,
+    lpips_cap_hinge,
+    tv_hinge,
+)
+from memshield.vadi_optimize import attacked_to_clean, build_processed
+
+
+# ---------------------------------------------------------------------------
+# AttackState: all W-dependent state for one Stage 14 forward
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AttackState:
+    """All W-dependent state needed by stage14_forward_loss.
+
+    Built by `build_attack_state_from_W` (rebuilt per schedule in joint
+    search), or by `assemble_attack_state` (packs the existing fixed-W path's
+    pre-computed args without recomputation).
+
+    Note: trajectory / edit_params / R / nu are NOT in here -- those are
+    perturbation parameters that stay shared across schedules in joint
+    search.
+    """
+
+    # Index conventions
+    W_clean_sorted: List[int]                           # sorted clean c_k
+    W_attacked: List[int]                                # sorted attacked w_k
+    K: int
+    T_clean: int
+    T_proc: int
+
+    # Insert content
+    decoy_seeds: Tensor                                  # [K, H, W, 3]
+    decoy_offsets_init: List[Tuple[int, int]]            # init anchors
+
+    # Bridge structure
+    bridge_lengths_list: List[int]                       # per-insert L_k
+    L_max: int
+    bridge_frames_by_k: Dict[int, List[int]]             # k -> attacked-space t list
+    bridge_t_list: List[Tuple[int, int, int]]            # (t_proc, k, l_idx)
+    bridge_polish: List[int]                             # sorted union of t
+    insert_polish: List[int]                             # sorted W_attacked
+    margin_query_frames: List[int]                       # union(insert, bridge)
+
+    # Mask supervision
+    pseudo_masks_torch: List[Tensor]                     # T_clean x [H, W]
+    m_true_by_t: Dict[int, Tensor]                       # t_proc -> [H, W]
+    m_decoy_by_t: Dict[int, Tensor]
+
+
+# ---------------------------------------------------------------------------
+# Internal: clean -> processed-space mask remap (inlined from
+# scripts.run_vadi.remap_masks_to_processed_space to avoid a script-level
+# cross-import that risks circularity with run_vadi_v5.py)
+# ---------------------------------------------------------------------------
+
+
+def _remap_masks_to_processed_space(
+    clean_masks: Sequence[np.ndarray], W: Sequence[int],
+) -> Dict[int, np.ndarray]:
+    """Map clean-space {c -> mask} to processed-space {t -> mask}.
+
+    Mirrors `scripts.run_vadi.remap_masks_to_processed_space` exactly:
+    non-insert frames inherit the clean mask via `attacked_to_clean`; insert
+    positions get the midframe average `0.5*clean[c_k-1] + 0.5*clean[c_k]`.
+    Caller is responsible for any subsequent insert-position override.
+    """
+    T_clean = len(clean_masks)
+    W_sorted = sorted(int(w) for w in W)
+    K = len(W_sorted)
+    T_proc = T_clean + K
+    out: Dict[int, np.ndarray] = {}
+    for t in range(T_proc):
+        if t in W_sorted:
+            k = W_sorted.index(t)
+            c_k = W_sorted[k] - k
+            if not (1 <= c_k < T_clean):
+                raise ValueError(
+                    f"insert k={k} at W={W_sorted[k]} -> c_k={c_k} out of "
+                    f"range [1, {T_clean}).")
+            out[t] = 0.5 * clean_masks[c_k - 1] + 0.5 * clean_masks[c_k]
+        else:
+            c = attacked_to_clean(t, W_sorted)
+            out[t] = clean_masks[c]
+    return out
+
+
+def _build_supervision_masks(
+    pseudo_masks_clean_np: List[np.ndarray],
+    W_clean_sorted: List[int],
+    decoy_offsets: Sequence[Tuple[int, int]],
+    W_attacked: List[int],
+) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray]]:
+    """Reproduce the m_true_by_t / m_decoy_by_t logic from run_v5_for_clip.
+
+    Per-frame logic (clean-space):
+      m_true_clean[t]  = pseudo_masks[t]
+      m_decoy_clean[t] = shift(pseudo_masks[t], decoy_offset[k_cover])
+        with k_cover = most recent insert k where c_k <= t (-1 = pre-insert).
+        Pre-first-insert: zero mask.
+
+    Then remap to processed-space and override insert positions:
+      m_true_by_t[w_k]  = pseudo_masks[c_k]
+      m_decoy_by_t[w_k] = shift(pseudo_masks[c_k], decoy_offsets[k])
+
+    This replicates the logic in run_v5_for_clip lines ~2819-2868 exactly so
+    that `build_attack_state_from_W` produces the same supervision masks
+    that the legacy code path computes.
+    """
+    T_clean = len(pseudo_masks_clean_np)
+    K = len(W_clean_sorted)
+    if K != len(decoy_offsets):
+        raise ValueError(
+            f"len(decoy_offsets)={len(decoy_offsets)} != K={K}")
+
+    m_true_clean: List[np.ndarray] = list(pseudo_masks_clean_np)
+    m_decoy_clean: List[np.ndarray] = []
+    for t in range(T_clean):
+        k_cover = -1
+        for k, c_k in enumerate(W_clean_sorted):
+            if c_k <= t:
+                k_cover = k
+            else:
+                break
+        if k_cover == -1:
+            m_decoy_clean.append(np.zeros_like(m_true_clean[t]))
+        else:
+            dy, dx = decoy_offsets[k_cover]
+            m_decoy_clean.append(
+                shift_mask_np(m_true_clean[t], int(dy), int(dx)))
+
+    m_true_by_t_np = _remap_masks_to_processed_space(m_true_clean, W_attacked)
+    m_decoy_by_t_np = _remap_masks_to_processed_space(
+        m_decoy_clean, W_attacked)
+
+    W_sorted = sorted(int(w) for w in W_attacked)
+    for k, w in enumerate(W_sorted):
+        c_k = int(W_clean_sorted[k])
+        if not (0 <= c_k < T_clean):
+            continue
+        m_true_by_t_np[w] = m_true_clean[c_k]
+        dy, dx = decoy_offsets[k]
+        m_decoy_by_t_np[w] = shift_mask_np(
+            m_true_clean[c_k], int(dy), int(dx))
+
+    return m_true_by_t_np, m_decoy_by_t_np
+
+
+# ---------------------------------------------------------------------------
+# Public builder (joint search rebuilds per schedule)
+# ---------------------------------------------------------------------------
+
+
+def build_attack_state_from_W(
+    W_clean: Sequence[int],
+    x_clean: Tensor,
+    pseudo_masks_clean: Sequence[Any],
+    config: Any,
+    *,
+    bridge_length: Optional[int] = None,
+    insert_base_mode: Optional[str] = None,
+) -> AttackState:
+    """Build all W-dependent Stage 14 state from W_clean + clip context.
+
+    Args:
+      W_clean: insert positions in clean-space. Will be sorted; entries must
+        be unique and in [1, T_clean) (need neighbors for decoy seed).
+      x_clean: [T_clean, H, W, 3] in [0, 1].
+      pseudo_masks_clean: T_clean clean-SAM2 pseudo-masks (np or torch).
+      config: VADIv5Config (or anything duck-typed with the same fields).
+      bridge_length: per-insert bridge length L. None -> use
+        config.oracle_traj_bridge_length.
+      insert_base_mode: "duplicate_seed" | "midframe". None -> use
+        config.insert_base_mode. (Joint search v1 only exercises
+        "duplicate_seed".)
+
+    Returns: an AttackState whose fields exactly match what
+    `run_v5_for_clip` would have built for the same W_clean.
+    """
+    # Local import to keep memshield/* free of `scripts/*` imports.
+    from memshield.vadi_optimize import build_base_inserts as _build_midframe
+
+    # --- input validation + sort ---
+    W_clean_sorted = sorted(int(c) for c in W_clean)
+    K = len(W_clean_sorted)
+    if K == 0:
+        raise ValueError("W_clean must contain at least 1 insert position")
+    T_clean = int(x_clean.shape[0])
+    for c in W_clean_sorted:
+        if not (1 <= c < T_clean):
+            raise ValueError(
+                f"W_clean entry {c} out of [1, {T_clean}); decoy seed "
+                "needs x_clean[c] to have neighbors")
+    if len(set(W_clean_sorted)) != K:
+        raise ValueError(f"W_clean contains duplicates: {W_clean_sorted}")
+
+    # --- attacked-space + length ---
+    W_attacked = sorted([c + k for k, c in enumerate(W_clean_sorted)])
+    T_proc = T_clean + K
+
+    # --- decoy seeds + offsets (insert_base_mode dependent) ---
+    mode = insert_base_mode or config.insert_base_mode
+    if mode == "duplicate_seed":
+        decoy_seeds, decoy_offsets = build_decoy_insert_seeds(
+            x_clean, pseudo_masks_clean, W_clean_sorted,
+            feather_radius=config.feather_radius,
+            feather_sigma=config.feather_sigma,
+        )
+        decoy_seeds = decoy_seeds.to(x_clean.device)
+        decoy_offsets = [(int(dy), int(dx)) for dy, dx in decoy_offsets]
+    elif mode == "midframe":
+        decoy_seeds = _build_midframe(x_clean, W_attacked)
+        decoy_offsets = [
+            tuple(int(v) for v in compute_decoy_offset_from_mask(
+                np.asarray(pseudo_masks_clean[c], dtype=np.float32)))
+            for c in W_clean_sorted
+        ]
+    else:
+        raise ValueError(f"unknown insert_base_mode {mode!r}")
+
+    # --- bridge frames ---
+    L = int(bridge_length if bridge_length is not None
+            else config.oracle_traj_bridge_length)
+    bridge_frames_by_k = select_bridge_frames(
+        W_attacked, T_proc, bridge_length=L)
+    bridge_lengths_list = [
+        len(bridge_frames_by_k.get(k, [])) for k in range(K)]
+    L_max = max(bridge_lengths_list) if bridge_lengths_list else L
+    if L_max < 1:
+        L_max = L
+
+    bridge_t_list: List[Tuple[int, int, int]] = []
+    for k, t_list in bridge_frames_by_k.items():
+        for l_idx, t in enumerate(t_list):
+            bridge_t_list.append((int(t), int(k), int(l_idx)))
+    bridge_polish = sorted({t for t, _, _ in bridge_t_list})
+    insert_polish = sorted(int(w) for w in W_attacked)
+    margin_query_frames = sorted(set(insert_polish + bridge_polish))
+
+    # --- pseudo_masks -> torch (clean-space; matches run_v5_for_clip
+    # input handling for stage 14) ---
+    pseudo_masks_torch: List[Tensor] = []
+    for m in pseudo_masks_clean:
+        if isinstance(m, np.ndarray):
+            pseudo_masks_torch.append(torch.as_tensor(
+                m, dtype=x_clean.dtype, device=x_clean.device))
+        else:
+            pseudo_masks_torch.append(
+                m.to(x_clean.device).to(x_clean.dtype))
+
+    # --- supervision masks (m_true_by_t, m_decoy_by_t) ---
+    pseudo_masks_clean_np = [
+        np.asarray(m, dtype=np.float32) for m in pseudo_masks_clean]
+    m_true_by_t_np, m_decoy_by_t_np = _build_supervision_masks(
+        pseudo_masks_clean_np, W_clean_sorted, decoy_offsets, W_attacked)
+    device = x_clean.device
+    m_true_by_t = {
+        int(t): torch.from_numpy(m).float().to(device)
+        for t, m in m_true_by_t_np.items()}
+    m_decoy_by_t = {
+        int(t): torch.from_numpy(m).float().to(device)
+        for t, m in m_decoy_by_t_np.items()}
+
+    return AttackState(
+        W_clean_sorted=W_clean_sorted,
+        W_attacked=list(W_attacked),
+        K=K, T_clean=T_clean, T_proc=T_proc,
+        decoy_seeds=decoy_seeds,
+        decoy_offsets_init=list(decoy_offsets),
+        bridge_lengths_list=bridge_lengths_list,
+        L_max=int(L_max),
+        bridge_frames_by_k={int(k): [int(t) for t in v]
+                            for k, v in bridge_frames_by_k.items()},
+        bridge_t_list=bridge_t_list,
+        bridge_polish=bridge_polish,
+        insert_polish=insert_polish,
+        margin_query_frames=margin_query_frames,
+        pseudo_masks_torch=pseudo_masks_torch,
+        m_true_by_t=m_true_by_t,
+        m_decoy_by_t=m_decoy_by_t,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pack-only assembler for the legacy fixed-W path (no recompute)
+# ---------------------------------------------------------------------------
+
+
+def assemble_attack_state(
+    *,
+    W_clean_sorted: Sequence[int],
+    W_attacked: Sequence[int],
+    decoy_seeds: Tensor,
+    decoy_offsets_init: Sequence[Tuple[int, int]],
+    bridge_frames_by_k: Dict[int, List[int]],
+    bridge_lengths: Sequence[int],
+    pseudo_masks_clean: Sequence[Any],
+    m_true_by_t: Dict[int, Tensor],
+    m_decoy_by_t: Dict[int, Tensor],
+    x_clean: Tensor,
+) -> AttackState:
+    """Pack pre-computed fixed-W args into an AttackState (no recompute).
+
+    Used by the legacy `_run_oracle_trajectory_pgd` so that its byte-level
+    behavior is unchanged: the existing run_v5_for_clip already builds
+    `decoy_seeds`, `m_true_by_t`, `m_decoy_by_t`, etc. for use by stages
+    11-13 too, so there is no benefit to recomputing them for stage 14.
+
+    The fields packed here MUST match what `build_attack_state_from_W`
+    would have produced for the same W (within numerical equivalence). The
+    fixed-W parity test verifies this.
+    """
+    K = len(list(W_clean_sorted))
+    T_clean = int(x_clean.shape[0])
+    T_proc = T_clean + K
+
+    bridge_lengths_list = [int(bl) for bl in bridge_lengths]
+    L_max = max(bridge_lengths_list) if bridge_lengths_list else 0
+    bridge_t_list: List[Tuple[int, int, int]] = []
+    for k, t_list in bridge_frames_by_k.items():
+        for l_idx, t in enumerate(t_list):
+            bridge_t_list.append((int(t), int(k), int(l_idx)))
+    bridge_polish = sorted({t for t, _, _ in bridge_t_list})
+    insert_polish = sorted(int(w) for w in W_attacked)
+    margin_query_frames = sorted(set(insert_polish + bridge_polish))
+
+    pseudo_masks_torch: List[Tensor] = []
+    for m in pseudo_masks_clean:
+        if isinstance(m, np.ndarray):
+            pseudo_masks_torch.append(torch.as_tensor(
+                m, dtype=x_clean.dtype, device=x_clean.device))
+        else:
+            pseudo_masks_torch.append(
+                m.to(x_clean.device).to(x_clean.dtype))
+
+    return AttackState(
+        W_clean_sorted=sorted(int(c) for c in W_clean_sorted),
+        W_attacked=sorted(int(w) for w in W_attacked),
+        K=K, T_clean=T_clean, T_proc=T_proc,
+        decoy_seeds=decoy_seeds,
+        decoy_offsets_init=[
+            (int(dy), int(dx)) for dy, dx in decoy_offsets_init],
+        bridge_lengths_list=bridge_lengths_list,
+        L_max=int(L_max),
+        bridge_frames_by_k={int(k): [int(t) for t in v]
+                            for k, v in bridge_frames_by_k.items()},
+        bridge_t_list=bridge_t_list,
+        bridge_polish=bridge_polish,
+        insert_polish=insert_polish,
+        margin_query_frames=margin_query_frames,
+        pseudo_masks_torch=pseudo_masks_torch,
+        m_true_by_t={int(t): v for t, v in m_true_by_t.items()},
+        m_decoy_by_t={int(t): v for t, v in m_decoy_by_t.items()},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage 14 forward + loss diagnostics
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Stage14LossDiagnostics:
+    """All diagnostic values produced by one Stage 14 forward step."""
+
+    # Loss components (scalar Tensors; .item() for log).
+    L_margin: Tensor
+    L_obj: Tensor
+    L_area: Tensor
+    L_fid_bridge: Tensor
+    L_fid_ins: Tensor
+    L_fid_TV: Tensor
+    L_alpha: Tensor
+    L_warp: Tensor
+    L_traj: Tensor
+    L_R_tv: Tensor
+
+    # Detached / floated diagnostic scalars.
+    mean_decoy_overlap: float
+    mean_true_overlap: float
+    delta_overlap: float
+    mean_obj_score: float
+    wrong_but_present_count: int
+    feasible: bool
+    alpha_mean: float
+    alpha_max_step: float
+    warp_disp_max: float
+    n_bridge: int
+
+
+def stage14_forward_loss(
+    state: AttackState,
+    *,
+    x_clean: Tensor,
+    traj: FalseTrajectoryParams,
+    edit_params: Any,
+    R: Optional[Tensor],
+    nu: Tensor,
+    forward_fn: Any,
+    lpips_fn: Callable[[Tensor, Tensor], Tensor],
+    config: Any,
+    lambda_fid_val: float,
+    R_active: bool = False,
+) -> Tuple[Tensor, Stage14LossDiagnostics, Tensor]:
+    """One Stage 14 forward + loss computation.
+
+    Returns:
+      L_total: scalar Tensor ready to .backward().
+      diag: Stage14LossDiagnostics.
+      x_edited_full: [T_clean, H, W, 3] = clean-space edited frames (caller
+        may snapshot for export at best step).
+
+    NOTE: this function does NOT step optimizers, project trajectory, or
+    update nu / R. The caller (legacy wrapper or joint search) is
+    responsible for those state mutations between calls.
+    """
+    device = x_clean.device
+    dtype = x_clean.dtype
+    T_clean = state.T_clean
+
+    # 1. Oracle decoy masks (differentiable in anchor + delta).
+    oracle_decoy_masks_clean = build_oracle_decoy_masks_for_clip(
+        state.pseudo_masks_torch, state.W_clean_sorted, traj,
+        state.bridge_lengths_list,
+    )
+
+    # 2. Per-step unit warp direction (detached).
+    with torch.no_grad():
+        anchor_norm = traj.anchor_offset.norm(dim=-1, keepdim=True)
+        anchor_norm = anchor_norm.clamp_min(1.0)
+        unit_dir = (traj.anchor_offset / anchor_norm).detach()
+
+    alphas = alpha_from_logits(
+        edit_params.alpha_logits,
+        alpha_max=config.oracle_traj_alpha_max,
+    )
+    d_xy = displacement_from_warp(
+        edit_params.warp_s, edit_params.warp_r,
+        u_dir=unit_dir, max_disp_px=config.oracle_traj_max_disp_px,
+    )
+
+    # 3. Build edited bridge frames (per t, k, l_idx).
+    _compositors = {
+        "alpha_paste": compose_decoy_alpha_paste,
+        "poisson": build_duplicate_object_decoy_frame,
+    }
+    if config.oracle_traj_compositor not in _compositors:
+        raise ValueError(
+            f"oracle_traj_compositor must be in {sorted(_compositors)}; "
+            f"got {config.oracle_traj_compositor!r}")
+    _build_dup = _compositors[config.oracle_traj_compositor]
+
+    edited_by_c: Dict[int, Tensor] = {}
+    for t, k_, l_idx in state.bridge_t_list:
+        c_t = attacked_to_clean(int(t), state.W_attacked)
+        if not (0 <= c_t < T_clean):
+            continue
+        if c_t not in oracle_decoy_masks_clean:
+            continue
+        x_t = x_clean[c_t]
+
+        decoy_mask_diff = oracle_decoy_masks_clean[c_t]
+        soft_decoy = soften_decoy_mask(
+            decoy_mask_diff,
+            dilate_px=config.oracle_traj_overlay_dilate_px,
+            feather_sigma=config.oracle_traj_overlay_feather_sigma,
+        )
+        true_mask_c = state.pseudo_masks_torch[c_t]
+        soft_true = soften_decoy_mask(
+            true_mask_c, dilate_px=1,
+            feather_sigma=config.oracle_traj_true_mask_feather_sigma,
+        )
+
+        # NOTE: l_idx is 0-based over bridge frames returned by
+        # `select_bridge_frames` (t = w_k+1 -> l_idx=0). This aligns with
+        # `build_oracle_decoy_masks_for_clip`, which uses bridge_step=0 for
+        # the first post-insert clean frame c_k, bridge_step=1 for c_k+1,
+        # etc. Using l_idx+1 would misalign duplicate placement vs the
+        # softened decoy mask by one step.
+        offset_detached = trajectory_offset_at(traj, k_, l_idx).detach()
+        dup_offset = (
+            int(round(float(offset_detached[0].item()))),
+            int(round(float(offset_detached[1].item()))),
+        )
+        duplicate = _build_dup(
+            x_ref=x_clean[c_t], object_mask=true_mask_c,
+            decoy_offset=dup_offset,
+            feather_radius=config.feather_radius,
+            feather_sigma=config.feather_sigma,
+        ).to(device)
+
+        d_yx = d_xy[k_, l_idx]
+        x_warped = apply_translation_warp_roi(x_t, soft_true, d_yx)
+        x_edited = apply_continuation_overlay(
+            x_warped, duplicate, soft_decoy, alphas[k_, l_idx],
+        )
+        if config.oracle_traj_use_residual and R is not None:
+            support_R = soften_decoy_mask(
+                decoy_mask_diff,
+                dilate_px=config.oracle_traj_residual_dilate_px,
+                feather_sigma=config.oracle_traj_residual_feather_sigma,
+            ).detach()
+            x_edited = apply_masked_residual(
+                x_edited, R[k_, l_idx], support_R)
+        edited_by_c[int(c_t)] = x_edited
+
+    # 4. Stack to [T_clean, H, W, 3].
+    frames: List[Tensor] = []
+    for c in range(T_clean):
+        if c in edited_by_c:
+            frames.append(edited_by_c[c])
+        else:
+            frames.append(x_clean[c])
+    x_edited_full = torch.stack(frames, dim=0)
+
+    inserts = (state.decoy_seeds + nu).clamp(0.0, 1.0)
+    if config.train_ste_quantize:
+        from memshield.losses import fake_uint8_quantize
+        x_edited_full = fake_uint8_quantize(x_edited_full)
+        inserts = fake_uint8_quantize(inserts)
+
+    processed = build_processed(x_edited_full, inserts, state.W_attacked)
+
+    # 5. Forward + losses.
+    logits_by_t, obj_score_by_t = forward_fn.forward_with_objectness(
+        processed, return_at=state.margin_query_frames,
+        objectness_at=state.bridge_polish,
+    )
+
+    margins_by_t = {}
+    for t in state.margin_query_frames:
+        if (int(t) not in state.m_true_by_t
+                or int(t) not in state.m_decoy_by_t):
+            continue
+        margins_by_t[int(t)] = decoy_margin_per_frame(
+            logits_by_t[int(t)],
+            state.m_true_by_t[int(t)], state.m_decoy_by_t[int(t)],
+            margin=config.margin_threshold,
+        )
+    agg = aggregate_margin_loss(
+        margins_by_t,
+        insert_ids=state.insert_polish,
+        neighbor_ids=state.bridge_polish,
+        neighbor_weight=config.margin_neighbor_weight,
+    )
+    L_margin = agg.L_margin
+
+    obj_logits_stack = torch.stack(
+        [obj_score_by_t[t].flatten().mean()
+         for t in state.bridge_polish],
+        dim=0,
+    ) if state.bridge_polish else torch.zeros(0, device=device)
+    L_obj = positive_objectness_loss(
+        obj_logits_stack, threshold=config.oracle_traj_obj_threshold,
+    )
+
+    bridge_logits_2d: Dict[int, Tensor] = {}
+    bridge_true_2d: Dict[int, Tensor] = {}
+    for t in state.bridge_polish:
+        if int(t) not in state.m_true_by_t:
+            continue
+        bridge_logits_2d[int(t)] = logits_by_t[int(t)]
+        bridge_true_2d[int(t)] = state.m_true_by_t[int(t)]
+    L_area, area_ratios = area_preservation_loss(
+        bridge_logits_2d, bridge_true_2d,
+        area_min=config.oracle_traj_area_min,
+        area_max=config.oracle_traj_area_max,
+    )
+
+    # Fidelity hinges (LPIPS + TV).
+    L_fid_bridge = torch.zeros((), dtype=dtype, device=device)
+    for c in sorted(edited_by_c.keys()):
+        lp = lpips_fn(x_edited_full[c], x_clean[c])
+        L_fid_bridge = L_fid_bridge + lpips_cap_hinge(
+            lp, config.lpips_orig_cap)
+    L_fid_ins = torch.zeros_like(L_fid_bridge)
+    L_fid_TV = torch.zeros_like(L_fid_bridge)
+    for k_, w_ in enumerate(state.W_attacked):
+        c_k_ = int(w_ - k_)
+        if not (0 <= c_k_ < T_clean):
+            continue
+        x_ref = x_clean[c_k_]
+        lp = lpips_fn(inserts[k_], x_ref)
+        L_fid_ins = L_fid_ins + lpips_cap_hinge(
+            lp, config.lpips_insert_cap)
+        ins_chw = inserts[k_].permute(2, 0, 1)
+        ref_chw = x_ref.permute(2, 0, 1)
+        L_fid_TV = L_fid_TV + tv_hinge(
+            ins_chw, ref_chw, multiplier=config.tv_multiplier)
+    L_fid_total = L_fid_bridge + L_fid_ins + L_fid_TV
+
+    L_alpha = alpha_regularizer(
+        alphas, l1_weight=1.0, smoothness_weight=1.0)
+    L_warp = warp_regularizer(
+        edit_params.warp_s, edit_params.warp_r,
+        l2_weight=1.0, orthogonal_weight=1.0, smoothness_weight=1.0)
+
+    L_traj = trajectory_smoothness_loss(
+        traj,
+        anchor_smooth_weight=config.oracle_traj_lambda_traj_anchor_smooth,
+        delta_smooth_weight=config.oracle_traj_lambda_traj_delta_smooth,
+        magnitude_weight=config.oracle_traj_lambda_traj_magnitude,
+    )
+
+    if config.oracle_traj_use_residual and R_active and R is not None:
+        dh = (R[:, :, 1:, :, :] - R[:, :, :-1, :, :]).abs()
+        dw = (R[:, :, :, 1:, :] - R[:, :, :, :-1, :]).abs()
+        L_R_tv = (dh.mean() + dw.mean())
+    else:
+        L_R_tv = torch.zeros((), dtype=dtype, device=device)
+
+    L = (
+        config.oracle_traj_lambda_margin * L_margin
+        + config.oracle_traj_lambda_obj * L_obj
+        + config.oracle_traj_lambda_area * L_area
+        + lambda_fid_val * L_fid_total
+        + config.oracle_traj_lambda_alpha * L_alpha
+        + config.oracle_traj_lambda_warp * L_warp
+        + config.oracle_traj_lambda_residual_tv * L_R_tv
+        + L_traj
+    )
+
+    # Diagnostics.
+    with torch.no_grad():
+        decoy_overlap_list: List[float] = []
+        true_overlap_list: List[float] = []
+        obj_score_list: List[float] = []
+        valid_t_list: List[int] = []
+        for t in state.bridge_polish:
+            if (int(t) not in state.m_decoy_by_t
+                    or int(t) not in state.m_true_by_t):
+                continue
+            pred = torch.sigmoid(logits_by_t[int(t)]).flatten()
+            m_d = state.m_decoy_by_t[int(t)].flatten().float()
+            m_tr = state.m_true_by_t[int(t)].flatten().float()
+            d_ov = float(((pred * m_d).sum()
+                          / m_d.sum().clamp_min(1e-4)).item())
+            t_ov = float(((pred * m_tr).sum()
+                          / m_tr.sum().clamp_min(1e-4)).item())
+            decoy_overlap_list.append(d_ov)
+            true_overlap_list.append(t_ov)
+            obj_score_list.append(float(
+                obj_score_by_t[int(t)].flatten().mean().item()))
+            valid_t_list.append(int(t))
+        mean_decoy_overlap = (
+            sum(decoy_overlap_list) / max(1, len(decoy_overlap_list)))
+        mean_true_overlap = (
+            sum(true_overlap_list) / max(1, len(true_overlap_list)))
+        mean_obj_score = (
+            float(obj_logits_stack.mean().item())
+            if obj_logits_stack.numel() > 0 else 0.0)
+        wrong_but_present = sum(
+            1 for d, tr, ar, obj in zip(
+                decoy_overlap_list, true_overlap_list,
+                [area_ratios.get(t, 1.0) for t in valid_t_list],
+                obj_score_list)
+            if d > tr and ar > 0.5 and obj > 0.0
+        )
+
+    tol = 1e-6
+    feas = (
+        float(L_fid_bridge.detach().item()) <= tol
+        and float(L_fid_ins.detach().item()) <= tol
+        and float(L_fid_TV.detach().item()) <= tol
+    )
+
+    diag = Stage14LossDiagnostics(
+        L_margin=L_margin, L_obj=L_obj, L_area=L_area,
+        L_fid_bridge=L_fid_bridge, L_fid_ins=L_fid_ins, L_fid_TV=L_fid_TV,
+        L_alpha=L_alpha, L_warp=L_warp, L_traj=L_traj, L_R_tv=L_R_tv,
+        mean_decoy_overlap=float(mean_decoy_overlap),
+        mean_true_overlap=float(mean_true_overlap),
+        delta_overlap=float(mean_decoy_overlap - mean_true_overlap),
+        mean_obj_score=mean_obj_score,
+        wrong_but_present_count=int(wrong_but_present),
+        feasible=feas,
+        alpha_mean=float(alphas.mean().detach().item()),
+        alpha_max_step=float(alphas.max().detach().item()),
+        warp_disp_max=float(d_xy.norm(dim=-1).max().detach().item()),
+        n_bridge=len(state.bridge_polish),
+    )
+    return L, diag, x_edited_full
+
+
+# ---------------------------------------------------------------------------
+# Self-tests
+# ---------------------------------------------------------------------------
+
+
+class _DummyConfig:
+    """Minimal duck-type stand-in for VADIv5Config used only in self-tests."""
+
+    insert_base_mode = "duplicate_seed"
+    feather_radius = 5
+    feather_sigma = 2.0
+    oracle_traj_bridge_length = 4
+    oracle_traj_compositor = "alpha_paste"
+    oracle_traj_alpha_max = 0.35
+    oracle_traj_max_disp_px = 3.0
+    oracle_traj_overlay_dilate_px = 2
+    oracle_traj_overlay_feather_sigma = 2.5
+    oracle_traj_true_mask_feather_sigma = 2.0
+    oracle_traj_residual_dilate_px = 4
+    oracle_traj_residual_feather_sigma = 3.0
+    oracle_traj_use_residual = False
+    oracle_traj_obj_threshold = 0.0
+    oracle_traj_area_min = 0.5
+    oracle_traj_area_max = 1.5
+    oracle_traj_lambda_margin = 1.0
+    oracle_traj_lambda_obj = 0.1
+    oracle_traj_lambda_area = 0.1
+    oracle_traj_lambda_alpha = 0.01
+    oracle_traj_lambda_warp = 0.01
+    oracle_traj_lambda_residual_tv = 0.001
+    oracle_traj_lambda_traj_anchor_smooth = 1.0
+    oracle_traj_lambda_traj_delta_smooth = 1.0
+    oracle_traj_lambda_traj_magnitude = 0.1
+    margin_threshold = 1.0
+    margin_neighbor_weight = 0.5
+    lpips_orig_cap = 0.20
+    lpips_insert_cap = 0.35
+    tv_multiplier = 1.2
+    train_ste_quantize = False
+
+
+def _test_attack_state_invariants() -> None:
+    """build_attack_state_from_W produces well-formed AttackState."""
+    torch.manual_seed(0)
+    np.random.seed(0)
+    T_clean, H, W = 30, 32, 32
+    x_clean = torch.rand(T_clean, H, W, 3)
+    pseudo_masks = []
+    for t in range(T_clean):
+        m = np.zeros((H, W), dtype=np.float32)
+        c = min(W - 4, max(0, t // 3))
+        m[12:20, c:c + 4] = 1.0
+        pseudo_masks.append(m)
+
+    cfg = _DummyConfig()
+    W_clean = [5, 12, 20]
+    state = build_attack_state_from_W(W_clean, x_clean, pseudo_masks, cfg)
+
+    assert state.W_clean_sorted == [5, 12, 20]
+    assert state.W_attacked == [5, 13, 22]    # +0, +1, +2
+    assert state.K == 3
+    assert state.T_clean == T_clean
+    assert state.T_proc == T_clean + 3
+    assert state.decoy_seeds.shape == (3, H, W, 3)
+    assert len(state.decoy_offsets_init) == 3
+    assert state.bridge_lengths_list == [4, 4, 4]
+    assert state.L_max == 4
+    # Bridge frames per insert (length<=4 with ordering).
+    for k in range(3):
+        assert k in state.bridge_frames_by_k
+        bs = state.bridge_frames_by_k[k]
+        assert len(bs) <= 4
+        for tt in bs:
+            assert tt > state.W_attacked[k]
+            assert tt < state.T_proc
+    assert state.insert_polish == sorted(state.W_attacked)
+    # Mask invariants: all insert positions present in m_true_by_t /
+    # m_decoy_by_t with the override (NOT midframe average).
+    for k, w in enumerate(state.W_attacked):
+        c_k = state.W_clean_sorted[k]
+        assert int(w) in state.m_true_by_t
+        m_true_at_w = state.m_true_by_t[int(w)].cpu().numpy()
+        # Override: m_true_by_t[w] == clean[c_k] (NOT 0.5*clean[c_k-1] + 0.5*clean[c_k]).
+        assert np.allclose(m_true_at_w, pseudo_masks[c_k])
+    print("  attack_state invariants OK")
+
+
+def _test_assemble_attack_state_matches_builder() -> None:
+    """assemble_attack_state(...) must produce same AttackState as
+    build_attack_state_from_W(...) given the same W (within numerical
+    equivalence). This is the foundation of the parity test."""
+    torch.manual_seed(0)
+    np.random.seed(0)
+    T_clean, H, W = 25, 32, 32
+    x_clean = torch.rand(T_clean, H, W, 3)
+    pseudo_masks = []
+    for t in range(T_clean):
+        m = np.zeros((H, W), dtype=np.float32)
+        c = min(W - 4, max(0, 4 + t // 3))
+        m[12:20, c:c + 4] = 1.0
+        pseudo_masks.append(m)
+
+    cfg = _DummyConfig()
+    W_clean = [4, 11, 18]
+    state_built = build_attack_state_from_W(
+        W_clean, x_clean, pseudo_masks, cfg)
+
+    # Assemble using the same fields that the legacy path would have built.
+    state_packed = assemble_attack_state(
+        W_clean_sorted=state_built.W_clean_sorted,
+        W_attacked=state_built.W_attacked,
+        decoy_seeds=state_built.decoy_seeds,
+        decoy_offsets_init=state_built.decoy_offsets_init,
+        bridge_frames_by_k=state_built.bridge_frames_by_k,
+        bridge_lengths=state_built.bridge_lengths_list,
+        pseudo_masks_clean=pseudo_masks,
+        m_true_by_t=state_built.m_true_by_t,
+        m_decoy_by_t=state_built.m_decoy_by_t,
+        x_clean=x_clean,
+    )
+
+    # Field-by-field equality.
+    assert state_built.W_clean_sorted == state_packed.W_clean_sorted
+    assert state_built.W_attacked == state_packed.W_attacked
+    assert state_built.K == state_packed.K
+    assert state_built.T_clean == state_packed.T_clean
+    assert state_built.T_proc == state_packed.T_proc
+    assert torch.allclose(state_built.decoy_seeds, state_packed.decoy_seeds)
+    assert (state_built.decoy_offsets_init
+            == state_packed.decoy_offsets_init)
+    assert (state_built.bridge_lengths_list
+            == state_packed.bridge_lengths_list)
+    assert state_built.L_max == state_packed.L_max
+    assert state_built.bridge_frames_by_k == state_packed.bridge_frames_by_k
+    assert state_built.bridge_t_list == state_packed.bridge_t_list
+    assert state_built.bridge_polish == state_packed.bridge_polish
+    assert state_built.insert_polish == state_packed.insert_polish
+    assert (state_built.margin_query_frames
+            == state_packed.margin_query_frames)
+    # m_true_by_t / m_decoy_by_t dicts (same keys + tensor allclose).
+    for t in state_built.m_true_by_t:
+        assert torch.allclose(
+            state_built.m_true_by_t[t], state_packed.m_true_by_t[t])
+    for t in state_built.m_decoy_by_t:
+        assert torch.allclose(
+            state_built.m_decoy_by_t[t], state_packed.m_decoy_by_t[t])
+    print("  assemble == build (field-by-field) OK")
+
+
+def _test_attack_state_unsorted_W_handled() -> None:
+    """Builder accepts unsorted W_clean and sorts internally; preserves
+    insert ordering for downstream traj_anchor/decoy_offsets alignment."""
+    T_clean, H, W = 20, 16, 16
+    x_clean = torch.rand(T_clean, H, W, 3)
+    pseudo_masks = []
+    for t in range(T_clean):
+        m = np.zeros((H, W), dtype=np.float32)
+        m[6:10, 4:8] = 1.0
+        pseudo_masks.append(m)
+    cfg = _DummyConfig()
+
+    # Unsorted input.
+    state_unsorted = build_attack_state_from_W(
+        [12, 4, 8], x_clean, pseudo_masks, cfg)
+    state_sorted = build_attack_state_from_W(
+        [4, 8, 12], x_clean, pseudo_masks, cfg)
+    assert state_unsorted.W_clean_sorted == state_sorted.W_clean_sorted
+    assert state_unsorted.W_attacked == state_sorted.W_attacked
+    assert (state_unsorted.bridge_frames_by_k
+            == state_sorted.bridge_frames_by_k)
+    print("  unsorted W handled OK")
+
+
+def _test_attack_state_input_validation() -> None:
+    """Builder rejects degenerate W (out-of-range, duplicates, empty)."""
+    T_clean, H, W = 20, 16, 16
+    x_clean = torch.rand(T_clean, H, W, 3)
+    pseudo_masks = [np.zeros((H, W), dtype=np.float32) for _ in range(T_clean)]
+    cfg = _DummyConfig()
+
+    # Empty.
+    try:
+        build_attack_state_from_W([], x_clean, pseudo_masks, cfg)
+        assert False, "expected ValueError on empty W_clean"
+    except ValueError as e:
+        assert "at least 1" in str(e)
+    # Duplicate.
+    try:
+        build_attack_state_from_W([5, 5, 8], x_clean, pseudo_masks, cfg)
+        assert False, "expected ValueError on duplicate W_clean"
+    except ValueError as e:
+        assert "duplicates" in str(e)
+    # Out-of-range (c=0 not allowed because seed needs neighbors).
+    try:
+        build_attack_state_from_W([0, 5, 10], x_clean, pseudo_masks, cfg)
+        assert False, "expected ValueError on c=0"
+    except ValueError as e:
+        assert "out of [1," in str(e)
+    # Out-of-range (c >= T_clean).
+    try:
+        build_attack_state_from_W(
+            [5, 10, T_clean], x_clean, pseudo_masks, cfg)
+        assert False, "expected ValueError on c=T_clean"
+    except ValueError as e:
+        assert "out of [1," in str(e)
+    print("  input validation OK")
+
+
+def _test_remap_masks_processed_space_inline() -> None:
+    """The inlined `_remap_masks_to_processed_space` matches the contract
+    of the legacy `scripts.run_vadi.remap_masks_to_processed_space`."""
+    T_clean = 10
+    H, W = 8, 8
+    masks = []
+    for t in range(T_clean):
+        m = np.zeros((H, W), dtype=np.float32)
+        m[2:6, t % W:(t % W) + 2] = 1.0
+        masks.append(m)
+    W_attacked = [3, 6]                # K=2 inserts
+    out = _remap_masks_to_processed_space(masks, W_attacked)
+    # Total length T_proc.
+    assert len(out) == T_clean + len(W_attacked)
+    # Insert positions: midframe average.
+    # w=3 -> c_k=3, expect 0.5*masks[2] + 0.5*masks[3]
+    assert np.allclose(out[3], 0.5 * masks[2] + 0.5 * masks[3])
+    # w=6 -> c_k=5 (=6-1), expect 0.5*masks[4] + 0.5*masks[5]
+    assert np.allclose(out[6], 0.5 * masks[4] + 0.5 * masks[5])
+    # Non-insert positions: pass-through via attacked_to_clean.
+    # w=0 -> c=0 (no insert before it)
+    assert np.allclose(out[0], masks[0])
+    # w=4 -> c=3 (one insert at w=3 before, so subtract 1)
+    assert np.allclose(out[4], masks[3])
+    # w=7 -> c=5 (two inserts before, so subtract 2)
+    assert np.allclose(out[7], masks[5])
+    print("  _remap_masks_to_processed_space OK")
+
+
+def _test_supervision_masks_insert_override() -> None:
+    """Insert positions in m_true_by_t / m_decoy_by_t are overridden to
+    seed-aligned masks (NOT the midframe average produced by the remap).
+
+    This is the codex R1 high-severity fix in run_v5_for_clip; the helper
+    must replicate it exactly."""
+    T_clean = 12
+    H, W = 8, 8
+    masks_np = []
+    for t in range(T_clean):
+        m = np.zeros((H, W), dtype=np.float32)
+        c0 = min(W - 2, max(0, t // 3))
+        m[3:5, c0:c0 + 2] = 1.0
+        masks_np.append(m)
+
+    W_clean_sorted = [3, 8]
+    W_attacked = [3, 9]                 # +0, +1
+    decoy_offsets = [(0, 2), (1, -1)]
+    m_true, m_decoy = _build_supervision_masks(
+        masks_np, W_clean_sorted, decoy_offsets, W_attacked)
+    # m_true at w=3 == masks[3] (NOT 0.5*masks[2] + 0.5*masks[3])
+    assert np.allclose(m_true[3], masks_np[3])
+    # m_decoy at w=3 == shift(masks[3], 0, 2)
+    assert np.allclose(
+        m_decoy[3], shift_mask_np(masks_np[3], 0, 2))
+    # m_true at w=9 == masks[8] (c_k=9-1=8)
+    assert np.allclose(m_true[9], masks_np[8])
+    # m_decoy at w=9 == shift(masks[8], 1, -1)
+    assert np.allclose(
+        m_decoy[9], shift_mask_np(masks_np[8], 1, -1))
+    # Pre-first-insert frame (t=0 in clean = t=0 in attacked) should
+    # resolve to a non-insert pass-through with zero decoy mass.
+    assert m_decoy[0].sum() == 0.0
+    print("  supervision-mask insert-override OK")
+
+
+def _self_test() -> None:
+    print("memshield.stage14_helpers self-tests:")
+    _test_attack_state_invariants()
+    _test_assemble_attack_state_matches_builder()
+    _test_attack_state_unsorted_W_handled()
+    _test_attack_state_input_validation()
+    _test_remap_masks_processed_space_inline()
+    _test_supervision_masks_insert_override()
+    print("memshield.stage14_helpers: all self-tests PASSED")
+
+
+if __name__ == "__main__":
+    _self_test()

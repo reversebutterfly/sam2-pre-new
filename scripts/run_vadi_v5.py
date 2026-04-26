@@ -1991,68 +1991,40 @@ def _run_oracle_trajectory_pgd(
            List[Dict[str, Any]], Optional[int]]:
     """Oracle Trajectory polish PGD (Stage 14).
 
+    Refactored 2026-04-26 (auto-review-loop R6 ss7) into a thin wrapper over
+    `memshield.stage14_helpers.assemble_attack_state` + `stage14_forward_loss`.
+    Both this fixed-W path and the joint curriculum placement search go
+    through the same forward+loss helper, so any algorithm change is local
+    to one place. The helper extraction is intentionally byte-equivalent
+    against the legacy implementation; the fixed-W parity test (run_vadi_v5
+    dog 1-clip pilot) verifies J-drop within ±0.005 of the prior 0.6665.
+
     Returns:
       (x_edited_star, nu_star, params_dict, step_logs, best_step)
       params_dict at best snapshot includes:
         - alpha_logits, warp_s, warp_r (Stage 13 compositor)
         - anchor_offset, delta_offset    (Stage 14 trajectory)
     """
-    from memshield.decoy_continuation import (
-        init_bridge_edit_params, alpha_from_logits, displacement_from_warp,
-        apply_continuation_overlay, apply_translation_warp_roi,
-        positive_objectness_loss, area_preservation_loss,
-        alpha_regularizer, warp_regularizer, soften_decoy_mask,
-    )
-    from memshield.decoy_seed import build_duplicate_object_decoy_frame
-    from memshield.semantic_compositor import (
-        compose_decoy_alpha_paste, apply_masked_residual,
-        find_max_feasible_nu_scale,
-    )
+    from memshield.decoy_continuation import init_bridge_edit_params
+    from memshield.semantic_compositor import find_max_feasible_nu_scale
     from memshield.oracle_trajectory import (
-        init_false_trajectory, trajectory_offset_at,
-        build_oracle_decoy_masks_for_clip,
-        project_trajectory_to_budget,
-        trajectory_smoothness_loss,
+        init_false_trajectory, project_trajectory_to_budget,
     )
-
-    # Bundle B sub-session 3: dispatch table for per-bridge-frame compositor.
-    # Both have identical signatures (drop-in). gpt-5.4 review rationale in
-    # BUNDLE_B_INPAINTER_REVIEW.md.
-    _compositors = {
-        "alpha_paste": compose_decoy_alpha_paste,
-        "poisson": build_duplicate_object_decoy_frame,
-    }
-    if config.oracle_traj_compositor not in _compositors:
-        raise ValueError(
-            f"oracle_traj_compositor must be one of "
-            f"{sorted(_compositors)}; got "
-            f"{config.oracle_traj_compositor!r}")
-    _build_duplicate = _compositors[config.oracle_traj_compositor]
-    from memshield.vadi_loss import (
-        aggregate_margin_loss, decoy_margin_per_frame,
-        lpips_cap_hinge, tv_hinge,
+    from memshield.stage14_helpers import (
+        assemble_attack_state, stage14_forward_loss,
     )
 
     device = x_clean.device
-    T_clean = int(x_clean.shape[0])
     K = len(W_attacked)
-    W_set = set(int(w) for w in W_attacked)
-    W_sorted = sorted(W_set)
-    if len(W_sorted) != K:
+    if len({int(w) for w in W_attacked}) != K:
         raise RuntimeError(
             f"Stage 14 expects unique sorted W; got W_attacked={W_attacked}")
+    if len(decoy_offsets_init) != K:
+        raise ValueError(
+            f"decoy_offsets_init length {len(decoy_offsets_init)} != K {K}")
 
-    # Bridge frame flat list.
-    bridge_t_list: List[Tuple[int, int, int]] = []   # (t_proc, k, l_idx_0based)
-    for k_, t_list in bridge_frames_by_k.items():
-        for l_idx, t in enumerate(t_list):
-            bridge_t_list.append((int(t), int(k_), int(l_idx)))
-    if not bridge_t_list:
-        return None, None, None, [], None
-    bridge_polish = sorted(t for t, _, _ in bridge_t_list)
-
-    # Bridge lengths: derive per-insert length from bridge_frames_by_k
-    # if not provided; otherwise use provided list.
+    # Bridge length normalization (mirror legacy behavior — caller may pass
+    # empty list, in which case derive per-insert L from bridge_frames_by_k).
     if bridge_lengths is None or len(bridge_lengths) == 0:
         bridge_lengths_list = [
             len(bridge_frames_by_k.get(k_, [])) for k_ in range(K)]
@@ -2061,27 +2033,32 @@ def _run_oracle_trajectory_pgd(
         if len(bridge_lengths_list) != K:
             raise ValueError(
                 f"bridge_lengths length {len(bridge_lengths_list)} != K {K}")
-
     L_max = max(bridge_lengths_list) if bridge_lengths_list else int(
         config.oracle_traj_bridge_length)
     if L_max < 1:
         L_max = int(config.oracle_traj_bridge_length)
 
-    # Pre-stack pseudo_masks as torch tensors once. (Caller may already
-    # have these as torch; we coerce to be safe.)
-    pseudo_masks_torch: List[Tensor] = []
-    for m in pseudo_masks_clean:
-        if isinstance(m, np.ndarray):
-            pseudo_masks_torch.append(
-                torch.as_tensor(m, dtype=x_clean.dtype, device=device))
-        else:
-            pseudo_masks_torch.append(m.to(device).to(x_clean.dtype))
+    state = assemble_attack_state(
+        W_clean_sorted=W_clean_sorted,
+        W_attacked=W_attacked,
+        decoy_seeds=decoy_seeds,
+        decoy_offsets_init=decoy_offsets_init,
+        bridge_frames_by_k=bridge_frames_by_k,
+        bridge_lengths=bridge_lengths_list,
+        pseudo_masks_clean=pseudo_masks_clean,
+        m_true_by_t=m_true_by_t,
+        m_decoy_by_t=m_decoy_by_t,
+        x_clean=x_clean,
+    )
+    if not state.bridge_t_list:
+        return None, None, None, [], None
 
-    # Initialize trajectory params from decoy_offsets_init (per-insert anchors).
-    if len(decoy_offsets_init) != K:
-        raise ValueError(
-            f"decoy_offsets_init length {len(decoy_offsets_init)} != K {K}")
-    init_anchors = [(float(dy), float(dx)) for dy, dx in decoy_offsets_init]
+    # Initialize trajectory params from decoy_offsets_init (per-insert
+    # anchors). state.decoy_offsets_init carries the same content cast to
+    # ints; pass float-cast values through to keep numerical equivalence
+    # with the legacy initialization path.
+    init_anchors = [
+        (float(dy), float(dx)) for dy, dx in decoy_offsets_init]
     traj = init_false_trajectory(
         K=K, L=L_max, init_anchor_offsets=init_anchors,
         device=device, dtype=x_clean.dtype,
@@ -2127,24 +2104,20 @@ def _run_oracle_trajectory_pgd(
     opt_delta = torch.optim.Adam(
         [traj.delta_offset], lr=config.oracle_traj_delta_lr)
 
-    # Loss-query frames.
-    insert_polish = sorted(W_set)
-    margin_query_frames = sorted(set(insert_polish + bridge_polish))
-
     # Bundle C ss6 (codex Finding 3 fix): hoist _nu_feasibility out of step
     # loop so it can be reused at Phase B init for safety-chain validation.
-    # Closure captures decoy_seeds, lpips_fn, config, W_sorted, T_clean,
-    # x_clean — all stable for the duration of this function call.
+    # Closure captures state.decoy_seeds, lpips_fn, config, state.W_attacked,
+    # state.T_clean, x_clean — all stable for the duration of this call.
     def _nu_feasibility(nu_test: Tensor) -> bool:
         cap_lpips = config.oracle_traj_nu_lpips_cap
-        inserts_test = (decoy_seeds + nu_test).clamp(0.0, 1.0)
+        inserts_test = (state.decoy_seeds + nu_test).clamp(0.0, 1.0)
         if config.train_ste_quantize:
             from memshield.losses import fake_uint8_quantize
             inserts_test = fake_uint8_quantize(inserts_test)
         with torch.no_grad():
-            for k_idx, w_idx in enumerate(W_sorted):
+            for k_idx, w_idx in enumerate(state.W_attacked):
                 c_k_idx = int(w_idx - k_idx)
-                if not (0 <= c_k_idx < T_clean):
+                if not (0 <= c_k_idx < state.T_clean):
                     continue
                 x_ref_k = x_clean[c_k_idx]
                 lp_k = float(lpips_fn(
@@ -2216,273 +2189,34 @@ def _run_oracle_trajectory_pgd(
             R = R.detach().clone().requires_grad_(True)
             R_requires_grad = True
 
-        # 1. Build oracle decoy masks for ALL clean bridge frames (per-step,
-        #    differentiable in anchor + delta).
-        oracle_decoy_masks_clean = build_oracle_decoy_masks_for_clip(
-            pseudo_masks_torch, W_clean_sorted, traj, bridge_lengths_list,
+        # Stage 14 forward + loss. The helper does the per-step inner work
+        # (oracle decoy masks, bridge composition, forward, all losses, and
+        # diagnostics). Every byte-equivalent piece of the legacy inner
+        # loop now lives in `stage14_forward_loss` so both this fixed-W
+        # path and the joint curriculum search share the same math.
+        L, diag, x_edited_full = stage14_forward_loss(
+            state,
+            x_clean=x_clean,
+            traj=traj, edit_params=edit_params, R=R, nu=nu,
+            forward_fn=forward_fn, lpips_fn=lpips_fn,
+            config=config, lambda_fid_val=lambda_fid_val,
+            R_active=R_requires_grad,
         )
+        feas = diag.feasible
 
-        # 2. Per-step unit warp direction = current anchor direction (detached
-        #    so warp_s is the only learnable magnitude).
-        with torch.no_grad():
-            anchor_norm = traj.anchor_offset.norm(dim=-1, keepdim=True)
-            anchor_norm = anchor_norm.clamp_min(1.0)
-            unit_dir = (traj.anchor_offset / anchor_norm).detach()
-
-        alphas = alpha_from_logits(
-            edit_params.alpha_logits, alpha_max=config.oracle_traj_alpha_max,
-        )                                              # [K, L]
-        d_xy = displacement_from_warp(
-            edit_params.warp_s, edit_params.warp_r,
-            u_dir=unit_dir, max_disp_px=config.oracle_traj_max_disp_px,
-        )                                              # [K, L, 2] (dy, dx)
-
-        # 3. Build edited bridge frames (differentiable).
-        edited_by_c: Dict[int, Tensor] = {}
-        for t, k_, l_idx in bridge_t_list:
-            c_t = _attacked_to_clean_same_space(int(t), W_attacked)
-            if not (0 <= c_t < T_clean):
-                continue
-            if c_t not in oracle_decoy_masks_clean:
-                continue
-            x_t = x_clean[c_t]
-
-            # Softened decoy mask (with grad through trajectory).
-            decoy_mask_diff = oracle_decoy_masks_clean[c_t]
-            soft_decoy = soften_decoy_mask(
-                decoy_mask_diff,
-                dilate_px=config.oracle_traj_overlay_dilate_px,
-                feather_sigma=config.oracle_traj_overlay_feather_sigma,
-            )
-            # Softened true mask (no grad — fixed clean object pose).
-            true_mask_c = pseudo_masks_torch[c_t]
-            soft_true = soften_decoy_mask(
-                true_mask_c, dilate_px=1,
-                feather_sigma=config.oracle_traj_true_mask_feather_sigma,
-            )
-
-            # Duplicate frame at oracle position (built with detached offset,
-            # compositor is non-differentiable wrt trajectory: gradient flows
-            # via soft_decoy through apply_continuation_overlay, NOT via
-            # the duplicate's pixel content).
-            # NOTE: `l_idx` is 0-based over bridge frames returned by
-            # `select_bridge_frames` (t = w_k+1 is l_idx=0). This aligns with
-            # `build_oracle_decoy_masks_for_clip`, which uses bridge_step=0 for
-            # the first post-insert clean frame c_k, bridge_step=1 for c_k+1, etc.
-            # Using `l_idx+1` would misalign the duplicate placement and the
-            # softened decoy mask by one step.
-            offset_detached = trajectory_offset_at(traj, k_, l_idx).detach()
-            dup_offset = (
-                int(round(float(offset_detached[0].item()))),
-                int(round(float(offset_detached[1].item()))),
-            )
-            duplicate = _build_duplicate(
-                x_ref=x_clean[c_t], object_mask=true_mask_c,
-                decoy_offset=dup_offset,
-                feather_radius=config.feather_radius,
-                feather_sigma=config.feather_sigma,
-            ).to(device)
-
-            d_yx = d_xy[k_, l_idx]
-            x_warped = apply_translation_warp_roi(x_t, soft_true, d_yx)
-            x_edited = apply_continuation_overlay(
-                x_warped, duplicate, soft_decoy, alphas[k_, l_idx],
-            )
-            # Bundle B sub-session 4: apply masked residual R[k, l] after
-            # the alpha-overlay. support_R is built from the SAME oracle
-            # decoy mask as soft_decoy but with broader dilation/feather
-            # (gpt-5.4 default: dilate=4, sigma=3.0); critically, it is
-            # DETACHED so R does not create a second gradient path into
-            # anchor/delta. R is zero in Phase A (frozen), updated via
-            # sign-PGD in Phase B.
-            if config.oracle_traj_use_residual:
-                support_R = soften_decoy_mask(
-                    decoy_mask_diff,
-                    dilate_px=config.oracle_traj_residual_dilate_px,
-                    feather_sigma=config.oracle_traj_residual_feather_sigma,
-                ).detach()
-                x_edited = apply_masked_residual(
-                    x_edited, R[k_, l_idx], support_R)
-            edited_by_c[int(c_t)] = x_edited
-
-        # 4. Stack into [T_clean, H, W, 3].
-        frames: List[Tensor] = []
-        for c in range(T_clean):
-            if c in edited_by_c:
-                frames.append(edited_by_c[c])
-            else:
-                frames.append(x_clean[c])
-        x_edited_full = torch.stack(frames, dim=0)
-
-        inserts = (decoy_seeds + nu).clamp(0.0, 1.0)
-        if config.train_ste_quantize:
-            from memshield.losses import fake_uint8_quantize
-            x_edited_full = fake_uint8_quantize(x_edited_full)
-            inserts = fake_uint8_quantize(inserts)
-
-        processed = build_processed(x_edited_full, inserts, W_attacked)
-
-        # 5. Forward + losses.
-        logits_by_t, obj_score_by_t = forward_fn.forward_with_objectness(
-            processed, return_at=margin_query_frames,
-            objectness_at=bridge_polish,
-        )
-
-        # Margin loss.
-        margins_by_t = {}
-        for t in margin_query_frames:
-            if int(t) not in m_true_by_t or int(t) not in m_decoy_by_t:
-                continue
-            margins_by_t[int(t)] = decoy_margin_per_frame(
-                logits_by_t[int(t)],
-                m_true_by_t[int(t)], m_decoy_by_t[int(t)],
-                margin=config.margin_threshold,
-            )
-        agg = aggregate_margin_loss(
-            margins_by_t,
-            insert_ids=insert_polish,
-            neighbor_ids=bridge_polish,
-            neighbor_weight=config.margin_neighbor_weight,
-        )
-        L_margin = agg.L_margin
-
-        # Positive objectness.
-        obj_logits_stack = torch.stack(
-            [obj_score_by_t[t].flatten().mean() for t in bridge_polish],
-            dim=0,
-        ) if bridge_polish else torch.zeros(0, device=device)
-        L_obj = positive_objectness_loss(
-            obj_logits_stack, threshold=config.oracle_traj_obj_threshold,
-        )
-
-        # Area preservation.
-        bridge_logits_2d: Dict[int, Tensor] = {}
-        bridge_true_2d: Dict[int, Tensor] = {}
-        for t in bridge_polish:
-            if int(t) not in m_true_by_t:
-                continue
-            bridge_logits_2d[int(t)] = logits_by_t[int(t)]
-            bridge_true_2d[int(t)] = m_true_by_t[int(t)]
-        L_area, area_ratios = area_preservation_loss(
-            bridge_logits_2d, bridge_true_2d,
-            area_min=config.oracle_traj_area_min,
-            area_max=config.oracle_traj_area_max,
-        )
-
-        # Fidelity hinges (LPIPS + TV) — same scheme as Stage 13.
-        L_fid_bridge = torch.zeros(
-            (), dtype=x_edited_full.dtype, device=device)
-        for c in sorted(edited_by_c.keys()):
-            lp = lpips_fn(x_edited_full[c], x_clean[c])
-            L_fid_bridge = L_fid_bridge + lpips_cap_hinge(
-                lp, config.lpips_orig_cap)
-        L_fid_ins = torch.zeros_like(L_fid_bridge)
-        L_fid_TV = torch.zeros_like(L_fid_bridge)
-        for k_, w_ in enumerate(W_sorted):
-            c_k_ = int(w_ - k_)
-            if not (0 <= c_k_ < T_clean):
-                continue
-            x_ref = x_clean[c_k_]
-            lp = lpips_fn(inserts[k_], x_ref)
-            L_fid_ins = L_fid_ins + lpips_cap_hinge(
-                lp, config.lpips_insert_cap)
-            ins_chw = inserts[k_].permute(2, 0, 1)
-            ref_chw = x_ref.permute(2, 0, 1)
-            L_fid_TV = L_fid_TV + tv_hinge(
-                ins_chw, ref_chw, multiplier=config.tv_multiplier)
-        L_fid_total = L_fid_bridge + L_fid_ins + L_fid_TV
-
-        # Edit parameter regularizers.
-        L_alpha = alpha_regularizer(
-            alphas, l1_weight=1.0, smoothness_weight=1.0)
-        L_warp = warp_regularizer(
-            edit_params.warp_s, edit_params.warp_r,
-            l2_weight=1.0, orthogonal_weight=1.0, smoothness_weight=1.0)
-
-        # Trajectory smoothness (Stage 14 specific).
-        L_traj = trajectory_smoothness_loss(
-            traj,
-            anchor_smooth_weight=config.oracle_traj_lambda_traj_anchor_smooth,
-            delta_smooth_weight=config.oracle_traj_lambda_traj_delta_smooth,
-            magnitude_weight=config.oracle_traj_lambda_traj_magnitude,
-        )
-
-        # Bundle B sub-session 4: L1-TV smoothness on the residual
-        # (per-pixel finite-diff abs, normalized by R element count).
-        # gpt-5.4 verdict: tiny TV, normalize, no L1 / no inter-bridge
-        # smoothness in v1. Active only when R is trainable (Phase B);
-        # in Phase A R=0 so TV=0 regardless.
-        if config.oracle_traj_use_residual and R_requires_grad:
-            dh = (R[:, :, 1:, :, :] - R[:, :, :-1, :, :]).abs()
-            dw = (R[:, :, :, 1:, :] - R[:, :, :, :-1, :]).abs()
-            L_R_tv = (dh.mean() + dw.mean())
-        else:
-            L_R_tv = torch.zeros(
-                (), dtype=x_edited_full.dtype, device=device)
-
-        L = (
-            config.oracle_traj_lambda_margin * L_margin
-            + config.oracle_traj_lambda_obj * L_obj
-            + config.oracle_traj_lambda_area * L_area
-            + lambda_fid_val * L_fid_total
-            + config.oracle_traj_lambda_alpha * L_alpha
-            + config.oracle_traj_lambda_warp * L_warp
-            + config.oracle_traj_lambda_residual_tv * L_R_tv
-            + L_traj
-        )
-
-        # Diagnostics.
-        with torch.no_grad():
-            decoy_overlap_list: List[float] = []
-            true_overlap_list: List[float] = []
-            obj_score_list: List[float] = []
-            valid_t_list: List[int] = []
-            for t in bridge_polish:
-                if int(t) not in m_decoy_by_t or int(t) not in m_true_by_t:
-                    continue
-                pred = torch.sigmoid(logits_by_t[int(t)]).flatten()
-                m_d = m_decoy_by_t[int(t)].flatten().float()
-                m_tr = m_true_by_t[int(t)].flatten().float()
-                d_ov = float(((pred * m_d).sum()
-                              / m_d.sum().clamp_min(1e-4)).item())
-                t_ov = float(((pred * m_tr).sum()
-                              / m_tr.sum().clamp_min(1e-4)).item())
-                decoy_overlap_list.append(d_ov)
-                true_overlap_list.append(t_ov)
-                obj_score_list.append(float(
-                    obj_score_by_t[int(t)].flatten().mean().item()))
-                valid_t_list.append(int(t))
-            mean_decoy_overlap = (
-                sum(decoy_overlap_list) / max(1, len(decoy_overlap_list)))
-            mean_true_overlap = (
-                sum(true_overlap_list) / max(1, len(true_overlap_list)))
-            mean_obj_score = (
-                float(obj_logits_stack.mean().item())
-                if obj_logits_stack.numel() > 0 else 0.0)
-            wrong_but_present = sum(
-                1 for d, tr, ar, obj in zip(
-                    decoy_overlap_list, true_overlap_list,
-                    [area_ratios.get(t, 1.0) for t in valid_t_list],
-                    obj_score_list)
-                if d > tr and ar > 0.5 and obj > 0.0
-            )
-
-        # Feasibility (LPIPS + TV hinges only — J-drop is checked at export).
-        tol = 1e-6
-        feas = (
-            float(L_fid_bridge.detach().item()) <= tol
-            and float(L_fid_ins.detach().item()) <= tol
-            and float(L_fid_TV.detach().item()) <= tol
-        )
         if feas:
             score = -float(
                 config.oracle_traj_lambda_margin
-                * L_margin.detach().item()
-                + config.oracle_traj_lambda_obj * L_obj.detach().item()
-                + config.oracle_traj_lambda_area * L_area.detach().item()
-                + config.oracle_traj_lambda_alpha * L_alpha.detach().item()
-                + config.oracle_traj_lambda_warp * L_warp.detach().item()
-                + L_traj.detach().item()
+                * diag.L_margin.detach().item()
+                + config.oracle_traj_lambda_obj
+                * diag.L_obj.detach().item()
+                + config.oracle_traj_lambda_area
+                * diag.L_area.detach().item()
+                + config.oracle_traj_lambda_alpha
+                * diag.L_alpha.detach().item()
+                + config.oracle_traj_lambda_warp
+                * diag.L_warp.detach().item()
+                + diag.L_traj.detach().item()
             )
             if best is None or score > best[3]:
                 best_params = {
@@ -2505,45 +2239,46 @@ def _run_oracle_trajectory_pgd(
                     step + 1,
                 )
 
-        anchor_max = float(traj.anchor_offset.detach().norm(dim=-1).max().item())
-        delta_max = float(traj.delta_offset.detach().norm(dim=-1).max().item())
+        anchor_max = float(
+            traj.anchor_offset.detach().norm(dim=-1).max().item())
+        delta_max = float(
+            traj.delta_offset.detach().norm(dim=-1).max().item())
         log = {
             "step": step + 1,
             "phase": "A" if step < config.oracle_traj_phase_a_steps else "B",
             "L": float(L.detach().item()),
-            "L_margin": float(L_margin.detach().item()),
-            "L_obj": float(L_obj.detach().item()),
-            "L_area": float(L_area.detach().item()),
-            "L_fid_bridge": float(L_fid_bridge.detach().item()),
-            "L_fid_ins": float(L_fid_ins.detach().item()),
-            "L_fid_TV": float(L_fid_TV.detach().item()),
-            "L_alpha": float(L_alpha.detach().item()),
-            "L_warp": float(L_warp.detach().item()),
-            "L_traj": float(L_traj.detach().item()),
-            "mean_decoy_overlap": float(mean_decoy_overlap),
-            "mean_true_overlap": float(mean_true_overlap),
-            "delta_overlap": float(mean_decoy_overlap - mean_true_overlap),
-            "mean_obj_score": mean_obj_score,
-            "wrong_but_present_count": int(wrong_but_present),
-            "feasible": feas,
-            "alpha_mean": float(alphas.mean().detach().item()),
-            "alpha_max_step": float(alphas.max().detach().item()),
-            "warp_disp_max": float(d_xy.norm(dim=-1).max().detach().item()),
+            "L_margin": float(diag.L_margin.detach().item()),
+            "L_obj": float(diag.L_obj.detach().item()),
+            "L_area": float(diag.L_area.detach().item()),
+            "L_fid_bridge": float(diag.L_fid_bridge.detach().item()),
+            "L_fid_ins": float(diag.L_fid_ins.detach().item()),
+            "L_fid_TV": float(diag.L_fid_TV.detach().item()),
+            "L_alpha": float(diag.L_alpha.detach().item()),
+            "L_warp": float(diag.L_warp.detach().item()),
+            "L_traj": float(diag.L_traj.detach().item()),
+            "mean_decoy_overlap": diag.mean_decoy_overlap,
+            "mean_true_overlap": diag.mean_true_overlap,
+            "delta_overlap": diag.delta_overlap,
+            "mean_obj_score": diag.mean_obj_score,
+            "wrong_but_present_count": diag.wrong_but_present_count,
+            "feasible": diag.feasible,
+            "alpha_mean": diag.alpha_mean,
+            "alpha_max_step": diag.alpha_max_step,
+            "warp_disp_max": diag.warp_disp_max,
             "anchor_max_norm": anchor_max,
             "delta_max_norm": delta_max,
-            "n_bridge": len(bridge_polish),
+            "n_bridge": diag.n_bridge,
             # Bundle B sub-session 4 residual diagnostics.
-            "L_R_tv": float(L_R_tv.detach().item()),
+            "L_R_tv": float(diag.L_R_tv.detach().item()),
             "R_max_abs": (
                 float(R.detach().abs().max().item())
-                if config.oracle_traj_use_residual and R is not None else 0.0),
+                if config.oracle_traj_use_residual and R is not None
+                else 0.0),
             "R_active": (
                 bool(R_requires_grad)
                 if config.oracle_traj_use_residual else False),
-            # Bundle C ν diagnostics appended AFTER the ν update populates
-            # nu_step_diag (codex pre-commit Finding 1 fix). Defaults below
-            # ensure step_logs entries are always well-formed even when ν
-            # update path is the legacy sign-PGD branch.
+            # Bundle C ν diagnostics: defaults overwritten after ν update
+            # populates nu_step_diag (codex pre-commit Finding 1 fix).
             "nu_lpips_native": bool(config.oracle_traj_nu_lpips_native),
             "nu_line_search_s": 1.0,           # overwritten post-ν-update
             "nu_lpips_max": 0.0,                # overwritten post-ν-update
@@ -2629,14 +2364,14 @@ def _run_oracle_trajectory_pgd(
 
                 # Diagnostic: max per-insert LPIPS at the accepted ν.
                 with torch.no_grad():
-                    inserts_final = (decoy_seeds + nu).clamp(0.0, 1.0)
+                    inserts_final = (state.decoy_seeds + nu).clamp(0.0, 1.0)
                     if config.train_ste_quantize:
                         from memshield.losses import fake_uint8_quantize
                         inserts_final = fake_uint8_quantize(inserts_final)
                     max_lp = 0.0
-                    for k_idx, w_idx in enumerate(W_sorted):
+                    for k_idx, w_idx in enumerate(state.W_attacked):
                         c_k_idx = int(w_idx - k_idx)
-                        if not (0 <= c_k_idx < T_clean):
+                        if not (0 <= c_k_idx < state.T_clean):
                             continue
                         lp_k = float(lpips_fn(
                             inserts_final[k_idx],
