@@ -72,7 +72,74 @@ from memshield.decoy_seed import (
 )
 
 
-__all__ = ["compose_decoy_alpha_paste", "apply_masked_residual"]
+__all__ = [
+    "compose_decoy_alpha_paste",
+    "apply_masked_residual",
+    "find_max_feasible_nu_scale",
+]
+
+
+def find_max_feasible_nu_scale(
+    nu_prev: Tensor,                # [K, H, W, 3] last known feasible ν
+    nu_cand: Tensor,                # [K, H, W, 3] Adam-proposed ν
+    feasibility_fn,                 # nu_test -> bool (True if all per-insert LPIPS ≤ cap)
+    *,
+    n_iter: int = 6,
+    full_step_first: bool = True,
+) -> float:
+    """Bisection line-search for the largest scale s ∈ [0, 1] such that
+    `nu(s) = nu_prev + s · (nu_cand - nu_prev)` is feasible.
+
+    Used in Bundle C sub-session 6 (codex Round 5 design verdict thread
+    `019dc51a-c71a-7971-bece-116a592de2f5`) to enforce a per-insert LPIPS
+    constraint on the ν update without abandoning Adam's momentum. After
+    each Adam `opt_nu.step()`, this helper finds the largest scaled step
+    that keeps all per-insert LPIPS under the cap.
+
+    Algorithm:
+      1. Optionally try s=1.0 first (full step). If feasible, return 1.0.
+      2. Otherwise bisect on s ∈ [0, 1]: maintain invariant that
+         s_lo is feasible, s_hi is infeasible (or unknown). Halve.
+      3. Return the largest s_lo found.
+
+    Returns 0.0 if even s=2^-n_iter is infeasible (caller should keep nu_prev).
+
+    Args:
+        nu_prev: last-known-feasible ν tensor (any shape; treated as flat
+            per-element interpolation).
+        nu_cand: candidate ν after Adam step. Must match nu_prev shape.
+        feasibility_fn: callable(nu_test: Tensor) -> bool returning True
+            iff `nu_test` satisfies the LPIPS cap.
+        n_iter: bisection iterations after the initial s=1.0 check.
+            6 iterations gives ~1.5% precision (s_lo within 1/64 of true).
+        full_step_first: if True, try s=1.0 once before bisecting; if it
+            passes, skip bisection. Saves LPIPS calls when the constraint
+            is rarely active.
+
+    Returns:
+        s_best ∈ [0, 1]. Caller should set
+            `nu = nu_prev + s_best * (nu_cand - nu_prev)`.
+    """
+    if nu_prev.shape != nu_cand.shape:
+        raise ValueError(
+            f"nu_prev/nu_cand shape mismatch: {tuple(nu_prev.shape)} vs "
+            f"{tuple(nu_cand.shape)}")
+    if n_iter < 0:
+        raise ValueError(f"n_iter must be non-negative; got {n_iter}")
+
+    if full_step_first:
+        if feasibility_fn(nu_cand):
+            return 1.0
+
+    s_lo, s_hi = 0.0, 1.0
+    for _ in range(n_iter):
+        s_mid = 0.5 * (s_lo + s_hi)
+        nu_test = nu_prev + s_mid * (nu_cand - nu_prev)
+        if feasibility_fn(nu_test):
+            s_lo = s_mid
+        else:
+            s_hi = s_mid
+    return s_lo
 
 
 def apply_masked_residual(
@@ -482,6 +549,77 @@ def _test_apply_masked_residual_input_validation() -> None:
     print("  apply_masked_residual_input_validation OK")
 
 
+def _test_find_max_feasible_nu_scale_full_step() -> None:
+    """If candidate is feasible, full step (s=1) is returned without bisection."""
+    nu_prev = torch.zeros(2, 4, 4, 3)
+    nu_cand = torch.full_like(nu_prev, 0.05)
+    # Always-feasible mock.
+    s = find_max_feasible_nu_scale(
+        nu_prev, nu_cand, feasibility_fn=lambda nu: True, n_iter=6)
+    assert s == 1.0, f"full-step feasible should give 1.0, got {s}"
+    print("  find_max_feasible_nu_scale_full_step OK")
+
+
+def _test_find_max_feasible_nu_scale_bisection() -> None:
+    """Mock LPIPS = max(|nu|) * 10. Cap = 0.4. Cand has max=0.06, so
+    cand_lpips=0.6 > cap. True feasibility boundary at |nu| = 0.04 → s=2/3."""
+    nu_prev = torch.zeros(1, 4, 4, 3)
+    nu_cand = torch.full_like(nu_prev, 0.06)
+    cap = 0.4
+    def feas(nu_test):
+        return float((nu_test.abs().max() * 10).item()) <= cap
+    s = find_max_feasible_nu_scale(
+        nu_prev, nu_cand, feasibility_fn=feas, n_iter=8)
+    # True boundary: 0.06 * s = 0.04 → s = 0.04/0.06 ≈ 0.6667.
+    # Bisection with 8 iters gives ~0.5% precision.
+    assert 0.65 < s <= 0.6667, \
+        f"bisection should find s ≈ 0.667, got {s}"
+    print(f"  find_max_feasible_nu_scale_bisection OK (s={s:.4f})")
+
+
+def _test_find_max_feasible_nu_scale_fully_infeasible() -> None:
+    """If even tiny s is infeasible, return 0.0."""
+    nu_prev = torch.zeros(1, 4, 4, 3)
+    nu_cand = torch.full_like(nu_prev, 0.5)
+    # Always-infeasible mock.
+    s = find_max_feasible_nu_scale(
+        nu_prev, nu_cand, feasibility_fn=lambda nu: False, n_iter=4)
+    assert s == 0.0, f"always-infeasible should give 0.0, got {s}"
+    print("  find_max_feasible_nu_scale_fully_infeasible OK")
+
+
+def _test_find_max_feasible_nu_scale_input_validation() -> None:
+    nu_prev = torch.zeros(1, 4, 4, 3)
+    nu_cand = torch.zeros(1, 4, 4, 4)  # wrong shape
+    try:
+        find_max_feasible_nu_scale(
+            nu_prev, nu_cand, feasibility_fn=lambda nu: True)
+        assert False, "should have raised on shape mismatch"
+    except ValueError:
+        pass
+    try:
+        find_max_feasible_nu_scale(
+            nu_prev, nu_prev, feasibility_fn=lambda nu: True, n_iter=-1)
+        assert False, "should have raised on negative n_iter"
+    except ValueError:
+        pass
+    print("  find_max_feasible_nu_scale_input_validation OK")
+
+
+def _test_find_max_feasible_nu_scale_no_full_step_first() -> None:
+    """full_step_first=False forces bisection even when full step is feasible.
+    Sanity check the parameter."""
+    nu_prev = torch.zeros(1, 4, 4, 3)
+    nu_cand = torch.full_like(nu_prev, 0.01)
+    s = find_max_feasible_nu_scale(
+        nu_prev, nu_cand, feasibility_fn=lambda nu: True,
+        n_iter=4, full_step_first=False)
+    # With always-feasible + bisection only, s_lo converges toward 1
+    # but never quite reaches it (s_mid sequence: 0.5, 0.75, 0.875, 0.9375).
+    assert 0.93 <= s < 1.0, f"bisection-only should approach 1, got {s}"
+    print(f"  find_max_feasible_nu_scale_no_full_step_first OK (s={s:.4f})")
+
+
 if __name__ == "__main__":
     print("memshield.semantic_compositor self-tests:")
     _test_shape_and_range()
@@ -496,4 +634,9 @@ if __name__ == "__main__":
     _test_apply_masked_residual_clamps_to_unit_range()
     _test_apply_masked_residual_grad_paths()
     _test_apply_masked_residual_input_validation()
+    _test_find_max_feasible_nu_scale_full_step()
+    _test_find_max_feasible_nu_scale_bisection()
+    _test_find_max_feasible_nu_scale_fully_infeasible()
+    _test_find_max_feasible_nu_scale_input_validation()
+    _test_find_max_feasible_nu_scale_no_full_step_first()
     print("memshield.semantic_compositor: all self-tests PASSED")

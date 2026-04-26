@@ -8,13 +8,13 @@
   "difficulty": "medium",
   "topic": "redesign_both_insert_and_modify_strategies_for_synergy",
   "last_score": 6.5,
-  "last_verdict": "Round 5 Bundle B sub-session 4 DONE: per-bridge-frame masked residual R_k [K, L, H, W, 3] sign-PGD with eps_R=8/255, support via DETACHED soften_decoy_mask (dilate=4, sigma=3.0), Phase A frozen + Phase B sign-PGD. apply_masked_residual helper in memshield/semantic_compositor.py with detached-support invariant ENFORCED via input validation. gpt-5.4 design GO with one blocking-fix incorporated (detach support_mask). gpt-5.4 pre-commit code review GO no HIGH/MEDIUM bugs. 12/12 self-tests pass on Windows.",
+  "last_verdict": "Round 5 Bundle B sub-session 6 (Bundle C) DONE: gpt-5.4 rejected pure end-to-end joint opt (C1) as default; only LPIPS-native ν (C2) shipped. Adam + LPIPS bisection line-search + ε∞ safety pre-clamp + zero-fallback at Phase B init. find_max_feasible_nu_scale helper in memshield/semantic_compositor.py with 5 unit tests. Default OFF (opt-in via --oracle-traj-nu-lpips-native). Pre-commit code review caught 3 bugs (UnboundLocalError on log dict, post-clamp invariant break, infeasible nu_init anchor); all 3 fixed before commit. Final GO from gpt-5.4. 17/17 self-tests pass on Windows + Pro 6000. SUB-SESSION 5 PILOT STILL PENDING (blocked on Bundle A profile completion ~17:30 2026-04-26).",
   "pending_experiments": [
     "placement_profile dog/camel/blackswan beam=4 full=30 — running on Pro 6000 GPU 1, ETA ~17:30 on 2026-04-26"
   ],
   "user_directive": "2026-04-25 Round 5: Path 1 full no-proxy, Option C multi-session. Bundle A done. Bundle B sub-session 3+4 done. Bundle B sub-session 5 = pilot, BLOCKED on Bundle A profile completion.",
-  "sub_session": "4/7",
-  "next_sub_session": "5: 3-clip pilot (dog/camel/blackswan) Stage 14 + Bundle B (alpha_paste + R_k) + profiled placement. BLOCKED on Bundle A profile completion (~17:30 2026-04-26). Pre-committed criterion: mean ΔJ ≥ +0.05 over A0 (~0.50) → continue full 10-clip + ablations + paper goes; < +0.02 → cut δ permanently.",
+  "sub_session": "6/7 (5 deferred, blocked on profile)",
+  "next_sub_session": "5: 3-clip pilot (dog/camel/blackswan) Stage 14 + Bundle B (alpha_paste + R_k) + Bundle C optional ablation (LPIPS-native ν) + profiled placement. STILL BLOCKED on Bundle A profile completion (~17:30 2026-04-26). Pre-committed criterion: mean ΔJ ≥ +0.05 over A0 (~0.50) → continue full 10-clip + ablations + paper goes; < +0.02 → cut δ permanently. After ss5: ss7 = final pilot + decision.",
   "rejected_designs": [
     "v4_symmetric delta",
     "post_insert_R8 delta",
@@ -45,9 +45,9 @@
       "sub_session_5": "BLOCKED on Bundle A profile completion — 3-clip pilot dog/camel/blackswan with --use-profiled-placement --oracle-trajectory"
     },
     "C_optimization_cleanup": {
-      "sub_session_6": "PENDING — end-to-end joint opt + LPIPS-native ν",
+      "sub_session_6": "DONE — LPIPS-native ν only (C2). gpt-5.4 rejected pure C1 (end-to-end joint) as default; only optional ν warmup flag shipped. 6 new VADIv5Config fields + CLI args; default OFF (opt-in for ablation). Adam + bisection line-search + ε∞ pre-clamp + zero-fallback at Phase B init. 3 codex pre-commit findings fixed. find_max_feasible_nu_scale helper with 5 unit tests in memshield/semantic_compositor.py.",
       "sub_session_7": "PENDING — final 3-clip pilot + decision"
     }
   },
-  "timestamp": "2026-04-25T23:50:00"
+  "timestamp": "2026-04-26T00:30:00"
 }

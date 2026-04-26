@@ -2240,9 +2240,9 @@ redundancy.
 | 1 | oracle_trajectory.py + placement_profiler.py | DONE (f8518b0) |
 | 2 | polish_gating + v5_score_fn + run_placement_profile + Stage 14 | DONE (b0967ea) |
 | 3 | alpha_paste compositor + Stage 14 wiring | DONE (a7f1c6c) |
-| **4** | **masked residual R_k + Stage 14 integration** | **DONE (this commit)** |
+| 4 | masked residual R_k + Stage 14 integration | DONE (4fe42a1) |
 | 5 | 3-clip pilot Stage 14 + Bundle B + profiled placement | BLOCKED on profile complete |
-| 6 | end-to-end joint opt + LPIPS-native ν | PENDING |
+| **6** | **LPIPS-native ν (Bundle C C2 only; C1 rejected)** | **DONE (this commit)** |
 | 7 | final pilot + decision | PENDING |
 
 
@@ -2325,3 +2325,65 @@ to sub-session 5:
   permanently. Mid-zone [+0.02, +0.05) → Pareto synergy ablation paper.
 
 
+
+
+
+## Loop 3 Round 5 sub-session 6 — Phase E documentation (2026-04-26, while ss5 blocked)
+
+### Sub-session 6 Topic
+Bundle C: Optimization cleanup — originally scoped as "end-to-end joint opt + LPIPS-native ν". Done in parallel with ss5 (blocked on profile completion ~17:30 2026-04-26).
+
+### gpt-5.4 design verdict (thread `019dc51a`)
+**Rejected pure C1** (drop Phase A/B): structurally prone to failure under current parameter split. ν and especially R can absorb optimization pressure before geometry establishes if trained from step 0. ss4 Q4 verdict (freeze R in Phase A) was directionally global, not context-bounded.
+
+**Accepted C2** (LPIPS-native ν): Adam + bisection line-search + loose ε∞ safety cap. Replaces sign-PGD ε∞ ν.
+
+Concrete recipe (codex):
+- Adam on ν (let momentum smooth gradients)
+- After Adam step → ε∞ safety pre-clamp on candidate (gpt-5.4 Finding 2 fix)
+- Bisection on `s ∈ [0, 1]` along segment from `nu_feasible_prev` to `nu_cand_safe` to find largest feasible step
+- Use largest s where all per-insert LPIPS ≤ cap
+- Quantization-aware feasibility check (matches export representation when STE is on)
+- Loose ε∞ safety cap (16/255 default) as guardrail against high-contrast adversarial patterns LPIPS might miss
+- Optional ν warmup (LR ramp over first N steps of Phase B) as the only C1-style knob retained
+
+### Phase C — implementation
+1. `memshield/semantic_compositor.py` (extended):
+   - `find_max_feasible_nu_scale(nu_prev, nu_cand, feasibility_fn, n_iter=6, full_step_first=True) -> float`
+   - 5 new unit tests (full-step shortcut, bisection convergence to 0.667±0.5%, fully-infeasible→0.0, input validation, no-shortcut bisection). 17/17 self-tests in module pass.
+2. `scripts/run_vadi_v5.py`:
+   - 6 new VADIv5Config fields (oracle_traj_nu_lpips_native / _lpips_cap / _eps_safety / _lpips_bisect_iters / _adam_lr / _warmup_steps); default OFF
+   - 6 matching CLI args wired through main()
+   - `_run_oracle_trajectory_pgd`:
+     - Hoisted `_nu_feasibility` to function scope (codex Finding 3 fix; reusable at Phase B init)
+     - Phase B init safety chain: clamp → check feasibility → fallback to zero+line-search → fail loud (codex Finding 3 fix)
+     - ν update dispatch: legacy sign-PGD (default) vs Adam + LPIPS line-search + safety pre-clamp
+     - Step log diagnostics: nu_lpips_native, nu_line_search_s, nu_lpips_max, nu_safety_clamp_max
+     - step_logs.append() deferred to AFTER ν update so diagnostics are populated (codex Finding 1 fix)
+
+### Critical design invariant
+**ε∞ safety pre-clamp BEFORE line-search**, not after. Per-pixel ε∞ clamp is not LPIPS-monotone. Pre-clamping `nu_cand` ensures both line-search endpoints are within ε safety; the convex combination stays within. No post-clamp needed.
+
+### Default cap aligned to A0
+`oracle_traj_nu_lpips_cap = 0.35` (matches `lpips_insert_cap`). With stricter default (0.20), nu_init from A0 (which used 0.35 cap) would often fail Stage 14's LPIPS check at Phase B entry. Codex Finding 3.
+
+### Phase D — codex pre-commit code review (3 rounds)
+- **Round 1**: 2 findings — HIGH UnboundLocalError (nu_step_diag referenced before definition in step log); MEDIUM ε∞ post-clamp could break LPIPS feasibility invariant.
+- **Round 2**: both fixed but new HIGH found — nu_init from A0 may not be LPIPS-feasible under stricter Stage 14 caps; line-search anchor invariant breaks at init.
+- **Round 3**: all 3 fixed (cap default raised to 0.35; safety chain at Phase B init; deferred log append). **GO**.
+
+Non-blocking residual note: if user manually sets `--oracle-traj-nu-lpips-cap` different from `lpips_insert_cap`, the hard cap (line-search) and soft hinge (loss) diverge. Config semantics, not correctness.
+
+### Phase E — deployment
+- 17/17 self-tests on Windows
+- Driver `_self_test` PASS (legacy path; LPIPS-native default OFF)
+- Sync + commit + push from Pro 6000 (Windows has no GitHub key)
+
+### Status (end of sub-session 6)
+- Bundle C **partially implemented**: only C2 (LPIPS-native ν). C1 (end-to-end joint) explicitly rejected by gpt-5.4 design verdict. Optional ν warmup is the only C1-style knob shipped.
+- ss5 still pending (3-clip pilot, blocked on Bundle A profile completion). When pilot launches, can compare:
+  - **A0** baseline (no Stage 14, no Bundle B/C)
+  - **+Stage 14 alone** (Bundle A; insert-only with profiled placement)
+  - **+Bundle B** (alpha_paste + R_k masked residual)
+  - **+Bundle C ablation** (LPIPS-native ν, opt-in via `--oracle-traj-nu-lpips-native`)
+- Pre-committed Round 5 6th-and-FINAL criterion still active: mean ΔJ ≥ +0.05 → continue 10-clip + paper; < +0.02 → cut δ permanently.

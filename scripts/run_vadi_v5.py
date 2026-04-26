@@ -287,6 +287,22 @@ class VADIv5Config:
     oracle_traj_residual_dilate_px: int = 4           # support dilation (gpt-5.4: modest)
     oracle_traj_residual_feather_sigma: float = 3.0   # support feather sigma
     oracle_traj_lambda_residual_tv: float = 0.001     # tiny TV (avoids speckle)
+    # Bundle C sub-session 6: LPIPS-native ν (codex Loop 3 R5 design verdict
+    # thread 019dc51a, gpt-5.4 xhigh): replaces sign-PGD ε∞ ν with Adam +
+    # LPIPS bisection line-search + loose ε∞ safety cap. Default OFF
+    # (opt-in for ablation in pilot). Codex rejected pure end-to-end joint
+    # opt (C1) as default; only the soft ν warmup is offered as an
+    # additional optional ablation knob.
+    oracle_traj_nu_lpips_native: bool = False         # default OFF (opt-in)
+    # Codex pre-commit Finding 3 (gpt-5.4): default LPIPS cap MUST match
+    # A0's lpips_insert_cap (0.35), else nu_init from A0 polish may be
+    # infeasible under Stage 14's stricter cap and break the line-search
+    # anchor invariant.
+    oracle_traj_nu_lpips_cap: float = 0.35            # per-insert LPIPS cap
+    oracle_traj_nu_eps_safety: float = 16.0 / 255.0   # loose ε∞ guardrail
+    oracle_traj_nu_lpips_bisect_iters: int = 6        # ~1.5% precision
+    oracle_traj_nu_adam_lr: float = 0.02              # Adam LR for ν (LPIPS-native)
+    oracle_traj_nu_warmup_steps: int = 0              # ν LR warmup; 0 = no warmup
     # Bundle B sub-session 3 (codex Loop 3 R5, gpt-5.4 review thread
     # 019dc51a-c71a-7971-bece-116a592de2f5, doc BUNDLE_B_INPAINTER_REVIEW.md):
     # compositor for the per-bridge-frame duplicate inside Stage 14.
@@ -1990,6 +2006,7 @@ def _run_oracle_trajectory_pgd(
     from memshield.decoy_seed import build_duplicate_object_decoy_frame
     from memshield.semantic_compositor import (
         compose_decoy_alpha_paste, apply_masked_residual,
+        find_max_feasible_nu_scale,
     )
     from memshield.oracle_trajectory import (
         init_false_trajectory, trajectory_offset_at,
@@ -2081,6 +2098,11 @@ def _run_oracle_trajectory_pgd(
     # ν: warm-started, frozen in Phase A.
     nu = nu_init.detach().clone().to(device)
     nu_requires_grad = False
+    # Bundle C sub-session 6: LPIPS-native ν optimizer (Adam + line-search).
+    # Allocated lazily on Phase B switch; None until then. nu_feasible_prev
+    # tracks the last LPIPS-feasible ν value for line-search interpolation.
+    opt_nu_adam: Optional[torch.optim.Adam] = None
+    nu_feasible_prev: Optional[Tensor] = None
 
     # Bundle B sub-session 4: per-bridge-frame masked residual R[K, L_max,
     # H, W, 3]. Frozen at 0 in Phase A; sign-PGD update in Phase B.
@@ -2109,6 +2131,28 @@ def _run_oracle_trajectory_pgd(
     insert_polish = sorted(W_set)
     margin_query_frames = sorted(set(insert_polish + bridge_polish))
 
+    # Bundle C ss6 (codex Finding 3 fix): hoist _nu_feasibility out of step
+    # loop so it can be reused at Phase B init for safety-chain validation.
+    # Closure captures decoy_seeds, lpips_fn, config, W_sorted, T_clean,
+    # x_clean — all stable for the duration of this function call.
+    def _nu_feasibility(nu_test: Tensor) -> bool:
+        cap_lpips = config.oracle_traj_nu_lpips_cap
+        inserts_test = (decoy_seeds + nu_test).clamp(0.0, 1.0)
+        if config.train_ste_quantize:
+            from memshield.losses import fake_uint8_quantize
+            inserts_test = fake_uint8_quantize(inserts_test)
+        with torch.no_grad():
+            for k_idx, w_idx in enumerate(W_sorted):
+                c_k_idx = int(w_idx - k_idx)
+                if not (0 <= c_k_idx < T_clean):
+                    continue
+                x_ref_k = x_clean[c_k_idx]
+                lp_k = float(lpips_fn(
+                    inserts_test[k_idx], x_ref_k).item())
+                if lp_k > cap_lpips:
+                    return False
+        return True
+
     best: Optional[Tuple[Tensor, Tensor, Dict[str, Tensor], float, int]] = \
         None
     step_logs: List[Dict[str, Any]] = []
@@ -2124,6 +2168,47 @@ def _run_oracle_trajectory_pgd(
         if step == config.oracle_traj_phase_a_steps and not nu_requires_grad:
             nu = nu.detach().clone().requires_grad_(True)
             nu_requires_grad = True
+            # Bundle C sub-session 6: when LPIPS-native ν is enabled,
+            # instantiate Adam optimizer + safely initialize
+            # nu_feasible_prev (codex Finding 3 fix). nu_init came from
+            # A0 polish with looser caps (lpips_insert_cap=0.35,
+            # eps_nu=48/255). Stage 14's caps may be stricter, so we
+            # cannot assume nu_init is feasible:
+            #   1. Clamp to ε∞ safety. If feasible → use.
+            #   2. Else line-search [0, nu_init_safe] for max feasible s.
+            #   3. Else (zero ν infeasible) → raise with a clear message.
+            if config.oracle_traj_nu_lpips_native:
+                opt_nu_adam = torch.optim.Adam(
+                    [nu], lr=config.oracle_traj_nu_adam_lr)
+                eps_s = float(config.oracle_traj_nu_eps_safety)
+                with torch.no_grad():
+                    nu_init_safe = nu.data.clamp(-eps_s, eps_s)
+                if _nu_feasibility(nu_init_safe):
+                    with torch.no_grad():
+                        nu.data.copy_(nu_init_safe)
+                        nu_feasible_prev = nu.data.clone()
+                else:
+                    zero_nu = torch.zeros_like(nu.data)
+                    if _nu_feasibility(zero_nu):
+                        s_init = find_max_feasible_nu_scale(
+                            zero_nu, nu_init_safe,
+                            feasibility_fn=_nu_feasibility,
+                            n_iter=config.oracle_traj_nu_lpips_bisect_iters,
+                        )
+                        with torch.no_grad():
+                            nu.data.copy_(
+                                zero_nu
+                                + s_init * (nu_init_safe - zero_nu))
+                            nu_feasible_prev = nu.data.clone()
+                    else:
+                        raise RuntimeError(
+                            "LPIPS-native ν: even zero ν is infeasible. "
+                            "decoy_seed quality below threshold or LPIPS "
+                            "cap too strict. cap="
+                            f"{config.oracle_traj_nu_lpips_cap}, "
+                            f"eps_safety={eps_s:.4f}. Either raise "
+                            "--oracle-traj-nu-lpips-cap or disable "
+                            "--oracle-traj-nu-lpips-native.")
         # Phase B switch: unfreeze R for sign-PGD updates (Bundle B ss4).
         if (config.oracle_traj_use_residual
                 and step == config.oracle_traj_phase_a_steps
@@ -2455,8 +2540,16 @@ def _run_oracle_trajectory_pgd(
             "R_active": (
                 bool(R_requires_grad)
                 if config.oracle_traj_use_residual else False),
+            # Bundle C ν diagnostics appended AFTER the ν update populates
+            # nu_step_diag (codex pre-commit Finding 1 fix). Defaults below
+            # ensure step_logs entries are always well-formed even when ν
+            # update path is the legacy sign-PGD branch.
+            "nu_lpips_native": bool(config.oracle_traj_nu_lpips_native),
+            "nu_line_search_s": 1.0,           # overwritten post-ν-update
+            "nu_lpips_max": 0.0,                # overwritten post-ν-update
+            "nu_safety_clamp_max": 0.0,        # overwritten post-ν-update
         }
-        step_logs.append(log)
+        # Append is deferred — see end of step iteration below.
 
         # Backward + step.
         opt_alpha.zero_grad()
@@ -2472,11 +2565,91 @@ def _run_oracle_trajectory_pgd(
         opt_warp.step()
         opt_anchor.step()
         opt_delta.step()
+        # ν update: Bundle C sub-session 6 dispatches between (a) legacy
+        # sign-PGD with ε∞ clamp (default), and (b) LPIPS-native Adam +
+        # bisection line-search + loose ε∞ safety cap.
+        nu_step_diag: Dict[str, float] = {
+            "nu_line_search_s": 1.0,
+            "nu_lpips_max": 0.0,
+            "nu_safety_clamp_max": 0.0,
+        }
         if nu_requires_grad and nu.grad is not None:
-            with torch.no_grad():
-                nu.add_(
-                    -config.oracle_traj_nu_lr_phase_b * nu.grad.sign())
-                nu.clamp_(-config.eps_nu, config.eps_nu)
+            if (config.oracle_traj_nu_lpips_native
+                    and opt_nu_adam is not None
+                    and nu_feasible_prev is not None):
+                # Bundle C C2: Adam step → ε∞ safety pre-clamp → LPIPS
+                # bisection line-search. Codex pre-commit Finding 2 fix:
+                # the safety clamp must be applied to nu_cand BEFORE the
+                # line-search, not after the search; otherwise the post-
+                # clamp tensor can violate LPIPS feasibility (per-pixel
+                # clamp is not LPIPS-monotone) and poison the anchor for
+                # the next iteration. Pre-clamp guarantees both endpoints
+                # of the search segment are within ε safety, and any
+                # convex combination stays within ε safety.
+                phase_b_step = step - config.oracle_traj_phase_a_steps
+                if (config.oracle_traj_nu_warmup_steps > 0
+                        and phase_b_step <
+                        config.oracle_traj_nu_warmup_steps):
+                    warmup_scale = (
+                        (phase_b_step + 1)
+                        / float(config.oracle_traj_nu_warmup_steps))
+                    for pg in opt_nu_adam.param_groups:
+                        pg["lr"] = (
+                            config.oracle_traj_nu_adam_lr * warmup_scale)
+                else:
+                    for pg in opt_nu_adam.param_groups:
+                        pg["lr"] = config.oracle_traj_nu_adam_lr
+
+                opt_nu_adam.step()              # Adam updates nu in-place
+                nu_cand_unsafe = nu.data.clone()
+                # ε∞ safety pre-clamp on the candidate (BEFORE line-search).
+                eps_s = float(config.oracle_traj_nu_eps_safety)
+                nu_cand = nu_cand_unsafe.clamp(-eps_s, eps_s)
+                nu_step_diag["nu_safety_clamp_max"] = float(
+                    (nu_cand_unsafe - nu_cand).abs().max().item())
+
+                # _nu_feasibility is hoisted to function scope (codex
+                # Finding 3 fix). Reuse the same checker here.
+
+                s_best = find_max_feasible_nu_scale(
+                    nu_feasible_prev, nu_cand,
+                    feasibility_fn=_nu_feasibility,
+                    n_iter=config.oracle_traj_nu_lpips_bisect_iters,
+                )
+                nu_step_diag["nu_line_search_s"] = float(s_best)
+
+                with torch.no_grad():
+                    # Both nu_feasible_prev and nu_cand are within ε∞
+                    # safety; convex combination stays within. No further
+                    # clamp needed (Finding 2 fix).
+                    nu.data.copy_(
+                        nu_feasible_prev
+                        + s_best * (nu_cand - nu_feasible_prev))
+                    nu_feasible_prev = nu.data.clone()
+
+                # Diagnostic: max per-insert LPIPS at the accepted ν.
+                with torch.no_grad():
+                    inserts_final = (decoy_seeds + nu).clamp(0.0, 1.0)
+                    if config.train_ste_quantize:
+                        from memshield.losses import fake_uint8_quantize
+                        inserts_final = fake_uint8_quantize(inserts_final)
+                    max_lp = 0.0
+                    for k_idx, w_idx in enumerate(W_sorted):
+                        c_k_idx = int(w_idx - k_idx)
+                        if not (0 <= c_k_idx < T_clean):
+                            continue
+                        lp_k = float(lpips_fn(
+                            inserts_final[k_idx],
+                            x_clean[c_k_idx]).item())
+                        if lp_k > max_lp:
+                            max_lp = lp_k
+                    nu_step_diag["nu_lpips_max"] = max_lp
+            else:
+                # Legacy sign-PGD with ε∞ clamp (default).
+                with torch.no_grad():
+                    nu.add_(
+                        -config.oracle_traj_nu_lr_phase_b * nu.grad.sign())
+                    nu.clamp_(-config.eps_nu, config.eps_nu)
         # Bundle B sub-session 4: sign-PGD on R (Phase B only).
         if R_requires_grad and R.grad is not None:
             with torch.no_grad():
@@ -2493,6 +2666,15 @@ def _run_oracle_trajectory_pgd(
         # free, project after).
         project_trajectory_to_budget(
             traj, max_offset_px=config.oracle_traj_max_offset_px)
+
+        # Bundle C ss6 (Codex Finding 1 fix): now that ν update has
+        # populated nu_step_diag, write the actual values into the log
+        # and append. The log was constructed earlier with default values
+        # for these keys; now overwrite with this step's actuals.
+        log["nu_line_search_s"] = float(nu_step_diag["nu_line_search_s"])
+        log["nu_lpips_max"] = float(nu_step_diag["nu_lpips_max"])
+        log["nu_safety_clamp_max"] = float(nu_step_diag["nu_safety_clamp_max"])
+        step_logs.append(log)
 
         if (not feas) and (step + 1) % config.lambda_growth_period == 0:
             lambda_fid_val *= config.lambda_growth_factor
@@ -3907,6 +4089,26 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--oracle-traj-lambda-residual-tv", type=float,
                    default=0.001,
                    help="TV smoothness weight on R (default 0.001).")
+    # Bundle C sub-session 6: LPIPS-native ν (codex Loop 3 R5 design verdict
+    # gpt-5.4 thread 019dc51a). Default OFF (opt-in for pilot ablation).
+    p.add_argument("--oracle-traj-nu-lpips-native", action="store_true",
+                   help="Replace ν sign-PGD ε∞ with Adam + LPIPS bisection "
+                        "line-search + loose ε∞ safety cap (Bundle C).")
+    p.add_argument("--oracle-traj-nu-lpips-cap", type=float, default=0.35,
+                   help="Per-insert LPIPS cap for LPIPS-native ν "
+                        "(default 0.35, matches lpips_insert_cap).")
+    p.add_argument("--oracle-traj-nu-eps-safety", type=float,
+                   default=16.0/255.0,
+                   help="Loose ε∞ guardrail for LPIPS-native ν "
+                        "(default 16/255).")
+    p.add_argument("--oracle-traj-nu-lpips-bisect-iters", type=int, default=6,
+                   help="Bisection iterations for LPIPS line-search "
+                        "(default 6 → ~1.5%% precision).")
+    p.add_argument("--oracle-traj-nu-adam-lr", type=float, default=0.02,
+                   help="Adam LR for LPIPS-native ν (default 0.02).")
+    p.add_argument("--oracle-traj-nu-warmup-steps", type=int, default=0,
+                   help="Phase B steps over which to ramp ν Adam LR from "
+                        "0 to full (default 0 = no warmup).")
     p.add_argument("--use-profiled-placement", type=str, default=None,
                    help="Path to placement-profile root; per-clip "
                         "<path>/<clip>/profile.json's best.subset is used "
@@ -4024,6 +4226,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             oracle_traj_residual_feather_sigma=(
                 args.oracle_traj_residual_feather_sigma),
             oracle_traj_lambda_residual_tv=args.oracle_traj_lambda_residual_tv,
+            oracle_traj_nu_lpips_native=args.oracle_traj_nu_lpips_native,
+            oracle_traj_nu_lpips_cap=args.oracle_traj_nu_lpips_cap,
+            oracle_traj_nu_eps_safety=args.oracle_traj_nu_eps_safety,
+            oracle_traj_nu_lpips_bisect_iters=(
+                args.oracle_traj_nu_lpips_bisect_iters),
+            oracle_traj_nu_adam_lr=args.oracle_traj_nu_adam_lr,
+            oracle_traj_nu_warmup_steps=args.oracle_traj_nu_warmup_steps,
             profiled_placement_path=args.use_profiled_placement,
         )
 
