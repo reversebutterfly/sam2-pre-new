@@ -2387,3 +2387,46 @@ Non-blocking residual note: if user manually sets `--oracle-traj-nu-lpips-cap` d
   - **+Bundle B** (alpha_paste + R_k masked residual)
   - **+Bundle C ablation** (LPIPS-native ν, opt-in via `--oracle-traj-nu-lpips-native`)
 - Pre-committed Round 5 6th-and-FINAL criterion still active: mean ΔJ ≥ +0.05 → continue 10-clip + paper; < +0.02 → cut δ permanently.
+
+
+
+## Loop 3 Round 6 — auto-review-loop documentation (2026-04-26)
+
+### Round 6 Topic
+"Smarter placement search + insert-perturbation synergy" — user critique that current beam_search_K3 is "too dumb"; design constraint = no code-cost limit.
+
+### Loop summary
+- **R1** (Score 6/10, "not ready"): codex chose **Path 8 + Path 3 hybrid** — joint curriculum placement-perturbation optimization. Killed 7-clip GPU 0 brute-force profile (sunk-cost theatre per codex). Kept GPU 1 dog/camel/blackswan profile for oracle calibration.
+- **R2** (Score 5/10, NO-GO): initial spec had ghost-frame averaging (5-frame soft source) + free τ + spacing penalty + bilevel cost model bug. Codex demanded 3 mandatory fixes.
+- **R3** (Score 7/10, "almost", **GO to implementation**): revised spec uses (1) discrete `floor/ceil` schedule interpolation as timing surrogate (2^K schedules per step, multilinear weight = product of frac/1-frac), (2) ordered-by-construction τ via cumulative softplus gaps, (3) single-level joint loop with W-dependent state rebuild via `build_attack_state_from_W` + `stage14_forward_loss` helpers extracted from `_run_oracle_trajectory_pgd`. Curriculum K=1 (12 step) → K=2 (12 step) → K=3 (15 step) with optimizer rebuild at transitions. Bundle C off for v1 (LPIPS-native ν assumes fixed W).
+
+### Approved cost model
+| Phase | Cost |
+|---|---|
+| Prescreen (1 fwd × ~100 frames) | ~5 min |
+| K=1 joint (12 × 2 schedules × 3s) | ~1.2 min |
+| K=2 joint (12 × 4 × 3s) | ~2.4 min |
+| K=3 joint (15 × 8 × 3s) | ~6 min |
+| Local refine (27 × 6-step × 3s, joint not independent) | ~8 min |
+| Final 30-step Stage 14 | ~40 min |
+| **TOTAL** | **~63 min/clip (codex says budget 2-4h/clip until proven)** |
+
+vs current 9h brute-force = ~5-9x speedup.
+
+### Codex R4 implementation roadmap (for execution outside loop)
+1. **Refactor**: extract `build_attack_state_from_W(W_clean, x_clean, pseudo_masks, config) -> AttackState` and `stage14_forward_loss(attack_state, anchor, delta, alpha_logits, warp_s, warp_r, R, nu, config) -> (L_total, diagnostics)` from `_run_oracle_trajectory_pgd`. Existing function becomes thin wrapper.
+2. **Implement**: `memshield/joint_placement_search.py` with `joint_curriculum_search(...)` API; ordered-by-construction τ; discrete schedule interpolation; curriculum + optimizer rebuild; prescreen for init; 27-triple local refine; final 30-step Stage 14.
+3. **Tests** (mandatory): fixed-W parity (old wrapper ≡ new helpers), schedule weight sum, ordered-τ legality, joint-loop smoke through K transitions, R active-slice mask, Bundle C incompatibility guard.
+4. **Driver**: add `--placement-search joint_curriculum` flag; mutually exclusive with `--use-profiled-placement`.
+5. **Dog parity test**: target J-drop ≥ 0.64 (within 0.03 of brute-force 0.667). If lower, multi-seed fallback (2 more prescreen seeds).
+6. **Codex code review** before push.
+
+### Bundle C incompatibility note
+`find_max_feasible_nu_scale` uses fixed-W LPIPS line-search. Joint search varies W per step → multiple schedules with different decoy_seeds → LPIPS line-search would need re-anchor per schedule. Out of scope for v1. Add explicit guard: if `--placement-search joint_curriculum` + `--oracle-traj-nu-lpips-native` both set → raise.
+
+### Status
+- Loop terminated at R3 with positive verdict. status="completed".
+- Implementation = NEW sub-session 7 (replacing original "final pilot + decision" — that gets pushed to ss8).
+- GPU 1 dog/camel/blackswan brute-force profile continues for oracle calibration (~22:00-04:00 ETA).
+- GPU 0 free for joint-search experiments.
+- Pre-committed Round 5 6th-and-FINAL criterion unchanged.
