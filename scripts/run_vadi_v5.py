@@ -2467,12 +2467,23 @@ def run_v5_for_clip(
     sam2_eval_fn: Optional[Callable] = None,
     W_clean_override: Optional[Sequence[int]] = None,
     seed_only: bool = False,
+    placement_search: str = "off",
+    placement_search_prescreen_seed: int = 0,
+    placement_search_candidate_stride: int = 1,
+    placement_search_cache_size: int = 64,
 ) -> V5ClipOutput:
     """Top-level single-clip v5 orchestrator.
 
-    Pipeline: clean-SAM2 pass → vulnerability score → placement →
-    decoy-seed construction → 3-stage PGD/Adam → export uint8 →
-    exported J-drop.
+    Pipeline: clean-SAM2 pass → (placement OR joint search) → decoy-seed
+    construction → 3-stage PGD/Adam → optional Stage-14 polish → export
+    uint8 → exported J-drop.
+
+    `placement_search`: "off" uses the legacy `W_clean_override` /
+    vulnerability-scorer branches. "joint_curriculum" calls
+    `memshield.joint_placement_search.joint_curriculum_search` to auto-
+    discover W via curriculum joint placement-perturbation optimization
+    (auto-review-loop R6 GO design). Mutual exclusion with
+    `W_clean_override` and Bundle C are enforced upstream by the driver.
     """
     config = config or VADIv5Config()
     rng = rng if rng is not None else np.random.default_rng(config.seed)
@@ -2483,7 +2494,51 @@ def run_v5_for_clip(
     T_clean = x_clean.shape[0]
 
     # --- placement ---
-    if W_clean_override is not None:
+    # ss7 R6 GO: joint curriculum placement-perturbation search (also
+    # supersedes the override + scorer paths). Bundle C mutex enforced
+    # upstream in main().
+    joint_search_result = None
+    if placement_search == "joint_curriculum":
+        if W_clean_override is not None:
+            raise ValueError(
+                "placement_search='joint_curriculum' is mutually exclusive "
+                "with W_clean_override.")
+        from memshield.joint_placement_search import (
+            joint_curriculum_search as _joint_search,
+        )
+        # Build an early forward_fn for the search (W argument is ignored
+        # by VADIForwardFn so the placeholder is harmless; the legacy
+        # path rebuilds with the actual W_attacked at line ~2680).
+        early_forward_fn = forward_fn_builder(
+            x_clean=x_clean, prompt_mask=prompt_mask,
+            W=[1 + i * (max(min_gap, 2)) for i in range(K_ins)],
+        )
+        joint_search_result = _joint_search(
+            x_clean, clean_out.pseudo_masks, config,
+            forward_fn=early_forward_fn, lpips_fn=lpips_fn,
+            K=int(K_ins), d_min=int(min_gap),
+            bridge_length=int(config.oracle_traj_bridge_length),
+            prescreen_seed_index=int(placement_search_prescreen_seed),
+            candidate_stride=int(placement_search_candidate_stride),
+            cache_max_size=int(placement_search_cache_size),
+        )
+        W_clean = sorted(int(c) for c in joint_search_result.chosen_W_clean)
+        if len(W_clean) != K_ins:
+            raise RuntimeError(
+                f"joint_curriculum_search returned {len(W_clean)} positions; "
+                f"expected K_ins={K_ins}")
+        for c in W_clean:
+            if not (1 <= c < T_clean):
+                raise ValueError(
+                    f"joint_curriculum_search chose c={c} out of "
+                    f"[1, {T_clean})")
+        for i in range(1, len(W_clean)):
+            if W_clean[i] - W_clean[i - 1] < min_gap:
+                raise ValueError(
+                    f"joint_curriculum_search violates min_gap={min_gap}: "
+                    f"{W_clean[i-1]} and {W_clean[i]}")
+        placement_source = "joint_curriculum"
+    elif W_clean_override is not None:
         W_clean = sorted(int(c) for c in W_clean_override)
         if len(W_clean) != K_ins:
             raise ValueError(
@@ -2701,6 +2756,73 @@ def run_v5_for_clip(
     polish_reverted = False
     polish_stats: Dict[str, Any] = {}
     polish_logs: List[Dict[str, Any]] = []
+
+    # ss7: persist joint placement search diagnostics into polish_stats
+    # (so per-clip results.json and v5_summary.json carry them).
+    if joint_search_result is not None:
+        # Per codex R3 LOW recommendation: count INWARD-PROJECTION events
+        # AND SINGLETON-CORNER events (distinct: a step can land in the
+        # inward-projection branch and emerge with 1 surviving corner OR
+        # ≥2 surviving corners; conversely a step can have a singleton
+        # without ever needing the inward-projection retry — though
+        # current curriculum_joint_step always retries before accepting
+        # singleton). Also: low raw-weight-mass steps.
+        cur_logs = joint_search_result.curriculum_logs
+        inward_projection_count = sum(
+            1 for L in cur_logs if L.get("inward_projected") is True)
+        singleton_corner_count = sum(
+            1 for L in cur_logs
+            if int(L.get("valid_corner_count", 0)) == 1
+            or L.get("singleton_corner") is True)
+        low_mass_count = sum(
+            1 for L in cur_logs if float(L.get("valid_weight_mass", 1.0))
+            < 0.10)
+        very_low_mass_count = sum(
+            1 for L in cur_logs if float(L.get("valid_weight_mass", 1.0))
+            < 0.05)
+        min_mass = min((float(L.get("valid_weight_mass", 1.0))
+                        for L in cur_logs), default=1.0)
+        polish_stats["joint_search_chosen_W"] = list(
+            joint_search_result.chosen_W_clean)
+        polish_stats["joint_search_prescreen_init_tau"] = list(
+            joint_search_result.prescreen_init_tau)
+        polish_stats["joint_search_refine_W"] = list(
+            joint_search_result.refine_W_clean)
+        polish_stats["joint_search_wall_clock_seconds"] = dict(
+            joint_search_result.wall_clock_seconds)
+        polish_stats["joint_search_cache_hits"] = int(
+            joint_search_result.cache_hits)
+        polish_stats["joint_search_cache_misses"] = int(
+            joint_search_result.cache_misses)
+        polish_stats["joint_search_n_curriculum_steps"] = len(cur_logs)
+        polish_stats["joint_search_inward_projection_count"] = (
+            inward_projection_count)
+        polish_stats["joint_search_singleton_corner_count"] = (
+            singleton_corner_count)
+        polish_stats["joint_search_low_mass_count"] = low_mass_count
+        polish_stats["joint_search_very_low_mass_count"] = (
+            very_low_mass_count)
+        polish_stats["joint_search_min_raw_weight_mass"] = float(min_mass)
+        polish_stats["joint_search_refine_diagnostics"] = (
+            joint_search_result.refine_diagnostics)
+        # Print a concise summary line for the run.log heartbeat / grep.
+        wcs = joint_search_result.wall_clock_seconds
+        wcs_str = " ".join(
+            f"{k}={v:.1f}s" for k, v in wcs.items())
+        cache_total = max(
+            1,
+            joint_search_result.cache_hits
+            + joint_search_result.cache_misses)
+        print(
+            f"[v5] {clip_name}: joint_search W={W_clean} "
+            f"refine_W={joint_search_result.refine_W_clean} "
+            f"min_mass={min_mass:.3f} "
+            f"inward_proj={inward_projection_count} "
+            f"singleton={singleton_corner_count} "
+            f"low_mass={low_mass_count} cache_hit_rate="
+            f"{joint_search_result.cache_hits / cache_total:.2%} "
+            f"{wcs_str}",
+            flush=True)
     if (config.boundary_polish
             and not result.infeasible
             and sam2_eval_fn is not None
@@ -3848,6 +3970,31 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="Path to placement-profile root; per-clip "
                         "<path>/<clip>/profile.json's best.subset is used "
                         "as W_clean_override.")
+    p.add_argument("--placement-search",
+                   choices=["off", "joint_curriculum"], default="off",
+                   help="Algorithmic placement search. 'off' = use "
+                        "--use-profiled-placement or --placement. "
+                        "'joint_curriculum' = auto-discover via the "
+                        "memshield.joint_placement_search curriculum "
+                        "(prescreen + 3-phase joint optimization + "
+                        "27-triple ±1 local refine). Mutually exclusive "
+                        "with --use-profiled-placement and with "
+                        "--oracle-traj-nu-lpips-native.")
+    p.add_argument("--placement-search-prescreen-seed", type=int, default=0,
+                   help="Multi-seed fallback index for the prescreen step "
+                        "(0=top-K, 1=alt seed 1, ...). Used when the dog "
+                        "parity J-drop is > 0.03 below brute-force; rerun "
+                        "with --placement-search-prescreen-seed 1 / 2 to "
+                        "explore alternative starting points before "
+                        "declaring design failure (R3 guardrail #6).")
+    p.add_argument("--placement-search-candidate-stride", type=int, default=1,
+                   help="Stride for the prescreen candidate sweep (1 = "
+                        "every frame). Larger stride speeds up prescreen "
+                        "but coarsens the τ initialization grid.")
+    p.add_argument("--placement-search-cache-size", type=int, default=64,
+                   help="LRU bound for the per-W AttackState cache. "
+                        "Higher = more memory but better hit rate as τ "
+                        "drifts.")
     return p
 
 
@@ -3895,6 +4042,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("[v5] ERROR: --joint-trajectory and --oracle-trajectory "
               "are mutually exclusive (Codex R5 Q3a).", file=sys.stderr)
         return 2
+
+    # ss7 R6 R3 guardrail #3: joint placement search cannot run with the
+    # LPIPS-native ν line-search (Bundle C). The bisection assumes fixed
+    # W; multi-schedule enumeration violates that invariant. Also mutex
+    # with --use-profiled-placement (joint search supersedes both static
+    # placement strategies).
+    if args.placement_search == "joint_curriculum":
+        if args.oracle_traj_nu_lpips_native:
+            print("[v5] ERROR: --placement-search joint_curriculum is "
+                  "incompatible with --oracle-traj-nu-lpips-native "
+                  "(R3 guardrail #3 — Bundle C off for joint search v1).",
+                  file=sys.stderr)
+            return 2
+        if args.use_profiled_placement is not None:
+            print("[v5] ERROR: --placement-search joint_curriculum is "
+                  "mutually exclusive with --use-profiled-placement "
+                  "(joint search auto-discovers placement; profiled "
+                  "placement supplies a fixed W).", file=sys.stderr)
+            return 2
+        if not args.oracle_trajectory:
+            print("[v5] ERROR: --placement-search joint_curriculum "
+                  "requires --oracle-trajectory (Stage 14) since the "
+                  "search optimizes Stage-14 forward losses jointly.",
+                  file=sys.stderr)
+            return 2
 
     all_results: List[V5ClipOutput] = []
     for clip_name in args.clips:
@@ -4003,6 +4175,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                           file=sys.stderr)
                     w_override = None
 
+        # ss7: when --placement-search joint_curriculum, ignore w_override
+        # (mutex enforced upstream so this is always None here, but be
+        # defensive in case future call sites pass both).
+        _w_override = w_override
+        if args.placement_search == "joint_curriculum":
+            _w_override = None
         out = run_v5_for_clip(
             clip_name=clip_name, config_name=config_name,
             x_clean=x_clean, prompt_mask=prompt_mask,
@@ -4014,8 +4192,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             post_insert_radius=args.post_insert_radius,
             rng=rng, config=cfg, out_root=out_root,
             sam2_eval_fn=sam2_eval_fn,
-            W_clean_override=w_override,
+            W_clean_override=_w_override,
             seed_only=args.seed_only,
+            placement_search=args.placement_search,
+            placement_search_prescreen_seed=(
+                args.placement_search_prescreen_seed),
+            placement_search_candidate_stride=(
+                args.placement_search_candidate_stride),
+            placement_search_cache_size=(
+                args.placement_search_cache_size),
         )
         all_results.append(out)
         print(f"[v5] {clip_name}: exported_j_drop="
