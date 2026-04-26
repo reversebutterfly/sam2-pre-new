@@ -1320,9 +1320,26 @@ def joint_curriculum_search(
     lambda_fid_val = float(config.joint_traj_lambda_fid)
     R_lr = float(config.oracle_traj_residual_lr)
     R_eps = float(config.oracle_traj_residual_eps)
-    # v2: tau_lr defaults to 0.05 (codex spec). Simplex slack has
-    # stronger leverage than the old softplus gaps, so we lower the LR.
-    tau_lr = float(getattr(config, "oracle_traj_tau_lr", 0.05))
+    # v2.1 (codex research-review fix): blackswan v2 dog parity revealed
+    # surrogate-gradient misalignment in the curriculum (Adam collapsed
+    # spread prescreen [4,13,21] → cluster [7,9,21]). The simplex
+    # parameterization is healthy (no v1 saturation) but the schedule
+    # loss prefers cluster on blackswan's score landscape.
+    #
+    # Codex remedy: phase-freeze τ in phases 1-2 (don't include p_raw
+    # in optimizer); phase 3 only, allow tiny lr (0.002) for last-mile
+    # local adjustment. Prescreen-dominant placement.
+    tau_lr_phase3 = float(getattr(
+        config, "oracle_traj_tau_lr_phase3", 0.002))
+    tau_freeze_phases: Sequence[int] = list(getattr(
+        config, "oracle_traj_tau_freeze_phases", [1, 2]))
+    # Legacy v2 single-LR knob (used only if user explicitly sets
+    # oracle_traj_tau_lr; otherwise the v2.1 phase-freeze takes over).
+    tau_lr_legacy: Optional[float] = (
+        float(config.oracle_traj_tau_lr)
+        if hasattr(config, "oracle_traj_tau_lr")
+        and getattr(config, "oracle_traj_tau_lr_force_legacy", False)
+        else None)
 
     for phase_idx in range(K):
         t_phase = time.time()
@@ -1341,12 +1358,17 @@ def joint_curriculum_search(
             device=device, dtype=x_clean.dtype,
         )
 
-        # Optimizer rebuild per phase. p_raw is the only τ param.
-        # Pass full traj/edit/R/nu but rely on _zero_inactive_grads
-        # for inactive-slice gating (R uses _apply_R_sign_pgd_active
-        # for strict locality; Adam params are soft-locality).
-        optimizer = torch.optim.Adam([
-            {"params": [tau_params.p_raw], "lr": tau_lr},
+        # v2.1: phase-conditional τ inclusion. Phases listed in
+        # tau_freeze_phases keep τ frozen at prescreen init by NOT
+        # adding p_raw to the optimizer. Phase 3 uses tiny lr.
+        if tau_lr_legacy is not None:
+            tau_lr_this_phase: Optional[float] = tau_lr_legacy
+        elif (phase_idx + 1) in tau_freeze_phases:
+            tau_lr_this_phase = None  # frozen
+        else:
+            tau_lr_this_phase = tau_lr_phase3
+
+        param_groups: List[Dict[str, Any]] = [
             {"params": [traj.anchor_offset],
              "lr": float(config.oracle_traj_anchor_lr)},
             {"params": [traj.delta_offset],
@@ -1356,7 +1378,14 @@ def joint_curriculum_search(
             {"params": [edit_params.warp_s, edit_params.warp_r],
              "lr": float(config.oracle_traj_warp_lr)},
             {"params": [nu], "lr": float(config.oracle_traj_nu_lr_phase_b)},
-        ])
+        ]
+        if tau_lr_this_phase is not None:
+            # Insert at front (matches v2 ordering for Adam state
+            # determinism if user A/B-tests with/without tau_freeze).
+            param_groups.insert(
+                0, {"params": [tau_params.p_raw],
+                    "lr": float(tau_lr_this_phase)})
+        optimizer = torch.optim.Adam(param_groups)
         R_active_in_phase = (R is not None and phase_idx == K - 1)
 
         for step in range(int(phase_steps[phase_idx])):
