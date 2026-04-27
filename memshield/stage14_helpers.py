@@ -440,18 +440,27 @@ class Stage14LossDiagnostics:
                          # Zero tensor when suffix probes are not used
                          # (phase 1-2 of v3 curriculum, or v2 / v2.1
                          # backwards-compat paths).
-    # v4 (Anchored Stage 14, codex spec 2026-04-26): no-regression vs A0
-    # baseline (frozen-nu, no bridge polish) plus explicit suffix gain.
-    # All zero when teacher=None (v3 / v2 backwards-compat path).
+    # v4.x (Anchored Stage 14, codex spec 2026-04-26 / 2026-04-27 v4.1):
+    # no-regression vs A0 baseline (frozen-nu, no bridge polish) plus
+    # explicit suffix gain. All zero when teacher=None (v3 / v2 backwards-
+    # compat path).
     L_keep_margin: Tensor    # mean_t relu(margin_loss_cur - margin_loss_A0)
                               # (penalize when current margin loss exceeds
-                              # A0 -- i.e. attack got weaker than baseline).
-    L_keep_suffix: Tensor    # sum_t relu(u_cur(t) - u_A0(t))
-                              # (penalize when current suffix IoU exceeds
-                              # A0 -- i.e. true-mask retention regressed).
-    L_gain_suffix: Tensor    # sum_t u_cur(t)
-                              # (minimize current suffix IoU directly --
-                              # the explicit attack-improvement term).
+                              # A0 -- i.e. attack got weaker than baseline)
+                              # over insert + bridge_polish frames.
+    L_keep_full: Tensor      # v4.1 hot-fix (codex thread 019dc51a 2026-
+                              # 04-27): MEAN over the DENSE non-insert
+                              # suffix of relu(u_cur(t) - u_A0(t)).
+                              # Previous v4.0 used `L_keep_suffix` over
+                              # only 6 sparse probes (sum) — that surro-
+                              # gate let optimization regress on un-
+                              # monitored frames (dog/bmx-trees revert
+                              # rate 50% on dev-4). v4.1 enforces no-
+                              # regression on the FULL suffix.
+    L_gain_suffix: Tensor    # mean_t u_cur(t) over a SPARSE 6-probe set
+                              # (the explicit attack-improvement term;
+                              # v4.1 changed sum -> mean for clip-length
+                              # invariance).
 
     # Detached / floated diagnostic scalars.
     mean_decoy_overlap: float
@@ -476,22 +485,28 @@ class Stage14LossDiagnostics:
 
 @dataclass
 class Stage14TeacherSignals:
-    """A0-baseline (no Stage 14 polish) per-frame signals for v4 anchoring.
+    """A0-baseline (no Stage 14 polish) per-frame signals for v4.x anchoring.
 
     Fields:
       margin_by_t: per-frame margin_loss tensor at each margin_query_frame.
         Detached. Used as no-regression anchor in L_keep_margin.
       suffix_iou_by_t: per-frame soft-IoU(p_t, m_true_t) under A0 at each
-        suffix probe. Detached. Used as no-regression anchor in
-        L_keep_suffix.
-      suffix_probe_frames: the attacked-space frame indices used as probes
-        (must match what stage14_forward_loss receives via suffix_probe_-
-        frames kwarg).
+        frame in (keep_suffix_frames ∪ gain_suffix_frames). Detached. Used
+        as no-regression anchor in L_keep_full and as A0 reference for
+        diagnostic of L_gain_suffix.
+      keep_suffix_frames: v4.1 DENSE no-regression set — all non-insert
+        attacked-space frames in (w_first+1, T_proc). The fix to v4.0's
+        sparse-probe failure mode (codex thread 019dc51a 2026-04-27).
+      gain_suffix_frames: v4.1 SPARSE gain set — `n_probes` evenly-spaced
+        non-insert frames (typically 6). Provides the directional improve-
+        ment signal without distracting the optimizer with full-suffix
+        improvement noise.
     """
 
     margin_by_t: Dict[int, Tensor]
     suffix_iou_by_t: Dict[int, Tensor]
-    suffix_probe_frames: List[int]
+    keep_suffix_frames: List[int]
+    gain_suffix_frames: List[int]
 
 
 def build_suffix_probe_frames(
@@ -502,6 +517,10 @@ def build_suffix_probe_frames(
 ) -> List[int]:
     """Choose `n_probes` evenly-spaced attacked-space frame indices in
     [w_first+1, T_proc-1], EXCLUDING the inserts themselves (W_attacked).
+
+    v4.1 NOTE: this builds the SPARSE GAIN probe set (formerly used for
+    both keep + gain in v4.0). For the DENSE no-regression set, use
+    `build_keep_suffix_frames`.
 
     Returns sorted attacked-space ints. Duplicates are removed; the function
     is robust to small T_proc / large n_probes (gracefully clipped to all
@@ -518,7 +537,6 @@ def build_suffix_probe_frames(
         return []
     if len(candidates) <= n_probes:
         return sorted(candidates)
-    # Evenly sample n_probes from candidates by index.
     if n_probes == 1:
         return [candidates[len(candidates) // 2]]
     step = (len(candidates) - 1) / (n_probes - 1)
@@ -528,6 +546,27 @@ def build_suffix_probe_frames(
     return selected
 
 
+def build_keep_suffix_frames(
+    W_attacked: Sequence[int],
+    T_proc: int,
+) -> List[int]:
+    """v4.1: build the DENSE no-regression set — every non-insert attacked-
+    space frame in [w_first+1, T_proc-1].
+
+    Codex hot-fix 2026-04-27 (thread 019dc51a). v4.0 used only 6 sparse
+    probes for the no-regression term, which let optimization regress on
+    the unmonitored 67-77% of suffix frames (dog/bmx-trees dev-4 revert
+    rate = 50%). v4.1 enforces no-regression on the FULL suffix.
+
+    Returns sorted attacked-space ints, excluding W_attacked.
+    """
+    if not W_attacked:
+        return []
+    W_set = set(int(w) for w in W_attacked)
+    w_first = min(int(w) for w in W_attacked)
+    return [t for t in range(w_first + 1, T_proc) if t not in W_set]
+
+
 def build_stage14_teacher_signals(
     state: "AttackState",
     *,
@@ -535,7 +574,8 @@ def build_stage14_teacher_signals(
     nu_teacher: Tensor,
     forward_fn: Any,
     config: Any,
-    suffix_probe_frames: Sequence[int],
+    keep_suffix_frames: Sequence[int],
+    gain_suffix_frames: Sequence[int],
 ) -> Stage14TeacherSignals:
     """Compute A0 baseline teacher signals via no_grad SAM2 forward.
 
@@ -544,8 +584,12 @@ def build_stage14_teacher_signals(
     "K3 insert-only" reference whose mean J-drop ≈ 0.537 set the v4 no-
     regression target.
 
+    v4.1: takes BOTH keep_suffix_frames (dense) and gain_suffix_frames
+    (sparse). The teacher forward computes IoU on the union; the loss
+    splits the IoU dict by the two frame lists.
+
     Returns Stage14TeacherSignals with detached per-frame margin tensors
-    and detached per-probe suffix IoU tensors.
+    and detached per-frame suffix IoU tensors over the union.
     """
     device = x_clean.device
     with torch.no_grad():
@@ -558,11 +602,13 @@ def build_stage14_teacher_signals(
         processed_t = build_processed(
             x_full_t, inserts_t, state.W_attacked)
 
+        suffix_union = sorted(set(
+            int(t) for t in list(keep_suffix_frames) + list(gain_suffix_frames)
+            if 0 <= int(t) < state.T_proc
+        ))
         return_at_set = set(int(t) for t in state.margin_query_frames)
-        for t in suffix_probe_frames:
-            t_int = int(t)
-            if 0 <= t_int < state.T_proc:
-                return_at_set.add(t_int)
+        for t in suffix_union:
+            return_at_set.add(int(t))
         return_at_list = sorted(return_at_set)
         logits_by_t_t, _ = forward_fn.forward_with_objectness(
             processed_t, return_at=return_at_list,
@@ -584,7 +630,7 @@ def build_stage14_teacher_signals(
             margins_by_t[t_int] = fmo.margin_loss.detach()
 
         suffix_iou_by_t: Dict[int, Tensor] = {}
-        for t in suffix_probe_frames:
+        for t in suffix_union:
             t_int = int(t)
             if (t_int not in state.m_true_by_t
                     or t_int not in logits_by_t_t):
@@ -599,7 +645,8 @@ def build_stage14_teacher_signals(
     return Stage14TeacherSignals(
         margin_by_t=margins_by_t,
         suffix_iou_by_t=suffix_iou_by_t,
-        suffix_probe_frames=sorted(int(t) for t in suffix_probe_frames),
+        keep_suffix_frames=sorted(int(t) for t in keep_suffix_frames),
+        gain_suffix_frames=sorted(int(t) for t in gain_suffix_frames),
     )
 
 
@@ -620,7 +667,9 @@ def stage14_forward_loss(
     lambda_suffix: float = 0.0,
     teacher: Optional[Stage14TeacherSignals] = None,
     lambda_keep_margin: float = 0.0,
-    lambda_keep_suffix: float = 0.0,
+    keep_suffix_frames: Optional[Sequence[int]] = None,
+    gain_suffix_frames: Optional[Sequence[int]] = None,
+    lambda_keep_full: float = 0.0,
     lambda_gain_suffix: float = 0.0,
     margin_loss_scale: float = 1.0,
 ) -> Tuple[Tensor, Stage14LossDiagnostics, Tensor]:
@@ -647,21 +696,28 @@ def stage14_forward_loss(
 
     v4 (Anchored Stage 14, codex 2026-04-26):
       `teacher` (precomputed via `build_stage14_teacher_signals`) anchors
-      the optimization to the A0 baseline (frozen-nu, no bridge polish):
+      the optimization to the A0 baseline (frozen-nu, no bridge polish).
+
+    v4.1 hot-fix (codex 2026-04-27, thread 019dc51a, dev-4 revert
+    diagnosis): SPLIT the suffix term into a DENSE no-regression
+    constraint and a SPARSE gain term. v4.0 used 6 sparse probes for
+    BOTH no-regression and gain — the sparsity allowed optimization to
+    regress on the unmonitored ~70% of suffix frames (dog/bmx-trees
+    50% revert rate on dev-4).
         L_keep_margin = mean_t relu(margin_loss_cur(t) - margin_loss_A0(t))
-                        -- penalize when current attack-margin loss is
-                           ABOVE A0's (i.e., attack got weaker).
-        L_keep_suffix = sum_t  relu(u_cur(t) - u_A0(t))
-                        -- penalize when current suffix IoU exceeds A0
-                           (i.e., true-mask retention regressed).
-        L_gain_suffix = sum_t  u_cur(t)
-                        -- minimize current suffix IoU directly (the
-                           attack-improvement term).
-      `margin_loss_scale` rescales the existing aggregate L_margin term
-      (so that v4 can attenuate it relative to the keep_margin no-
-      regression term, matching codex's recommended 0.10-0.30 range).
-      Defaults (`teacher=None`, all four kwargs at their zero/identity
-      defaults) reproduce v3 / v2 behavior exactly.
+                        -- attacked-window no-regression (insert + bridge_polish).
+        L_keep_full   = mean_t relu(u_cur(t) - u_A0(t))                       (v4.1)
+                        -- DENSE suffix no-regression. mean over
+                           `keep_suffix_frames` (typically all non-insert
+                           suffix frames).
+        L_gain_suffix = mean_t u_cur(t)                                       (v4.1)
+                        -- SPARSE gain. mean over `gain_suffix_frames`
+                           (typically 6 evenly-spaced probes).
+      `margin_loss_scale` rescales the existing aggregate L_margin term.
+      Codex v4.1 recommends margin_scale=0.05 (down from v4.0's 0.10) to
+      further reduce local-surrogate dominance vs. the dense no-regression.
+      Defaults (`teacher=None`, all v4 kwargs zero) reproduce v3 / v2
+      behavior exactly.
     """
     device = x_clean.device
     dtype = x_clean.dtype
@@ -773,6 +829,9 @@ def stage14_forward_loss(
     # 5. Forward + losses.
     # v3: extend return_at with suffix probe frames so we get logits for
     # soft-IoU at suffix-aware probes WITHOUT a second forward call.
+    # v4.1: also include keep_suffix_frames (dense) and gain_suffix_frames
+    # (sparse) in the return_at set so the L_keep_full / L_gain_suffix
+    # terms can score IoU on those frames in the same forward.
     return_at_set = set(int(t) for t in state.margin_query_frames)
     suffix_probes_clean: List[int] = []
     if suffix_probe_frames:
@@ -780,6 +839,16 @@ def stage14_forward_loss(
             t_int = int(t)
             if 0 <= t_int < state.T_proc:
                 suffix_probes_clean.append(t_int)
+                return_at_set.add(t_int)
+    if keep_suffix_frames:
+        for t in keep_suffix_frames:
+            t_int = int(t)
+            if 0 <= t_int < state.T_proc:
+                return_at_set.add(t_int)
+    if gain_suffix_frames:
+        for t in gain_suffix_frames:
+            t_int = int(t)
+            if 0 <= t_int < state.T_proc:
                 return_at_set.add(t_int)
     return_at_list = sorted(return_at_set)
     logits_by_t, obj_score_by_t = forward_fn.forward_with_objectness(
@@ -877,44 +946,55 @@ def stage14_forward_loss(
     # term aligns the placement gradient with the global mean-J-drop
     # objective, which the local L_margin surrogate alone misses on
     # clips with sharp local fragility (e.g. blackswan).
-    # v3/v4 per-probe soft-IoU computation.
-    # Cache per-probe iou values so v4 keep_suffix / gain_suffix can reuse
-    # them without a second pass through logits_by_t.
+    # v4.1: compute soft-IoU on UNION of all suffix-related frames in a
+    # single pass (covers v3's `suffix_probes_clean`, v4.1's
+    # `keep_suffix_frames` (dense), and `gain_suffix_frames` (sparse)).
+    # logits_by_t already contains all of these per the return_at_set
+    # accumulation earlier in this fn.
     suffix_iou_cur_by_t: Dict[int, Tensor] = {}
-    if suffix_probes_clean:
-        for t in suffix_probes_clean:
-            t_int = int(t)
-            if t_int not in state.m_true_by_t:
-                continue
-            if t_int not in logits_by_t:
-                continue
-            p_t = torch.sigmoid(logits_by_t[t_int]).flatten()
-            m_t = state.m_true_by_t[t_int].flatten().float()
-            inter = (p_t * m_t).sum()
-            union = (p_t + m_t - p_t * m_t).sum()
-            iou = inter / union.clamp_min(1e-6)
-            suffix_iou_cur_by_t[t_int] = iou
+    keep_clean = sorted(set(int(t) for t in (keep_suffix_frames or [])
+                            if 0 <= int(t) < state.T_proc))
+    gain_clean = sorted(set(int(t) for t in (gain_suffix_frames or [])
+                            if 0 <= int(t) < state.T_proc))
+    iou_union = sorted(set(suffix_probes_clean) | set(keep_clean)
+                       | set(gain_clean))
+    for t in iou_union:
+        t_int = int(t)
+        if t_int not in state.m_true_by_t:
+            continue
+        if t_int not in logits_by_t:
+            continue
+        p_t = torch.sigmoid(logits_by_t[t_int]).flatten()
+        m_t = state.m_true_by_t[t_int].flatten().float()
+        inter = (p_t * m_t).sum()
+        union = (p_t + m_t - p_t * m_t).sum()
+        iou = inter / union.clamp_min(1e-6)
+        suffix_iou_cur_by_t[t_int] = iou
 
     # v3 (Coverage-Constrained Joint Suffix Optimization, codex spec):
     # soft-IoU of true-mask retention at sparse probe frames spanning
-    # the attacked-suffix horizon. The inserted-perturbation pipeline
-    # tries to MINIMIZE this term (low IoU = SAM2 lost the true object
-    # at that probe = good attack at that horizon point). The suffix
-    # term aligns the placement gradient with the global mean-J-drop
-    # objective, which the local L_margin surrogate alone misses on
-    # clips with sharp local fragility (e.g. blackswan).
-    if suffix_iou_cur_by_t and lambda_suffix > 0.0:
-        L_suffix = torch.stack(list(suffix_iou_cur_by_t.values()),
-                               dim=0).sum()
+    # the attacked-suffix horizon. Backwards-compat path used by joint
+    # placement search.
+    if suffix_probes_clean and lambda_suffix > 0.0:
+        v3_terms = [suffix_iou_cur_by_t[t] for t in suffix_probes_clean
+                    if t in suffix_iou_cur_by_t]
+        if v3_terms:
+            L_suffix = torch.stack(v3_terms, dim=0).sum()
+        else:
+            L_suffix = torch.zeros((), dtype=dtype, device=device)
     else:
         L_suffix = torch.zeros((), dtype=dtype, device=device)
 
-    # v4 (Anchored Stage 14): no-regression vs A0 + explicit suffix gain.
+    # v4.x (Anchored Stage 14): no-regression vs A0 + explicit suffix gain.
     # Active only when teacher is supplied AND the corresponding lambda is
     # > 0. Each term is computed as a separate scalar tensor so it shows up
     # individually in diagnostics for trace plots.
+    #
+    # v4.1 hot-fix (codex 2026-04-27): L_keep_full is computed as the MEAN
+    # over the DENSE keep_suffix_frames (replaces v4.0's sum over 6 sparse
+    # probes). L_gain_suffix is now MEAN over the SPARSE gain_suffix_frames.
     L_keep_margin = torch.zeros((), dtype=dtype, device=device)
-    L_keep_suffix = torch.zeros((), dtype=dtype, device=device)
+    L_keep_full = torch.zeros((), dtype=dtype, device=device)
     L_gain_suffix = torch.zeros((), dtype=dtype, device=device)
     if teacher is not None:
         if lambda_keep_margin > 0.0 and teacher.margin_by_t:
@@ -932,9 +1012,9 @@ def stage14_forward_loss(
                 keep_terms.append(torch.relu(m_cur - m_A0))
             if keep_terms:
                 L_keep_margin = torch.stack(keep_terms, dim=0).mean()
-        if lambda_keep_suffix > 0.0 and teacher.suffix_iou_by_t:
-            ks_terms: List[Tensor] = []
-            for t in suffix_probes_clean:
+        if lambda_keep_full > 0.0 and teacher.suffix_iou_by_t and keep_clean:
+            kf_terms: List[Tensor] = []
+            for t in keep_clean:
                 t_int = int(t)
                 if t_int not in suffix_iou_cur_by_t:
                     continue
@@ -942,12 +1022,14 @@ def stage14_forward_loss(
                     continue
                 u_cur = suffix_iou_cur_by_t[t_int]
                 u_A0 = teacher.suffix_iou_by_t[t_int]
-                ks_terms.append(torch.relu(u_cur - u_A0))
-            if ks_terms:
-                L_keep_suffix = torch.stack(ks_terms, dim=0).sum()
-        if lambda_gain_suffix > 0.0 and suffix_iou_cur_by_t:
-            L_gain_suffix = torch.stack(
-                list(suffix_iou_cur_by_t.values()), dim=0).sum()
+                kf_terms.append(torch.relu(u_cur - u_A0))
+            if kf_terms:
+                L_keep_full = torch.stack(kf_terms, dim=0).mean()
+        if lambda_gain_suffix > 0.0 and gain_clean:
+            gain_terms = [suffix_iou_cur_by_t[t] for t in gain_clean
+                          if t in suffix_iou_cur_by_t]
+            if gain_terms:
+                L_gain_suffix = torch.stack(gain_terms, dim=0).mean()
 
     L = (
         float(margin_loss_scale) * config.oracle_traj_lambda_margin * L_margin
@@ -960,7 +1042,7 @@ def stage14_forward_loss(
         + L_traj
         + float(lambda_suffix) * L_suffix
         + float(lambda_keep_margin) * L_keep_margin
-        + float(lambda_keep_suffix) * L_keep_suffix
+        + float(lambda_keep_full) * L_keep_full
         + float(lambda_gain_suffix) * L_gain_suffix
     )
 
@@ -1014,7 +1096,7 @@ def stage14_forward_loss(
         L_alpha=L_alpha, L_warp=L_warp, L_traj=L_traj, L_R_tv=L_R_tv,
         L_suffix=L_suffix,
         L_keep_margin=L_keep_margin,
-        L_keep_suffix=L_keep_suffix,
+        L_keep_full=L_keep_full,
         L_gain_suffix=L_gain_suffix,
         mean_decoy_overlap=float(mean_decoy_overlap),
         mean_true_overlap=float(mean_true_overlap),
@@ -1373,8 +1455,8 @@ class _StubForwardFn:
 
 def _test_v4_teacher_zero_regression() -> None:
     """When current logits == A0 logits (stubbed), L_keep_margin and
-    L_keep_suffix must be exactly zero (sign sanity), and L_gain_suffix
-    equals sum_t soft-IoU(A0)."""
+    L_keep_full must be exactly zero (sign sanity), and L_gain_suffix
+    equals MEAN_t soft-IoU(A0) over gain probes (v4.1 mean, not sum)."""
     torch.manual_seed(123)
     np.random.seed(123)
     T_clean, H, W = 18, 24, 24
@@ -1390,34 +1472,37 @@ def _test_v4_teacher_zero_regression() -> None:
     W_clean = [5, 9, 14]
     state = build_attack_state_from_W(W_clean, x_clean, pseudo_masks, cfg)
 
-    # Build canned logits: random per t (but identical across A0 / current).
+    # v4.1: keep set = DENSE non-insert suffix; gain set = sparse 4 probes.
+    keep_frames = build_keep_suffix_frames(state.W_attacked, state.T_proc)
+    gain_probes = build_suffix_probe_frames(
+        state.W_attacked, state.T_proc, n_probes=4)
+    assert len(keep_frames) >= len(gain_probes), (
+        "v4.1 dense keep should cover at least as many frames as sparse gain")
+
     logits_per_t: Dict[int, Tensor] = {}
     obj_per_t: Dict[int, float] = {}
-    all_t = sorted(set(state.margin_query_frames) | set(state.bridge_polish))
+    all_t = sorted(set(state.margin_query_frames) | set(state.bridge_polish)
+                   | set(keep_frames) | set(gain_probes))
     for t in all_t:
         logits_per_t[t] = torch.randn(H, W) * 0.5
         obj_per_t[t] = 0.5
-    # Suffix probes too.
-    probes = build_suffix_probe_frames(
-        state.W_attacked, state.T_proc, n_probes=4)
-    for t in probes:
-        if t not in logits_per_t:
-            logits_per_t[t] = torch.randn(H, W) * 0.5
 
     forward_fn = _StubForwardFn(logits_per_t, obj_per_t)
 
-    # nu_teacher = nu = zeros (so identical inputs).
     nu = torch.zeros_like(state.decoy_seeds)
     teacher = build_stage14_teacher_signals(
         state, x_clean=x_clean, nu_teacher=nu, forward_fn=forward_fn,
-        config=cfg, suffix_probe_frames=probes,
+        config=cfg,
+        keep_suffix_frames=keep_frames,
+        gain_suffix_frames=gain_probes,
     )
     assert len(teacher.suffix_iou_by_t) > 0, (
         "teacher suffix IoUs not populated")
     assert len(teacher.margin_by_t) > 0, (
         "teacher margin tensors not populated")
+    assert teacher.keep_suffix_frames == sorted(keep_frames)
+    assert teacher.gain_suffix_frames == sorted(gain_probes)
 
-    # Build Stage 14 inputs (traj/edit_params/R minimal).
     K = state.K
     L_max = state.L_max
     traj = FalseTrajectoryParams(
@@ -1445,25 +1530,33 @@ def _test_v4_teacher_zero_regression() -> None:
         state, x_clean=x_clean, traj=traj, edit_params=edit, R=None, nu=nu,
         forward_fn=forward_fn, lpips_fn=lpips_stub, config=cfg,
         lambda_fid_val=1.0,
-        suffix_probe_frames=probes, lambda_suffix=0.0,
+        suffix_probe_frames=None, lambda_suffix=0.0,
         teacher=teacher,
-        lambda_keep_margin=1.0, lambda_keep_suffix=10.0,
-        lambda_gain_suffix=2.0, margin_loss_scale=0.1,
+        keep_suffix_frames=keep_frames, gain_suffix_frames=gain_probes,
+        lambda_keep_margin=1.0,
+        lambda_keep_full=25.0,
+        lambda_gain_suffix=2.0,
+        margin_loss_scale=0.05,
     )
 
     L_keep_margin_val = float(diag.L_keep_margin.detach().item())
-    L_keep_suffix_val = float(diag.L_keep_suffix.detach().item())
+    L_keep_full_val = float(diag.L_keep_full.detach().item())
     L_gain_suffix_val = float(diag.L_gain_suffix.detach().item())
     assert L_keep_margin_val < 1e-5, (
         f"L_keep_margin should be 0 (cur==A0), got {L_keep_margin_val}")
-    assert L_keep_suffix_val < 1e-5, (
-        f"L_keep_suffix should be 0 (cur==A0), got {L_keep_suffix_val}")
-    # Gain term equals sum of A0 suffix IoUs.
-    expected_gain = float(sum(
-        v.item() for v in teacher.suffix_iou_by_t.values()))
+    assert L_keep_full_val < 1e-5, (
+        f"L_keep_full should be 0 (cur==A0), got {L_keep_full_val}")
+    # v4.1: L_gain_suffix == MEAN over gain probe IoUs from teacher.
+    gain_iou_vals = [
+        teacher.suffix_iou_by_t[t].item()
+        for t in teacher.gain_suffix_frames
+        if t in teacher.suffix_iou_by_t
+    ]
+    expected_gain = sum(gain_iou_vals) / max(1, len(gain_iou_vals))
     assert abs(L_gain_suffix_val - expected_gain) < 1e-3, (
-        f"L_gain_suffix={L_gain_suffix_val} != expected={expected_gain}")
-    print("  v4 teacher zero-regression OK")
+        f"L_gain_suffix={L_gain_suffix_val} != expected mean={expected_gain}")
+    print("  v4.1 teacher zero-regression OK "
+          f"(keep_full=0, gain_suffix mean={L_gain_suffix_val:.4f})")
 
 
 def _test_v4_keep_margin_sign_sanity() -> None:
@@ -1506,7 +1599,7 @@ def _test_v4_keep_margin_sign_sanity() -> None:
     teacher = build_stage14_teacher_signals(
         state, x_clean=x_clean, nu_teacher=nu,
         forward_fn=_StubForwardFn(logits_A0, obj), config=cfg,
-        suffix_probe_frames=[],
+        keep_suffix_frames=[], gain_suffix_frames=[],
     )
 
     # Confirm teacher per-frame margin_loss is small (strong A0).
@@ -1542,18 +1635,149 @@ def _test_v4_keep_margin_sign_sanity() -> None:
         state, x_clean=x_clean, traj=traj, edit_params=edit, R=None, nu=nu,
         forward_fn=_StubForwardFn(logits_cur, obj), lpips_fn=lpips_stub,
         config=cfg, lambda_fid_val=1.0,
-        suffix_probe_frames=[], lambda_suffix=0.0,
+        suffix_probe_frames=None, lambda_suffix=0.0,
         teacher=teacher,
-        lambda_keep_margin=1.0, lambda_keep_suffix=0.0,
-        lambda_gain_suffix=0.0, margin_loss_scale=0.1,
+        keep_suffix_frames=[], gain_suffix_frames=[],
+        lambda_keep_margin=1.0, lambda_keep_full=0.0,
+        lambda_gain_suffix=0.0, margin_loss_scale=0.05,
     )
 
     keep_margin = float(diag.L_keep_margin.detach().item())
     assert keep_margin > 0.0, (
         f"L_keep_margin should be > 0 when current is weaker than A0; "
         f"got {keep_margin} (teacher margin mean = {teacher_margin_means})")
-    print(f"  v4 L_keep_margin sign sanity OK "
+    print(f"  v4.1 L_keep_margin sign sanity OK "
           f"(current_weaker -> L_keep_margin = {keep_margin:.4f})")
+
+
+def _test_v41_dense_keep_frames() -> None:
+    """v4.1 build_keep_suffix_frames returns ALL non-insert suffix frames.
+
+    Critical invariant: dense keep set is a SUPERSET of any sparse gain
+    probes drawn from the same suffix region (so the teacher's IoU dict
+    populated for keep frames covers all gain frames too).
+    """
+    W_attacked = [5, 13, 22]
+    T_proc = 33
+    keep = build_keep_suffix_frames(W_attacked, T_proc)
+    # Expect every t in (5+1, T_proc) excluding {5, 13, 22}
+    expected = [t for t in range(6, T_proc) if t not in W_attacked]
+    assert keep == expected, f"keep frames mismatch: got {keep} expected {expected}"
+    assert all(t not in W_attacked for t in keep)
+    assert all(min(W_attacked) < t < T_proc for t in keep)
+    # Sparse gain must be a subset of dense keep (they share the same
+    # candidate filter: non-insert + suffix range).
+    gain = build_suffix_probe_frames(W_attacked, T_proc, n_probes=6)
+    assert set(gain).issubset(set(keep)), (
+        f"sparse gain probes {gain} must be subset of dense keep {keep}")
+    print(f"  v4.1 dense keep_suffix_frames OK "
+          f"(|keep|={len(keep)}, |gain|={len(gain)}, gain subset of keep)")
+
+
+def _test_v41_keep_full_dense_semantics() -> None:
+    """v4.1 L_keep_full activates per-frame across the dense suffix.
+
+    Setup: A0 logits favor decoy on ALL suffix frames, current logits favor
+    true mask on a subset of suffix frames (mimicking 'optimization made
+    keep frames worse than A0 on a subset'). L_keep_full should be > 0
+    proportional to the regressing-frame fraction.
+
+    Compare against v4.0 sparse-probe behavior: if gain set is sparse and
+    the regressing frames happen to fall outside the sparse probes, v4.0
+    L_keep_suffix would be ZERO. v4.1 L_keep_full sees the regression.
+    """
+    torch.manual_seed(42)
+    np.random.seed(42)
+    T_clean, H, W = 16, 16, 16
+    x_clean = torch.rand(T_clean, H, W, 3)
+    pseudo_masks = []
+    for t in range(T_clean):
+        m = np.zeros((H, W), dtype=np.float32)
+        m[6:10, 4:8] = 1.0
+        pseudo_masks.append(m)
+
+    cfg = _DummyConfig()
+    W_clean = [3, 7, 12]
+    state = build_attack_state_from_W(W_clean, x_clean, pseudo_masks, cfg)
+
+    keep_frames = build_keep_suffix_frames(state.W_attacked, state.T_proc)
+    gain_probes = build_suffix_probe_frames(
+        state.W_attacked, state.T_proc, n_probes=2)
+    obj = {t: 0.5 for t in state.bridge_polish}
+
+    # A0 logits: strong attack everywhere (decoy wins on all suffix).
+    logits_A0 = {}
+    for t in sorted(set(state.margin_query_frames) | set(keep_frames)
+                    | set(gain_probes)):
+        l = torch.full((H, W), -3.0)
+        l[6:10, 8:12] = 3.0   # decoy wins
+        logits_A0[t] = l
+
+    # Current logits: regress on keep frames NOT in gain probe set.
+    logits_cur = dict(logits_A0)
+    regressing = [t for t in keep_frames if t not in gain_probes]
+    assert len(regressing) > 0, "test setup needs regressing-only frames"
+    for t in regressing:
+        l = torch.full((H, W), -3.0)
+        l[6:10, 4:8] = 3.0    # true mask wins -> attack regressed
+        l[6:10, 8:12] = -3.0
+        logits_cur[t] = l
+
+    nu = torch.zeros_like(state.decoy_seeds)
+    teacher = build_stage14_teacher_signals(
+        state, x_clean=x_clean, nu_teacher=nu,
+        forward_fn=_StubForwardFn(logits_A0, obj), config=cfg,
+        keep_suffix_frames=keep_frames,
+        gain_suffix_frames=gain_probes,
+    )
+
+    K = state.K
+    L_max = state.L_max
+    traj = FalseTrajectoryParams(
+        anchor_offset=torch.zeros(K, 2),
+        delta_offset=torch.zeros(K, L_max, 2),
+        L=int(L_max),
+    )
+
+    @dataclass
+    class _EditParams:
+        alpha_logits: Tensor
+        warp_s: Tensor
+        warp_r: Tensor
+
+    edit = _EditParams(
+        alpha_logits=torch.full((K, L_max), -3.0),
+        warp_s=torch.zeros(K, L_max),
+        warp_r=torch.zeros(K, L_max),
+    )
+
+    def lpips_stub(a, b):
+        return torch.zeros((), dtype=x_clean.dtype, device=x_clean.device)
+
+    L, diag, _ = stage14_forward_loss(
+        state, x_clean=x_clean, traj=traj, edit_params=edit, R=None, nu=nu,
+        forward_fn=_StubForwardFn(logits_cur, obj), lpips_fn=lpips_stub,
+        config=cfg, lambda_fid_val=1.0,
+        suffix_probe_frames=None, lambda_suffix=0.0,
+        teacher=teacher,
+        keep_suffix_frames=keep_frames,
+        gain_suffix_frames=gain_probes,
+        lambda_keep_margin=0.0,    # isolate L_keep_full effect
+        lambda_keep_full=25.0,
+        lambda_gain_suffix=0.0,
+        margin_loss_scale=0.0,
+    )
+
+    keep_full = float(diag.L_keep_full.detach().item())
+    # Expect L_keep_full > 0: regressing frames have IoU(cur) >> IoU(A0).
+    # Specifically, fraction of frames regressing = len(regressing)/len(keep).
+    frac = len(regressing) / max(1, len(keep_frames))
+    assert keep_full > 0.05, (
+        f"L_keep_full should detect regression on {len(regressing)}"
+        f"/{len(keep_frames)} frames ({frac:.2%}); got {keep_full:.4f}")
+    print(f"  v4.1 L_keep_full dense-coverage OK "
+          f"(regressing={len(regressing)}/{len(keep_frames)}, "
+          f"L_keep_full={keep_full:.4f})")
 
 
 def _self_test() -> None:
@@ -1565,8 +1789,10 @@ def _self_test() -> None:
     _test_remap_masks_processed_space_inline()
     _test_supervision_masks_insert_override()
     _test_v4_suffix_probe_builder()
+    _test_v41_dense_keep_frames()
     _test_v4_teacher_zero_regression()
     _test_v4_keep_margin_sign_sanity()
+    _test_v41_keep_full_dense_semantics()
     print("memshield.stage14_helpers: all self-tests PASSED")
 
 

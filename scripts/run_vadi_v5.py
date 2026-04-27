@@ -329,19 +329,24 @@ class VADIv5Config:
 
     # v4 Anchored Stage 14 (codex thread 019dc51a 2026-04-26): A0 baseline
     # (frozen-nu, no bridge polish) anchors the optimization with no-
-    # regression losses + explicit suffix gain. Defaults below give
-    # backwards-compat (v3 / v2 behavior) when oracle_traj_v4_use_teacher_-
-    # anchor=False. CLI flag --oracle-traj-v4 enables the v4 path with
-    # the recommended weights (lambda_keep_margin=1.0, lambda_keep_suffix=
-    # 10.0, lambda_gain_suffix=2.0, margin_scale=0.10) and freezes ν for
-    # the entire 30-step trajectory (no Phase B unfreeze).
+    # regression losses + explicit suffix gain.
+    #
+    # v4.1 hot-fix (2026-04-27): replaced sparse keep_suffix (6 probes) with
+    # DENSE keep_full (all non-insert suffix frames) + kept sparse gain.
+    # Diagnosis: dev-4 had 50% revert rate on dog/bmx-trees because the
+    # 6-probe no-regression let optimization regress on the unmonitored
+    # ~70% of suffix frames. v4.1 enforces no-regression on the FULL
+    # suffix.
+    #
+    # Defaults: lambda_keep_margin=1.0, lambda_keep_full=25.0,
+    # lambda_gain_suffix=2.0, margin_scale=0.05 (down from v4.0's 0.10).
     oracle_traj_v4_use_teacher_anchor: bool = False    # default OFF
     oracle_traj_v4_freeze_nu: bool = False             # default OFF (Phase B unfreezes ν)
-    oracle_traj_v4_n_suffix_probes: int = 6
+    oracle_traj_v4_n_suffix_probes: int = 6            # SPARSE gain probe count
     oracle_traj_v4_lambda_keep_margin: float = 1.0     # no-regression on per-frame margin
-    oracle_traj_v4_lambda_keep_suffix: float = 10.0    # no-regression on suffix IoU
-    oracle_traj_v4_lambda_gain_suffix: float = 2.0     # explicit attack-improvement
-    oracle_traj_v4_margin_scale: float = 0.10          # attenuate aggregate L_margin
+    oracle_traj_v4_lambda_keep_full: float = 25.0      # v4.1 DENSE no-regression on suffix IoU
+    oracle_traj_v4_lambda_gain_suffix: float = 2.0     # explicit attack-improvement (sparse)
+    oracle_traj_v4_margin_scale: float = 0.05          # v4.1 attenuate aggregate L_margin further
 
     seed: int = 0
 
@@ -2028,7 +2033,8 @@ def _run_oracle_trajectory_pgd(
     )
     from memshield.stage14_helpers import (
         assemble_attack_state, stage14_forward_loss,
-        build_suffix_probe_frames, build_stage14_teacher_signals,
+        build_suffix_probe_frames, build_keep_suffix_frames,
+        build_stage14_teacher_signals,
     )
 
     device = x_clean.device
@@ -2150,20 +2156,33 @@ def _run_oracle_trajectory_pgd(
     # identical (LPIPS hinge + TV hinge with λ-escalation on infeasibility).
     lambda_fid_val = config.joint_traj_lambda_fid
 
-    # v4 (Anchored Stage 14): build A0 teacher signals + suffix probe set
-    # ONCE upfront. The teacher uses nu_init (= teacher's nu) and is
-    # invariant across optimization steps. Suffix probes are also fixed.
+    # v4 (Anchored Stage 14) / v4.1 hot-fix: build A0 teacher signals +
+    # frame sets ONCE upfront. Teacher uses nu_init (= frozen-ν reference)
+    # and is invariant across optimization steps.
+    #
+    # v4.1: TWO frame sets per codex 2026-04-27 hot-fix:
+    #   - keep_suffix_frames (DENSE): all non-insert suffix frames, used
+    #     by L_keep_full as the no-regression set. Replaces v4.0's sparse-
+    #     6-probe failure mode.
+    #   - gain_suffix_frames (SPARSE): n_probes evenly-spaced non-insert
+    #     frames, used by L_gain_suffix as the directional improvement
+    #     signal.
     v4_teacher = None
-    v4_suffix_probes: List[int] = []
+    v4_keep_suffix_frames: List[int] = []
+    v4_gain_suffix_frames: List[int] = []
     if config.oracle_traj_v4_use_teacher_anchor:
-        v4_suffix_probes = build_suffix_probe_frames(
+        v4_keep_suffix_frames = build_keep_suffix_frames(
+            state.W_attacked, state.T_proc,
+        )
+        v4_gain_suffix_frames = build_suffix_probe_frames(
             state.W_attacked, state.T_proc,
             n_probes=int(config.oracle_traj_v4_n_suffix_probes),
         )
         v4_teacher = build_stage14_teacher_signals(
             state, x_clean=x_clean, nu_teacher=nu_init,
             forward_fn=forward_fn, config=config,
-            suffix_probe_frames=v4_suffix_probes,
+            keep_suffix_frames=v4_keep_suffix_frames,
+            gain_suffix_frames=v4_gain_suffix_frames,
         )
 
     total_steps = (
@@ -2242,14 +2261,17 @@ def _run_oracle_trajectory_pgd(
             forward_fn=forward_fn, lpips_fn=lpips_fn,
             config=config, lambda_fid_val=lambda_fid_val,
             R_active=R_requires_grad,
-            suffix_probe_frames=v4_suffix_probes if v4_teacher else None,
-            lambda_suffix=0.0,
+            suffix_probe_frames=None, lambda_suffix=0.0,
             teacher=v4_teacher,
+            keep_suffix_frames=(
+                v4_keep_suffix_frames if v4_teacher else None),
+            gain_suffix_frames=(
+                v4_gain_suffix_frames if v4_teacher else None),
             lambda_keep_margin=(
                 config.oracle_traj_v4_lambda_keep_margin
                 if v4_teacher else 0.0),
-            lambda_keep_suffix=(
-                config.oracle_traj_v4_lambda_keep_suffix
+            lambda_keep_full=(
+                config.oracle_traj_v4_lambda_keep_full
                 if v4_teacher else 0.0),
             lambda_gain_suffix=(
                 config.oracle_traj_v4_lambda_gain_suffix
@@ -2331,14 +2353,16 @@ def _run_oracle_trajectory_pgd(
             "anchor_max_norm": anchor_max,
             "delta_max_norm": delta_max,
             "n_bridge": diag.n_bridge,
-            # v4 (Anchored Stage 14) diagnostics. All zero when teacher is
+            # v4.x (Anchored Stage 14) diagnostics. All zero when teacher is
             # not active; non-zero values track no-regression / gain trends
-            # across optimization steps.
+            # across optimization steps. v4.1: L_keep_full is dense over
+            # all non-insert suffix; L_gain_suffix is sparse-probe mean.
             "L_keep_margin": float(diag.L_keep_margin.detach().item()),
-            "L_keep_suffix": float(diag.L_keep_suffix.detach().item()),
+            "L_keep_full": float(diag.L_keep_full.detach().item()),
             "L_gain_suffix": float(diag.L_gain_suffix.detach().item()),
             "L_suffix": float(diag.L_suffix.detach().item()),
-            "n_suffix_probes": diag.n_suffix_probes,
+            "n_keep_suffix_frames": len(v4_keep_suffix_frames),
+            "n_gain_suffix_frames": len(v4_gain_suffix_frames),
             "v4_active": bool(v4_teacher is not None),
             # Bundle B sub-session 4 residual diagnostics.
             "L_R_tv": float(diag.L_R_tv.detach().item()),
@@ -4064,20 +4088,22 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--oracle-traj-v4-lambda-keep-margin", type=float,
                    default=1.0,
                    help="Weight on L_keep_margin (no-regression vs A0 on "
-                        "per-frame margin loss).")
-    p.add_argument("--oracle-traj-v4-lambda-keep-suffix", type=float,
-                   default=10.0,
-                   help="Weight on L_keep_suffix (no-regression vs A0 on "
-                        "suffix soft-IoU).")
+                        "per-frame margin loss in attacked window).")
+    p.add_argument("--oracle-traj-v4-lambda-keep-full", type=float,
+                   default=25.0,
+                   help="v4.1 weight on L_keep_full (DENSE no-regression "
+                        "vs A0 on full-suffix soft-IoU). Replaces v4.0's "
+                        "lambda-keep-suffix which was sparse.")
     p.add_argument("--oracle-traj-v4-lambda-gain-suffix", type=float,
                    default=2.0,
                    help="Weight on L_gain_suffix (explicit attack-"
-                        "improvement on suffix soft-IoU).")
-    p.add_argument("--oracle-traj-v4-margin-scale", type=float, default=0.10,
-                   help="Multiplier on the aggregate L_margin term in v4 "
-                        "(attenuates the contrastive surrogate that ss7 "
-                        "diagnosis identified as misaligned with full-"
-                        "video J-drop).")
+                        "improvement on SPARSE suffix probes; v4.1 is "
+                        "mean over n_probes).")
+    p.add_argument("--oracle-traj-v4-margin-scale", type=float, default=0.05,
+                   help="Multiplier on aggregate L_margin in v4 (v4.1 "
+                        "default 0.05, down from v4.0's 0.10, to further "
+                        "attenuate the local contrastive surrogate vs the "
+                        "global no-regression).")
     p.add_argument("--use-profiled-placement", type=str, default=None,
                    help="Path to placement-profile root; per-clip "
                         "<path>/<clip>/profile.json's best.subset is used "
@@ -4277,8 +4303,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 int(args.oracle_traj_v4_n_suffix_probes)),
             oracle_traj_v4_lambda_keep_margin=(
                 float(args.oracle_traj_v4_lambda_keep_margin)),
-            oracle_traj_v4_lambda_keep_suffix=(
-                float(args.oracle_traj_v4_lambda_keep_suffix)),
+            oracle_traj_v4_lambda_keep_full=(
+                float(args.oracle_traj_v4_lambda_keep_full)),
             oracle_traj_v4_lambda_gain_suffix=(
                 float(args.oracle_traj_v4_lambda_gain_suffix)),
             oracle_traj_v4_margin_scale=(
