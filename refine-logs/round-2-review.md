@@ -1,101 +1,77 @@
-# Round 2 Review (VADI)
+# Round 2 Review
 
-**Reviewer**: gpt-5.4 @ xhigh reasoning
-**Thread**: `019db8a1-7059-76b1-9958-ba5edc222de5`
-**Date**: 2026-04-23
+**Reviewer**: GPT-5.4 xhigh (same thread as R1)
+**Thread**: `019dcd87-c42b-7b03-9139-34df6b6ebd89`
+**Date**: 2026-04-27
+**Verdict**: **REVISE** (7.2/10 overall, +1.2 vs R1)
 
-## Parsed Scores
+## Scores
 
-| Dimension | Score |
-|---|---:|
-| Problem Fidelity | 9.0 |
-| Method Specificity | 8.0 |
-| Contribution Quality | 7.4 |
-| Frontier Leverage | 7.3 |
-| Feasibility | 6.8 |
-| Validation Focus | 8.2 |
-| Venue Readiness | 6.6 |
-| **Weighted Overall** | **7.7 / 10** |
+| Dimension | R1 | **R2** | Δ |
+|---|---|---|---|
+| Problem Fidelity | 6 | **8** | +2 |
+| Method Specificity | 6 | **7** | +1 |
+| Contribution Quality | 5 | **7** | +2 |
+| Frontier Leverage | 7 | **8** | +1 |
+| Feasibility | 8 | **7** | -1 (more honest scoping) |
+| Validation Focus | 5 | **6** | +1 |
+| Venue Readiness | 5 | **6** | +1 |
+| **Overall** | **6.0** | **7.2** | **+1.2** |
 
-## Verdict
+**Drift Warning**: NONE (anchor preserved, raw joint = scientific method).
 
-**REVISE / PILOT-READY, not READY.** "If the pilot shows top-K optimized inserts beat random/bottom and beat matched local-δ-only controls, the proposal can move into 8.3-8.7. READY only after empirical evidence confirms insert-specific causal mechanism."
+## Critical findings (R2)
 
-## Drift Warning
+### CRITICAL — A1 still mis-specified
+A0 vs full-v5 bundles insertion + search + stabilization + bridge δ. Doesn't isolate the bridge δ contribution.
 
-**NONE.** Only "hidden drift risk": success may come from local δ placement rather than optimized inserts. That is a **causal identification issue**, not a constraint violation.
+**Fix**: A1 = "insert-only with SAME placements + SAME ν + SAME decoy family" vs "insert+bridge δ". Bridge δ is the ONLY toggle. Measure both J-drop AND post-insert d_mem persistence.
 
-## P0 Action Items
+### IMPORTANT — A3 should run early; narrow framing if weak
+A3 collapse threshold (≥0.20 abs on ≥7/10) is aggressive. Run A3 first; if weaker collapse → narrow paper to "memory-mediated persistence evidence" not "dominant failure mode".
 
-### F8 — Causality isolation controls (Venue Readiness, P0)
-Top-K placement advantage may come from **LOCAL δ at vulnerable frames**, not inserts. Add:
-- **top-δ-only**: δ at top-K vulnerability neighborhoods, **no inserts**
-- **random-δ-only**: δ at random-K neighborhoods, no inserts
-- **top-base-insert+δ**: insert at top-K, but insert is **unoptimized midframe** (no ν); δ optimized
+### IMPORTANT — d_mem protocol tightening needed
+"Object-related tokens = attention weight > median" is condition-dependent → potentially circular. Better: define token set from CLEAN run ONCE, fix layer/block/head/agg ex ante, reuse across clean/insert-only/full.
 
-These three + existing top-K optimized (ours) disentangle:
-- inserts vs δ at same positions (ours vs top-δ-only)
-- insert OPTIMIZATION vs insert presence (ours vs top-base-insert+δ)
-- placement of δ (top-δ-only vs random-δ-only)
+### IMPORTANT — Pre- vs post-projection value vectors not specified
+Value vectors in cross-attention have pre-output-projection and post-output-projection variants. Spec which.
 
-### F9 — Hard feasibility acceptance (Feasibility, P0)
-Final selection must enforce LPIPS feasibility as **hard acceptance**, not rely on hinge penalties alone. If no PGD step satisfies all fidelity constraints simultaneously, the clip is flagged as "fidelity-infeasible at stated budget" and excluded (or reported separately).
+### MINOR — Placement search ownership
+Reviewer says "either own E1 more directly OR simplify to deterministic heuristic + curriculum as appendix". I'm keeping E1 as owned but will add explicit text in Discussion explaining why search is the right tool (vulnerability heuristics anti-correlated empirically — falsified earlier).
 
-### F10 — Log mu_true and mu_decoy separately
-Even with contrastive margin loss, if success comes only from **collapsing mu_true** (while mu_decoy stays flat), reviewers call it "implicit suppression". Log both per-frame trajectories; report at final:
-- `Δmu_true = mu_true(attacked) − mu_true(clean)` — should be ≤ 0 but moderate
-- `Δmu_decoy = mu_decoy(attacked) − mu_decoy(clean)` — should be ≫ |Δmu_true|
+## Action items for Round 2 refinement
 
-For true "decoy wins" behavior, `Δmu_decoy` must be much larger in magnitude than `|Δmu_true|`.
+1. **CRITICAL** Fix A1: insert-only-with-ν-and-W-fixed vs insert+bridge δ. Both with v5's placement search to remove placement confound.
+2. **IMPORTANT** Tighten d_mem protocol: token set from CLEAN once + freeze + reuse; pre-projection V; layer = `memory_attention.layers[-1].cross_attention`.
+3. **IMPORTANT** A3 acceptance language: report as "strong pass" target. Weaker collapse (≥0.10 abs on ≥6/10) → narrowed framing to "memory contribution evidence, partial".
+4. **MINOR** Add explicit Discussion text: search ownership + why heuristic anti-correlation forces empirical search.
+5. **EXECUTION** Run A3 FIRST; let result determine final framing.
 
-## Simplifications
-
-- **Scorer math**: rank-based robust-z via IQR is mathematically more elaborate than necessary. Replace with **rank-sum**:
-  ```
-  rank_conf_m = rank(r_conf_m) among m ∈ {1..T-1}       # 1..T-1
-  (similarly rank_mask, rank_feat)
-  v_m = rank_conf_m + rank_mask_m + rank_feat_m          # simple sum of ranks
-  W = argtop-K non-adjacent
-  ```
-  Same robustness; less paper noise.
-
-## Specific Q&A (from R2)
-
-1. **Anti-suppression**: "substantially fixed. Removing L_obj right. Log mu_true / mu_decoy separately to preempt implicit-suppression critique."
-2. **Scorer**: "Yes, much more principled. Describe simply as robust rank aggregation. Robust-z formula may be more elaborate than necessary."
-3. **Local δ**: "Greatly reduces dense-δ confound but doesn't fully prove inserts dominate. Need matched δ-only-by-position controls." → fix F8
-4. **Top vs random vs bottom**: "Strong for placement causality. NOT by itself strong for insertion causality. Add optimized-vs-base-insert AND with-vs-without-insert controls." → fix F8
-5. **LPIPS-bound ν**: "Clean and better than hard ε. Final selection must enforce feasibility as hard acceptance." → fix F9
-6. **Pilot + NO-GO**: "Acceptable and reviewer-positive. Thresholds reasonable for pilot, not for final claims. Full claim needs DAVIS-10 evidence with CIs and absolute gaps."
-
-## Raw Response
+## Raw response
 
 <details>
-<summary>Click</summary>
+<summary>Codex R2 (verbatim)</summary>
 
-Revised weighted score: **7.7 / 10, PILOT-READY but not READY**.
+The Problem Anchor is now preserved, not drifted. Moving the scientific method to RAW joint and relegating wrapper selection to a separate deployment column fixes the biggest Round 1 issue.
 
-| Dim | Score |
-|---|---:|
-| Problem Fidelity | 9.0 |
-| Method Specificity | 8.0 |
-| Contribution Quality | 7.4 |
-| Frontier Leverage | 7.3 |
-| Feasibility | 6.8 |
-| Validation Focus | 8.2 |
-| Venue Readiness | 6.6 |
+Scores: PF 8, MS 7, CQ 7, FL 8, F 7, VF 6, VR 6. Overall 7.2.
 
-Sub-7 issues:
-- Feasibility: K=3 top ≥ 0.20 J-drop on 2/3 pilot clips uncertain. Pilot as hard gate.
-- Venue Readiness: top placement may help because LOCAL δ is at fragile frames. Add matched controls: top-local-δ-only, random-local-δ-only, top-base-insert+δ.
+The dominant contribution is sharper. This now reads like one mechanism claim with two explicit enablers, instead of three half-overlapping contributions plus a rescue wrapper.
 
-Anti-suppression: fixed. Log mu_true / mu_decoy separately.
-Scorer: principled, simplify (rank aggregation, not robust-z).
-Local δ: reduces confound but doesn't prove inserts dominate. Need δ-only-by-position controls.
-Top/rand/bottom: strong for placement, not insertion. Add "with insert vs no insert" at matched positions.
-LPIPS-bound ν: clean. Final selection = hard feasibility acceptance.
-Pilot: acceptable. Thresholds OK for pilot, not final.
+Critiques:
+- C1.a is now a real causal test, falsifiable. Concern is acceptance threshold (≥0.20 collapse on ≥7/10) is aggressive.
+- C1.b: "object-related tokens = attention weight > median" can become circular. Define token set from clean run once, fix layer/block/head, reuse exact subset.
+- RAW joint headline gate plausible but not bankable from 4-clip dev. Most fragile = combined ≥0.55 mean J-drop + 5/10 wins.
+- d_mem extraction needs tighter spec: pre/post output projection.
+- Placement search hidden complexity remains; either own more directly or simplify.
 
-Verdict: REVISE / PILOT-READY. READY only after empirical evidence.
+Action items:
+1. Fix A1 — currently bundles insertion+search+stabilization+bridge δ.
+2. Tighten d_mem protocol.
+3. Don't make C1.a 0.20 threshold the only scientifically valid outcome.
+4. Decide on placement search ownership.
+5. Run A3 before polishing paper story further.
+
+Verdict: REVISE.
 
 </details>

@@ -1,67 +1,84 @@
-# Round 4 Review (VADI)
+# Round 4 Review
 
-**Reviewer**: gpt-5.4 @ xhigh reasoning
-**Thread**: `019db8a1-7059-76b1-9958-ba5edc222de5`
-**Date**: 2026-04-23
+**Reviewer**: GPT-5.4 xhigh (same thread)
+**Date**: 2026-04-27
+**Verdict**: **REVISE (proposal-stage ceiling confirmed)** — 8.4/10
 
-## Parsed Scores
+## Scores
 
-| Dimension | Score |
-|---|---:|
-| Problem Fidelity | 9.4 |
-| Method Specificity | 8.7 |
-| Contribution Quality | 8.4 |
-| Frontier Leverage | 7.7 |
-| Feasibility | 7.2 |
-| Validation Focus | 9.0 |
-| Venue Readiness | 7.7 |
-| **Weighted Overall** | **8.4 / 10** |
+| Dimension | R1 | R2 | R3 | **R4** | R3→R4 |
+|---|---|---|---|---|---|
+| Problem Fidelity | 6 | 8 | 9 | **9** | 0 |
+| Method Specificity | 6 | 7 | 8 | **9** | +1 |
+| Contribution Quality | 5 | 7 | 7 | **8** | +1 |
+| Frontier Leverage | 7 | 8 | 8 | **8** | 0 |
+| Feasibility | 8 | 7 | 8 | **8** | 0 |
+| Validation Focus | 5 | 6 | 8 | **9** | +1 |
+| Venue Readiness | 5 | 6 | 6 | **7** | +1 |
+| **Overall** | 6.0 | 7.2 | 7.8 | **8.4** | +0.6 |
 
-## Verdict
+**Drift**: NONE.
 
-**Pre-pilot ceiling confirmed: 8.4 / 10.** All R3 sub-7s now above threshold. "Not READY ≥ 9 because core causal claims remain empirical. Further proposal polishing has diminishing returns; run the gated pilot."
+## Codex explicit ceiling statement
 
-## Drift Warning
+> "The proposal architecture has reached the natural ceiling for proposal-stage iteration. Further proposal refinement now has diminishing returns. One good A3 run will move this more than another full review round."
 
-**NONE.**
+Pattern matches the 2026-04-23 v4-vadi run (also ended at 8.4 with "PRE-PILOT CEILING" verdict). Structural feature of "implementation already done + paper claim plausible + validation experiments not yet run" proposals.
 
-## One Final Non-Empirical Tightening
+## What blocks READY
 
-### F16 — Lock metrics to exported uint8 artifact, not internal float tensors
+- Empirical contingency: A3 hasn't run; can't verify "dominant failure mode" claim.
+- C2 hasn't been run on held-out 10-clip; can't verify RAW joint headline gates.
+- E1 honest ownership accepted but elegance still contingent on strong results.
 
-**Weakness**: LPIPS/SSIM/TV feasibility measured on internal float tensors during PGD may succeed while the FINAL EXPORTED uint8 JPEG video (after quantization + JPEG encoding) may violate the constraints due to quantization / compression losses.
+→ READY is data-bound, not architecture-bound.
 
-**Fix**:
-```
-After PGD returns (δ*, ν*):
-  processed_video_uint8 = build_and_export_uint8_JPEGs(δ*, ν*)
-  Re-measure ALL fidelity on the EXPORTED artifact:
-    LPIPS_orig_t_exported = LPIPS(processed_video_uint8[t], x_t)
-    SSIM_f0_exported = SSIM(processed_video_uint8[0], x_0)
-    LPIPS_ins_k_exported = LPIPS(processed_video_uint8[W_k], base_insert_k)
-    TV_ins_k_exported    = TV(processed_video_uint8[W_k])
-  
-  If ANY exported metric violates its budget → clip = INFEASIBLE (even if internal float was feasible)
-  Then evaluate SAM2 and all causal claims on the EXPORTED video.
-```
+## Codex's only proposed proposal-side upgrade (HIGH-VALUE)
 
-This prevents a "feasible in optimization, infeasible in delivered artifact" loophole. Causal claims are measured on exactly what the consumer would receive.
+**Add a matched non-insert frame negative control to A3**: Block memory writes at K matched non-insert clean frames (matched count = K=3); compare collapse magnitude vs blocking at attacked insert frames. If insert-position blocking collapses J-drop substantially MORE than control-position blocking, memory hijack story is more reviewer-proof.
 
-## Raw
+This is a one-config-extra ablation (~2 GPU-h additional). Codex calls it "the only remaining proposal-side improvement I would still consider high value." I will add it as A3-control.
+
+## Optional modernizations (only if A3 strong-passes)
+
+- One layer-sensitivity check on the A3 hook (multi-layer block) in appendix
+- Already-planned T_obj 16/32/64 sensitivity stays
+
+## Final Action Items (final round)
+
+| # | Action | Status |
+|---|---|---|
+| 1 | Add A3-control (matched non-insert frame block) | round 4 refinement |
+| 2 | Freeze A1 + A3 + A3-control implementations before running | round 4 refinement |
+| 3 | Stop proposal iteration after R4 | declare ceiling |
+| 4 | Move to Phase 5 final reports | next |
+
+## Raw response
 
 <details>
-<summary>Click</summary>
+<summary>Codex R4 (verbatim)</summary>
 
-R4 score: **8.4 / 10, pre-pilot ceiling confirmed**.
+Scores: PF 9, MS 9, CQ 8, FL 8, F 8, VF 9, VR 7. Overall 8.4.
 
-All R3 sub-7s now above threshold. Counting infeasible as failures fixes honesty. Phantom δ positions fix δ-only ambiguity. Signed decoy metrics fix anti-suppression diagnostic.
+Verdict: REVISE. Drift: NONE.
 
-Pre-pilot ceiling ~8.3-8.4; score 8.4. Not higher without empirical evidence.
+R3 fixes the main structural issues. The proposal is now well-anchored, implementable, and scientifically sequenced. The remaining blocker is no longer proposal architecture; it is unresolved empirical evidence.
 
-One final non-empirical tightening: lock all success metrics to the final exported processed video, not internal float tensors. Predefine LPIPS/SSIM/TV tolerances after quantization/export. Prevents "feasible in optimization, infeasible in delivered artifact" loophole.
+A1 now correctly isolates bridge δ contribution. d_mem token-set-from-clean essentially free of circularity. Dual-threshold A3 honest and sufficient. Putting A3 first right sequencing. Validation Focus reached 9. Method Specificity reached 9. Venue Readiness moved past 6 but not beyond 7 before results exist. Contribution Quality 7→8.
 
-No blocking conceptual issue. Proposal is clean, focused, pilot-ready.
+Why not READY: empirical, not structural. A3 hasn't shown "dominant failure mode" justified. C2 hasn't shown raw joint beats A0 on held-out. E1 honest but elegance contingent on results.
 
-Verdict: pre-pilot ceiling confirmed: 8.4. Further proposal polishing has diminishing returns; run the gated pilot.
+**Smallest further change to push READY**: No further proposal-stage edit is the real answer. Smallest meaningful next step is run A3 and let it gate paper framing.
+
+If you insist on one last structural upgrade: add one negative-control hook — block memory writes at matched non-insert clean frames with same count as W*. If collapse is much smaller there than at attacked insert positions, causal story more reviewer-proof. That is the only remaining proposal-side improvement of high value.
+
+**Bottom line**: Yes, proposal architecture has reached natural ceiling for proposal-stage iteration. Further proposal refinement now has diminishing returns. One good A3 run will move this more than another full review round.
+
+Action items:
+1. Freeze A1 + A3 implementations before running
+2. Run A3 first; commit to Framing A/B/C
+3. If A3 partial, do NOT keep "dominant failure mode" language anywhere
+4. C2 + A1 main table; wrapper strictly separate
+5. STOP proposal iteration after this. Next acceptance-lift comes from data.
 
 </details>

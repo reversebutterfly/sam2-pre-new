@@ -1,80 +1,121 @@
-# Round 1 Review (VADI)
+# Round 1 Review
 
-**Reviewer**: gpt-5.4 @ xhigh reasoning
-**Thread**: `019db8a1-7059-76b1-9958-ba5edc222de5`
-**Date**: 2026-04-23
+**Reviewer**: GPT-5.4 xhigh
+**Thread**: `019dcd87-c42b-7b03-9139-34df6b6ebd89`
+**Date**: 2026-04-27
+**Verdict**: **REVISE** (6.0/10 overall)
 
-## Parsed Scores
+---
 
-| Dimension | Score |
-|---|---:|
-| Problem Fidelity | 7.5 |
-| Method Specificity | 6.0 |
-| Contribution Quality | 6.0 |
-| Frontier Leverage | 7.0 |
-| Feasibility | 5.5 |
-| Validation Focus | 6.0 |
-| Venue Readiness | 5.0 |
-| **Weighted Overall** | **6.3 / 10** |
+## Scores
 
-## Verdict
-
-**REVISE.** "Coherent with the v4 anchor, much less narratively false than FIFO bank poisoning. Biggest risk: becoming 'adaptive placement + dense δ PGD' rather than a clean method showing vulnerability-aware inserts are the causal intervention."
-
-## Drift Warnings Issued
-
-- **L_obj = softplus(object_score + 0.5) is suppression by another name.** Remove or make ablation-only.
-- Dropping inserts = DRIFT.
-- Returning to FIFO / bank poisoning / clean-suffix = DRIFT.
-- Turning into a generator/scheduler system = contribution sprawl.
-
-## Critical Fixes (P0)
-
-| # | Weakness | Fix |
+| Dimension | Score | Notes |
 |---|---|---|
-| F1 | Vulnerability scorer is ad hoc; weights undefined. | Pre-registered **rank-based robust-z normalization over 2-3 signals** (confidence drop, clean mask discontinuity, Hiera residual). Drop flow unless pilot justifies. Define original-time vs processed-time indices. |
-| F2 | Decoy loss not contrastive — can raise decoy WITHOUT making SAM2 abandon true target. | Replace with **margin form**: `softplus(mean_true_logit - mean_decoy_logit + margin)` on insert + neighbor frames. |
-| F3 | `surrogate_J_drop` for checkpoint selection undefined; could leak GT. | Define explicitly: pseudo-label J-drop against clean-SAM2 masks OR decoy-margin improvement. **No DAVIS GT anywhere.** |
-| F4 | Dense δ over ALL originals may dominate → inserts decorative. | **Local δ support**: perturb only frames in `∪_k NbrSet(m_k)` (insert neighborhoods, ~3-4 frames each). Global δ as ablation only. |
-| F5 | "Top-K beats random" alone smells like scheduler tuning. | Add **bottom-K placement baseline** + report absolute drops (not just ratios). Multiple random draws (≥5) per clip, paired bootstrap. |
-| F6 | ν ε=8/255 may underuse LPIPS≤0.35 budget (inserts become adversarial noise). | Use LPIPS+TV+temporal as **real binding fidelity** on inserts. Relax ν ε or drop ε on inserts, let LPIPS do the constraining. |
-| F7 | J-drop ≥ 0.35 with K≤3 inserts is unproven. | **Gated pilot**: 3 clips × {K=1 top, K=1 random, K=3 top, δ-only local}. If top doesn't clearly win → stop expanding. |
+| Problem Fidelity | 6 | Conditional drift via accept/revert wrapper |
+| Method Specificity | 6 | Decoy family + memory readout under-specified |
+| Contribution Quality | 5 | Demoting outcome-critical components dishonest |
+| Frontier Leverage | 7 | Modern enough; SAM2 attack surface is right |
+| Feasibility | 8 | v4.1 already implemented |
+| Validation Focus | 5 | A3 confounds; need memory-causality ablation |
+| Venue Readiness | 5 | "First demonstration" overclaim |
+| **Overall (weighted)** | **6.0** | REVISE |
 
-## Simplifications
+---
 
-- Collapse vulnerability scorer to 2-3 signals. Drop flow unless pilot shows it helps.
-- **K=1 as mechanistic centerpiece; K=3 as stronger variant.** Paper's "clean story" uses K=1.
-- Remove `L_obj` default (or justify why it's not suppression).
-- Keep restoration minimal: R2 (Hiera at inserts) + R2b (Hiera all) + R3 (bank). Drop hook-taxonomy bloat.
+## Critical Findings
 
-## Modernization
+### CRITICAL #1 — Conditional drift via wrapper
+The `max(joint, A0)` accept/revert rule means on reverted clips, the final published attack is NOT the joint method anymore. This conditionally violates the anchored constraint "must use BOTH insertion AND original-frame δ".
 
-- **Gradient-based vulnerability scoring** (one clean backward per candidate frame to estimate local decoy susceptibility). Still heuristic, still white-box, still GT-free, BUT more principled than hand-weighted sum.
-- Diffusion/inpainting: only as a FIDELITY CEILING if LPIPS-constrained optimized inserts can't produce enough attack capacity. Not default.
+**Fix (codex)**: Define the scientific method as the **raw joint attack**. Require positive median lift on raw joint (no wrapper) with a non-trivial applied rate. Report `accept/revert` only as a separate deployment policy column.
 
-## Raw Response
+### CRITICAL #2 — Dishonest contribution demotion
+Demoting placement search, L_keep_full, polish_revert to "implementation details" is dishonest because they appear outcome-critical (L_keep_full was the v4.1 hot-fix that made dog apply; polish_revert salvaged 50% of v4.0 dev-4 clips).
+
+**Fix (codex)**: Reframe to ONE main contribution + TWO enabling components.
+- Main: internal insertion can causally bias SAM2 memory; bridge δ extends bias.
+- Enabling 1: placement search.
+- Enabling 2: no-regression stabilization (L_keep_full).
+- Drop "no-regret adaptive attack" as a named scientific contribution.
+
+### CRITICAL #3 — A3 ablation confounded
+"all-frames-δ-no-insert vs insert+bridge-δ" confounds memory writes / temporal discontinuity / sparsity / budget allocation.
+
+**Fix (codex)**: Replace A3 with a **memory-causality ablation**. Keep same inserted visuals BUT disable/clear SAM2 memory writes on insert frames (or prevent inserts from being banked). If the attack effect collapses → "memory hijack" mechanism credible.
+
+---
+
+## Important Findings
+
+### IMPORTANT #1 — Method specificity (decoy + memory readout)
+"Semantic decoy", "traj+α+warp+R", "memory-feature-divergence trace" are under-specified.
+
+**Fix (codex)**: 
+- Lock decoy to one explicit family (e.g. duplicate-object spatially shifted by trajectory anchor offset, alpha-paste compositor with feathering parameters specified).
+- Define optimized variables mathematically (full math notation for ν, δ, traj, α, R).
+- Pre-register the memory readout: which SAM2 layer, what similarity (cosine), how it ties to failure propagation.
+
+### IMPORTANT #2 — Venue novelty overclaim
+"First demonstration" is too strong without causal ablation.
+
+**Fix (codex)**: Narrow to "**evidence** of memory-mediated failure; bridge δ **increases persistence**" — defensible after causal ablation.
+
+---
+
+## Simplification Opportunities
+
+1. Remove `polish_revert` from core contribution. Keep as deployment selector only.
+2. Either own placement search as a method component, or simplify aggressively.
+3. Fix decoy construction to one deterministic family.
+
+## Modernization Opportunities
+
+1. Use SAM2's own memory/readout signals as auxiliary loss or causal diagnostic.
+2. Optional: frozen vision prior for decoy initialization/filtering only.
+
+## Drift Warning
+
+**NOT NONE**. Accept/revert wrapper causes conditional drift on reverted clips. Move it from "method" to "deployment policy".
+
+---
+
+## Action Items for Round 1 refinement (priority order)
+
+| # | Priority | Action |
+|---|---|---|
+| 1 | CRITICAL | Reframe contribution: ONE main (memory-mediated failure mechanism) + TWO enabling (placement search, no-regression stabilization). Drop "no-regret adaptive attack" as named contribution. |
+| 2 | CRITICAL | Define scientific method = raw joint. Wrapper = deployment policy. Headline gates apply to RAW joint. Report wrapper-selected result separately. |
+| 3 | CRITICAL | Replace A3 with memory-causality ablation: disable memory writes on insert frames; if effect collapses → mechanism confirmed. |
+| 4 | IMPORTANT | Specify decoy family mathematically (one family, one set of params). Pre-register memory readout (layer, similarity, frame-trace metric). |
+| 5 | IMPORTANT | Narrow novelty claim from "first demonstration" → "evidence of memory-mediated failure" + "bridge δ increases persistence". |
+
+---
+
+## Raw Reviewer Response
 
 <details>
-<summary>Click</summary>
+<summary>Full Codex round 1 response (verbatim)</summary>
 
-Overall weighted score: **6.3 / 10, REVISE**. Coherent with v4 anchor, much less narratively false than FIFO bank poisoning, but not venue-ready. Biggest risk: "adaptive placement + dense δ PGD" rather than a clean method showing vulnerability-aware inserts are the causal intervention.
+**Overall Score**: `6.0/10`
 
-Sub-7 fixes:
-- Vulnerability score ad hoc; weights/indexing undefined. → Pre-registered rank-based robust-z over 2-3 signals.
-- Decoy loss not contrastive; can raise decoy without making SAM2 abandon true. → Margin form `softplus(mean_true − mean_decoy + margin)`.
-- surrogate_J_drop undefined. → Pseudo-label drop; no GT.
-- Dense δ may dominate. → Local δ to insert neighborhoods.
-- Top-K vs random alone = scheduler tuning. → Add bottom-K; multi-draw random.
-- ν ε=8/255 may underuse LPIPS budget. → LPIPS as real constraint, relax or drop ε on inserts.
-- 0.35 J-drop unproven. → Gated 3-clip pilot.
-- SAM2Long/UAP in main table distracting. → Move to appendix.
+This is a plausible attack direction, and it is much better anchored than most early-stage adversarial proposals. But in its current form it reads more like a strong attack recipe with a mechanism story attached than a paper that has actually proven the claimed mechanism. That distinction matters a lot for AAAI.
 
-Simplifications: 2-3 scorer terms; K=1 centerpiece, K=3 stronger variant; remove L_obj default; minimal restoration hooks.
+1. Problem Fidelity: `6/10` — wrapper creates conditional escape from anchored problem.
+2. Method Specificity: `6/10` — decoy and memory readout under-specified.
+3. Contribution Quality: `5/10` — demoting outcome-critical components dishonest.
+4. Frontier Leverage: `7/10` — modern enough.
+5. Feasibility: `8/10` — v4.1 implemented.
+6. Validation Focus: `5/10` — A3 confounded.
+7. Venue Readiness: `5/10` — "first demonstration" overclaim.
 
-Modernization: gradient-based vulnerability scoring (one clean backward per candidate frame) as principled upgrade. No LLM/RL.
+**Critical fixes**: (1) raw joint = scientific method, wrapper = deployment policy. (2) reframe to 1+2 contribution structure. (3) replace A3 with memory-causality ablation.
 
-Drift warnings: dropping inserts, adding L_suppress, bank poisoning, clean-suffix — all DRIFT.
+**Simplifications**: (1) polish_revert deployment-only. (2) own placement search or simplify. (3) one decoy family.
 
-Verdict REVISE. Paper lives or dies on: "vulnerability-aware insert placement causes more damage than matched random/canonical placement, AND the damage routes through current-frame Hiera rather than memory-bank poisoning or dense δ". Prove that with pilot before adding any modules.
+**Modernization**: (1) SAM2 memory readout as auxiliary loss / diagnostic. (2) frozen vision prior for decoy init only.
+
+**Drift Warning**: not NONE — wrapper causes conditional drift.
+
+**Verdict**: REVISE.
 
 </details>

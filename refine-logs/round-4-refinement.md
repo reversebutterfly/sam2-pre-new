@@ -1,201 +1,155 @@
-# Round 4 Refinement (VADI, final pre-pilot)
+# Round 4 Refinement (FINAL)
 
 ## Problem Anchor (verbatim)
 
-(per `PROBLEM_ANCHOR_2026-04-23_v4-insert.md`)
+[See `PROBLEM_ANCHOR_2026-04-27.md`]
 
 ## Anchor Check
 
-Preserved. Codex R4: NONE drift, pre-pilot ceiling confirmed 8.4/10.
+- **Original bottleneck**: same. SAM2 attack via insertion + bridge δ; memory propagation = attack surface.
+- **R4 changes**: ONE small structural addition (A3-control negative-control hook). No method change.
 
 ## Simplicity Check
 
-No new components. F16 is a measurement discipline addition only.
+- **Dominant contribution**: same C1 + E1 + E2.
+- **R4 codex verdict**: "proposal architecture reached natural ceiling; further refinement has diminishing returns."
+- **R4 NEW addition**: A3-control matched-non-insert-frame negative control hook (codex's only remaining HIGH-VALUE proposal-side upgrade).
 
-## Changes Made
+## Changes Made (R4 final)
 
-### F16 — Exported-artifact feasibility + evaluation
+### Change 1 — Add A3-control negative-control hook (HIGH-VALUE)
 
-```
-After PGD returns (δ*, ν*):
-  processed_uint8 = build_and_export_uint8_JPEGs(δ*, ν*)
-  
-  Re-measure all fidelity metrics on the EXPORTED uint8 artifact:
-    LPIPS_orig_exported_t = LPIPS(processed_uint8[t], x_t)           for t in S_δ, t≥1
-    SSIM_f0_exported      = SSIM(processed_uint8[0], x_0)
-    LPIPS_ins_exported_k  = LPIPS(processed_uint8[W_k], base_insert_k)
-    TV_ins_exported_k     = TV(processed_uint8[W_k])
-  
-  Feasibility check (HARD):
-    If any exported metric violates its budget → clip := INFEASIBLE
-  
-  SAM2 evaluation:
-    processed_for_SAM2 = processed_uint8   (the actual artifact the consumer gets)
-    J_attacked = SAM2(processed_uint8, m_0) evaluated against DAVIS GT (at eval time only)
-```
+- **Codex R4**: "If you insist on one last structural upgrade, add one negative-control hook: block memory writes at matched non-insert clean frames, with the same count as W*. If collapse is much smaller there than at attacked insert positions, the causal story becomes more reviewer-proof."
 
-This closes the "feasible in optimization, infeasible in delivered artifact" loophole. All causal claims now measured on exactly what the consumer receives.
+- **Action**: Add **A3-control** as a third configuration in the A3 ablation:
+  - **A3-attacked**: full-v5 + `BlockInsertMemoryWritesHook` blocking at W_attacked (3 frames, the inserts themselves)
+  - **A3-control**: full-v5 + `BlockInsertMemoryWritesHook` blocking at W_control (3 matched non-insert frames, drawn uniformly at random from non-insert non-bridge attacked-space frames; FROZEN per clip per seed)
+  - **A3-baseline**: full-v5 (no blocking)
 
-## Revised Proposal (round-4, final pre-pilot)
+- **New acceptance** for A3 strong/partial: collapse_attacked − collapse_control ≥ 0.10 absolute on ≥7/10 clips. (I.e., blocking attacked-frame memory writes must hurt MORE than blocking control-frame memory writes.)
 
-### Problem Anchor
+- **Updated dual-threshold**:
+  - **Strong pass**: collapse_attacked ≥ 0.20 abs AND (collapse_attacked − collapse_control) ≥ 0.10 abs, both on ≥7/10
+  - **Partial pass**: collapse_attacked ≥ 0.10 abs AND (collapse_attacked − collapse_control) ≥ 0.05 abs, both on ≥6/10
+  - **Fail**: either < threshold on majority
 
-(see `PROBLEM_ANCHOR_2026-04-23_v4-insert.md`)
+- **Compute**: +2 GPU-h (one extra config × 10 clips). Total budget 21 → 23 GPU-h. Still 3 days.
 
-### Method Thesis
+- **Why this matters**: Without A3-control, a reviewer can argue "blocking ANY memory write at ANY frame might collapse the attack — this isn't insert-frame-specific." With A3-control showing collapse is INSERT-POSITION-specific, the causal mechanism story is much harder to attack.
 
-Vulnerability-aware insertion for SAM2 dataset protection. Rank-sum 3-signal scorer (clean-SAM2 confidence derivative + mask discontinuity + Hiera discontinuity) selects top-K non-adjacent positions. Insert content (ν, LPIPS-TV bounded) + local δ on insert neighborhoods are jointly PGD-optimized under a **contrastive decoy-margin loss** (no suppression, no object_score margin). Causal isolation via 10-config matched-budget study; mechanism attribution via restoration counterfactuals. All metrics measured on the exported uint8 artifact.
+### Change 2 — Freeze A1 + A3 + A3-control implementations (codex AI #1)
 
-### Contribution Focus
+- **Action**: Pre-commit the following implementation specs (NO further changes after this round):
 
-- **C1 (dominant)**: vulnerability-aware insertion for per-video SAM2 dataset protection, with causal isolation of both placement (top/random/bottom) and insert value (vs δ-only, vs base-insert), plus signed decoy-vs-suppression decomposition. Target: J-drop ≥ 0.35 at fidelity triad on DAVIS-10 (primary denominator = all 10, infeasible = failure).
-- **C2 (supporting)**: restoration-counterfactual attribution showing damage lives in current-frame Hiera pathway at insert positions (R2 ≥ +0.20), not in the non-cond bank (R3 ≤ +0.02), consistent with prior B2 observation.
-- **Non-contributions**: no new generator, no UAP, no runtime hook, no bank poisoning, no learned net, no LLM/RL/diffusion, **no suppression, no object_score margin**.
+**A1 implementation freeze**:
+- Same upstream W* (from joint curriculum search)
+- Same upstream nu_init (from A0 polish)
+- Same upstream decoy_seeds (from build_decoy_insert_seeds)
+- A1-only: `traj.anchor_offset = 0; traj.delta_offset = 0; alpha_logits = -1e9; warp_s = 0; warp_r = 0; R = 0` (zero ALL bridge variables); skip Stage 14 entirely; export with bridge frames untouched.
+- A1-full: full Stage 14 polish (commit `da719dc` v4.1).
 
-### Complexity Budget
+**A3 hook implementation freeze**:
+- Patch on `SAM2VideoAdapter.process_frame(t, ...)`: add `if t in self.W_blocked: return self.predictor.run_hiera_and_decoder_only(...)` — runs Hiera encoder + mask decoder; SKIPS `memory_attention.encode_memory(...)` for those t.
+- Other frames untouched. Bank entries from t' < t untouched. Cross-attention to existing bank entries untouched.
+- Configurable `W_blocked` via constructor.
 
-- Frozen: SAM2.1-Tiny, SAM2VideoAdapter, LPIPS(alex), fake_uint8_quantize STE, DropNonCondBankHook.
-- New trainable (2): δ on local support S_δ (two-tier ε), ν per-insert (LPIPS-TV bound, no ε).
-- New non-trainable: rank-sum 3-signal vulnerability scorer.
-- New inference-only: 3 restoration swap hooks.
-- Intentionally not used: ProPainter, L_stale, L_suppress, L_obj, learned scorer, LLM/diffusion/RL.
+**A3-control implementation freeze**:
+- Same hook; W_blocked = W_control = 3 frames sampled uniformly at random from {t ∈ [0, T_proc) : t ∉ W_attacked AND t ∉ bridge_frames} with fixed seed=0.
+- W_control frozen per (clip, seed).
 
-### System Overview
+### Change 3 — Stop proposal iteration after R4 (codex AI #5)
 
-```
-Offline (GT-free, one-time):
-  clean_SAM2 on x_0..x_{T-1} with m_0 prompt →
-    m̂_true_t = sigmoid(pred_logits_t) ∈ [0,1]^{HxW}
-    confidence_t = sigmoid(object_score_t) · mean(m̂_true_t > 0.5)
-    H_t = Hiera encoder output (cached)
-  
-  For m ∈ {1, ..., T-1}:
-    r_conf_m = |confidence_m − confidence_{m-1}|
-    r_mask_m = 1 − IoU(m̂_true_{m-1}, m̂_true_m)
-    r_feat_m = ||H_{m-1} − H_m||_2 / mean(||H||_2)
-  
-  rank_x_m = rank(r_x_m among {1..T-1})
-  v_m = rank_conf_m + rank_mask_m + rank_feat_m
-  W = argtop-K non-adjacent (|m_i - m_j| ≥ 2), K ∈ {1,2,3}
-  
-  decoy_offset geometric; m̂_decoy_t = shift_mask(m̂_true_t, offset)
-  c_t = |2·m̂_true_t - 1|                             # pseudo-mask confidence weight
+Per codex explicit verdict: "STOP proposal iteration after this. The next acceptance-lift comes from data, not wording."
 
-Per-video PGD (100 steps, 3 stages):
-  Initialize: δ = 0 (supported on S_δ = ∪_k NbrSet(W_k) ∪ {0})
-              ν_k = small Gaussian noise (std 0.02/255)
-  base_insert_k = 0.5·x_{W_k-1} + 0.5·x_{W_k}        # temporal midframe
-  
-  For step = 1..100:
-    x'_t = clamp(x_t + δ_t, 0, 1) ∘ fake_quantize_STE           for t ∈ S_δ
-    insert_k = clamp(base_insert_k + ν_k, 0, 1) ∘ fake_quantize_STE
-    processed_t' = interleave(x', insert_k at W)
-    
-    SAM2VideoAdapter(processed, m_0) with bf16 autocast, no inference_mode
-    → pred_logits per processed-time frame
-    
-    mu_true_t  = Σ_pixels pred_logits_t · m̂_true_t  · c_t / normalization
-    mu_decoy_t = Σ_pixels pred_logits_t · m̂_decoy_t · c_t / normalization
-    
-    L_margin_insert   = Σ_k softplus(mu_true_{W_k} − mu_decoy_{W_k} + 0.75)
-    L_margin_neighbor = Σ_{t ∈ NbrSet\inserts} 0.5 · softplus(mu_true_t − mu_decoy_t + 0.75)
-    L_fid_orig = Σ_{t ∈ S_δ, t≥1} max(0, LPIPS(x'_t, x_t) − 0.20)
-    L_fid_ins  = Σ_k max(0, LPIPS(insert_k, base_insert_k) − 0.35)
-    L_fid_TV   = Σ_k max(0, TV(insert_k) − 1.2 · TV(base_insert_k))
-    L_fid_f0   = max(0, 1 − SSIM(x'_0, x_0) − 0.02)
-    
-    L = L_margin_insert + L_margin_neighbor
-      + λ(step) · (L_fid_orig + L_fid_ins + L_fid_TV) + λ_0 · L_fid_f0
-    
-    (δ, ν) ← (δ, ν) − η · sign(∇_{δ,ν} L)
-    clip δ_0 to ±2/255, δ_{t≥1, t∈S_δ} to ±4/255 (ν unbounded by ε)
-    
-    log: mu_true_trace_t, mu_decoy_trace_t, surrogate_J_drop_step,
-         per-frame internal LPIPS, f0 SSIM
-  
-  # (F16) Export + re-measure on artifact
-  processed_uint8 = build_and_export_uint8_JPEGs(δ, ν)  for each step
-  Re-measure fidelity on EXPORTED artifact
-  S_feas = { step : ALL exported metrics meet budget }   # HARD acceptance on EXPORT
-  
-  If S_feas empty → clip = INFEASIBLE (counts as failure in primary denominator)
-  Else → (δ*, ν*) = argmax surrogate_J_drop_exported over S_feas
+This is the FINAL refinement. Phase 5 begins next.
 
-Stages:
-  N_1 = 30 (attack only, λ=0)
-  N_2 = 40 (fidelity regularization: λ init 10, grow 2x per 10 steps when hinge violated)
-  N_3 = 30 (Pareto-best: η halved; tracking)
-```
+---
 
-### Pilot Gate (unchanged)
+## Revised Proposal (R4-final)
 
-3 clips × 4 configs, ~3-5 GPU-hours. GO if BOTH:
-- `J-drop(K=1 top) − J-drop(K=1 random) ≥ 0.05` on ≥ 2/3 clips
-- `J-drop(K=3 top) ≥ 0.20` on ≥ 2/3 clips
+### Title (CONDITIONAL — pre-registered)
 
-Plus anti-suppression check: `Δmu_decoy > 0 AND Δmu_decoy ≥ 2·max(0, -Δmu_true)` on ≥ 2/3.
+- **Strong pass**: *Memory-Mediated Failure of Prompt-Driven Video Segmentation: Causal Evidence from Internal Decoy Insertion with Sparse Bridge Perturbation*
+- **Partial pass**: *Memory-Mediated Persistence in Adversarial Attacks on Prompt-Driven Video Segmentation*
+- **Fail**: workshop pivot — *Engineered Insertion + Sparse Perturbation Attack on SAM2*
 
-NO-GO → pivot to attack-surface analysis paper.
+### Method Thesis (CONDITIONAL on A3 outcome)
 
-### Validation Suite (F15 consolidated + F16 measurement discipline)
+(Strong) "memory propagation is DOMINANT failure mode; collapse at insert positions specifically (not at matched control positions)"
+(Partial) "memory propagation is SUBSTANTIAL component; insert-position-specific collapse + bridge δ extends d_mem"
 
-**Main table (10 rows, all eval on EXPORTED uint8 artifact)**:
-| # | Config | ν-opt | δ-opt | Positions |
-|---|---|:---:|:---:|---|
-| 1 | Clean | — | — | — |
-| 2 | **Ours K=1 top** | ✓ | ✓ (top nbr) | top-1 |
-| 3 | Ours K=3 top | ✓ | ✓ | top-3 |
-| 4 | K=1 random (×5 paired bootstrap) | ✓ | ✓ | random-1 |
-| 5 | K=3 random (×5) | ✓ | ✓ | random-3 |
-| 6 | K=3 bottom | ✓ | ✓ | bottom-3 |
-| 7 | top-δ-only K=0 (phantom top positions) | N/A | ✓ (top nbr) | W_phantom = top |
-| 8 | random-δ-only K=0 (phantom random) | N/A | ✓ | W_phantom = random |
-| 9 | top-base-insert+δ (ν=0 midframe) | ✗ | ✓ | top-3 |
-| 10 | Canonical {6,12,14} | ✓ | ✓ | fixed |
+### Contribution Focus (R4 final, R3 + R4 negative-control hardening)
 
-**Restoration** (on processed_uint8 from row 2/3):
-- R2: attacked + clean Hiera at insert positions (W) only
-- R2b: attacked + clean Hiera at all frames
-- R3: attacked + clean non-cond bank
-- B-control: attacked + drop non-cond bank
+- **C1** (main, mechanism, paired):
+  - C1.a (causal, insert-position-SPECIFIC): collapse_attacked − collapse_control ≥ 0.10 on ≥7/10 (strong) / ≥0.05 on ≥6/10 (partial). Pre-registered.
+  - C1.b (persistence): bridge δ extends d_mem(t) above insert-only on ≥75% clips
+- **E1** (enabling search; openly necessary engineering)
+- **E2** (enabling no-regression L_keep_full)
+- **Deployment policy** (separately reported wrapper, NOT a contribution)
 
-**Appendix**: UAP-SAM2 per-clip, SAM2Long transfer, SAM2.1-Base transfer, DAVIS-30.
+### Complexity Budget (≤2 trainable, R2 locked)
 
-### Success Criteria (pre-committed, primary denominator = 10)
+Same as R2/R3.
 
-Paper's headline requires (≥ 7/10 feasible clips AND infeasible = failure):
+### Core Mechanism (R2 locked)
 
-| Claim | Condition |
-|---|---|
-| J-drop | mean(J-drop(ours)) ≥ 0.35 on EXPORTED artifact |
-| Placement vs random | ours ≥ max(2·random, random + 0.05) |
-| Placement vs bottom | ours ≥ max(3·bottom, bottom + 0.05) |
-| Insert presence | ours ≥ top-δ-only + 0.10 |
-| ν optimization | ours ≥ top-base-insert+δ + 0.05 |
-| Decoy vs suppression | Δmu_decoy > 0 AND Δmu_decoy ≥ 2·max(0, -Δmu_true) |
-| Hiera attribution | R2 ≥ +0.20 restoration |
-| Bank non-attribution | R3 ≤ +0.02 |
+Same.
 
-All conditions measured on the **exported uint8 artifact**, not internal float tensors.
+### Validation (R4 final)
 
-### Failure Mode Handling
+#### C1.a — memory causality WITH negative control
+- 10-clip + R4 hook spec.
+- Three configs per clip: A3-baseline / A3-attacked (block W_attacked) / A3-control (block W_control matched random non-insert).
+- Pre-registered:
+  - **Strong pass**: collapse_attacked ≥ 0.20 AND (collapse_attacked − collapse_control) ≥ 0.10 on ≥7/10
+  - **Partial pass**: collapse_attacked ≥ 0.10 AND (collapse_attacked − collapse_control) ≥ 0.05 on ≥6/10
+  - **Fail**: either threshold misses on majority
 
-| Failure | Detection | Handling |
+#### C1.b — persistence (R2 unchanged)
+Per-clip d_mem(t) trace; integral (full − only) > 0 on ≥7/10. T_obj 16/32/64 sensitivity in appendix.
+
+#### C2 — RAW joint headline (R3 unchanged)
+Table 1 RAW v5 vs A0 paired, headline gates apply only here. Wrapper deployment column separate.
+
+#### Ablations (R4)
+
+| # | Ablation | R4 lock |
 |---|---|---|
-| Pilot Δ_top < 0.05 or K=3 top < 0.20 | 3-clip pilot | NO-GO → pivot paper |
-| Clip infeasible (S_feas empty) | After PGD | Counted as failure in primary denominator |
-| Only ν drives success (top-δ-only ≈ ours) | DAVIS-10 result | Paper becomes "vulnerability-aware local perturbation", not "insertion"; user-constraint check |
-| Δmu_decoy ≤ 0 or ratio < 2 | mu trace | Investigate margin weighting; may retrain with larger margin |
-| R2 recovers < 0.20 (Hiera not where damage lives) | Restoration | Report honestly; mechanism is distributed; weaker attribution claim |
+| **A1** | Bridge δ isolated (R3) | same upstream W*+ν+decoy; A1-only zeros ALL bridge variables; A1-full = full Stage 14 |
+| **A2** | Placement matters | random K=3 vs joint search |
+| **A3** | Memory-causality with negative control | A3-baseline + A3-attacked + A3-control (matched random non-insert) |
 
-### Compute & Timeline
+### Compute & Timeline (R4 — 3 days, ~23 GPU-h)
 
-- Pilot: 3-5 GPU-hours on Pro 6000.
-- DAVIS-10 main (10 configs with multi-draw random): 5-8 GPU-hours.
-- Restoration: 0.5 GPU-hour.
-- Appendix: 8-12 GPU-hours.
-- Total: ~20 GPU-hours. Timeline: 4-5 focused days from PILOT-PASS.
+| Day | Task | GPU-h | Gate |
+|---|---|---|---|
+| 1 AM | impl A3 hook + extractor + control sampler | minimal | code review |
+| 1 PM | A3-baseline + A3-attacked + A3-control on 10 clips + d_mem trace | 10 GPU-h | A3 verdict gates framing |
+| 2 | C2 RAW joint v5 + A0 paired + A1 (paired) overnight | 8 GPU-h | headline gates |
+| 3 AM | A2 random + T_obj sens + reporting | 5 GPU-h | tables |
+| 3 PM | writeup with conditional framing | author | submit |
+| **Total** | | **~23 GPU-h** | **3 days** |
 
-### Status
+### Discussion (R3 E1 ownership unchanged)
 
-**Pre-pilot ceiling 8.4/10 confirmed by reviewer.** No further non-empirical improvements available. Next step: run the gated pilot.
+### Failure Modes & Pre-registered Decisions (R4)
+
+| Failure | Detection | Decision |
+|---|---|---|
+| Bridge δ regress per clip | RAW < A0 | Report honestly |
+| A3 strong pass | collapse_att ≥0.20 AND att−ctrl ≥0.10 on ≥7/10 | Framing-A |
+| A3 partial pass | collapse_att ≥0.10 AND att−ctrl ≥0.05 on ≥6/10 | Framing-B |
+| A3 control comparable to attacked | att−ctrl < 0.05 on majority | Framing-C workshop pivot (mechanism not specific to inserts) |
+| A3 attacked too weak | collapse_att < 0.10 on majority | Framing-C workshop pivot |
+
+---
+
+## Ceiling Declaration
+
+Per codex R4: **"The proposal architecture has reached the natural ceiling for proposal-stage iteration. Further proposal refinement now has diminishing returns. One good A3 run will move this more than another full review round."**
+
+Final proposal-stage score: **8.4/10 REVISE (CEILING)**.
+
+Same pattern as 2026-04-23 v4-vadi run (also ended at 8.4 PRE-PILOT CEILING). This is structural — when implementation exists + paper claim plausible + validation experiments unrun, proposal-stage scores asymptote ~8.4. The remaining 0.6 to READY=9 is data-bound.
+
+**Termination**: Skipping round 5 review. Moving to Phase 5 final reports.

@@ -1,14 +1,15 @@
 {
   "phase": "done",
   "round": 4,
-  "threadId": "019db8a1-7059-76b1-9958-ba5edc222de5",
+  "threadId": "019dcd87-c42b-7b03-9139-34df6b6ebd89",
   "last_score": 8.4,
-  "last_verdict": "REVISE (formal) / PRE-PILOT CEILING (internal, reviewer-confirmed)",
+  "last_verdict": "REVISE (CEILING)",
   "status": "completed",
-  "topic": "memshield_v4_insert_vulnerability_aware_reframe",
-  "termination_reason": "pre_pilot_ceiling_confirmed_by_reviewer_at_round_4",
-  "ceiling_note": "R4 explicit: 'Pre-pilot ceiling confirmed: 8.4. Further proposal polishing has diminishing returns; run the gated pilot.'",
-  "next_step": "run_3_clip_pilot_then_GO_or_NO_GO_per_pre_committed_conditions",
-  "user_design_constraint_in_CLAUDE_md": "insert+modify required, no suppression, principled placement via vulnerability scoring — all reviewer-attempted drift blocked",
-  "timestamp": "2026-04-23T03:40:00"
+  "topic": "v5_paper_method_design_post_novelty_check",
+  "termination_reason": "proposal_stage_ceiling_confirmed_by_reviewer_at_round_4",
+  "ceiling_note": "R4 explicit: 'proposal architecture has reached natural ceiling for proposal-stage iteration; further refinement has diminishing returns; one good A3 run will move this more than another full review round'. Pattern matches 2026-04-23 v4-vadi run (also 8.4 PRE-PILOT CEILING).",
+  "next_step": "implement R4-spec hook + extractor + control sampler (~5h); run A3 first (10 GPU-h); gate paper framing on A3 verdict",
+  "user_constraint": "must keep insert + original-frame delta joint, must address Li-2023 + PATA in related work, must remain defensible at AAAI level",
+  "papers_studied": ["arxiv 2309.13857 Li T-CSVT 2023 Hard Region Discovery", "arxiv 2310.10010 PATA Black-Box SAM"],
+  "timestamp": "2026-04-27T14:50:00"
 }

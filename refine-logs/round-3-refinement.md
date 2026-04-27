@@ -1,164 +1,259 @@
-# Round 3 Refinement (VADI)
+# Round 3 Refinement
 
-## Problem Anchor (verbatim)
+## Problem Anchor (verbatim, unchanged)
 
-(see `PROBLEM_ANCHOR_2026-04-23_v4-insert.md`)
+[See `PROBLEM_ANCHOR_2026-04-27.md`]
 
 ## Anchor Check
 
-Preserved. No drift.
+- **Original bottleneck**: SAM2 attack via insertion + bridge δ; memory-bank propagation is attack surface.
+- **Why revised method still addresses it**: Same architecture as R0/R1/R2. R3 changes are operational locking + conditional paper framing — no method change.
+- **Reviewer suggestions rejected as drift**: NONE.
 
 ## Simplicity Check
 
-No new components. R3 fixes are precision on existing elements (denominators, decomposition signs, absolute gaps, phantom positions).
+- **Dominant contribution**: same C1 + E1 + E2 structure from R2.
+- **Components removed/merged**: none.
+- **R3 reviewer suggestions accepted**: operational A1 lock, A3 hook pseudocode, conditional paper framing, table/column separation, T_obj sensitivity appendix.
+- **R3 simplification ACCEPTED**: compress traj+α+warp+R to "masked bridge-edit parameterization" in main paper; full math in Appendix B.
+- **R3 modernization ACCEPTED partially**: T_obj 16/32/64 sensitivity in appendix.
+- **R3 modernization REJECTED**: layer-sensitivity per-block hook → only run if A3 strong-passes; otherwise out of scope.
 
 ## Changes Made
 
-### F11 — Primary denominator = 10, infeasible = failure
+### Change 1 — Operationally lock A1 (IMPORTANT)
 
+- **R3 reviewer**: A1 correct in concept but enforce same upstream W* and ν, ONLY zero bridge variables.
+- **Action**: Pseudocode + pre-registration:
+```python
+# Shared upstream (run once per clip):
+W_star = joint_curriculum_placement_search(clip, ...)
+nu_init = A0_polish(clip, W_star, ...)            # 100-step PGD
+decoy_seeds = build_decoy_insert_seeds(clip, W_star)
+state = build_attack_state_from_W(W_star, ...)
+
+# A1-only arm (insert-only at W*, NO bridge δ):
+x_only = export_with_inserts(clip, decoy_seeds + nu_init, W_star)
+# ALL bridge-edit variables zeroed:
+#   traj.anchor_offset = 0; traj.delta_offset = 0
+#   edit_params.alpha_logits = -inf (alpha_max → 0)
+#   edit_params.warp_s = 0; edit_params.warp_r = 0
+#   R = 0
+# I.e., bridges are unmodified clean frames; inserts are decoy_seeds+nu_init.
+
+# A1-full arm (insert + bridge δ via Stage 14):
+traj_*, edit_*, R_* = anchored_stage14_polish(state, nu_init, ...)
+x_full = export_with_inserts_and_bridge_delta(...)
+
+# Compare J-drop(x_only) vs J-drop(x_full).
+# Same SAM2 eval, same fidelity check, paired per clip.
 ```
-n_success := count of clips meeting ALL causal criteria WITH all fidelity constraints satisfied
-n_infeasible := count of clips where S_feas is empty
-n_feasible_but_fail := count of clips with S_feas non-empty but causal criteria not met
+- **Acceptance pre-registered**: A1-full mean paired lift over A1-only ≥ +0.05; ≥6/10 strict wins; positive median.
+- **Reasoning**: Both arms share W*, ν, decoy seeds, and SAM2 eval. The ONLY difference is bridge variables = 0 vs Stage-14-optimized. Reviewers cannot blame placement search or insert ν optimization for the lift.
 
-Primary headline: n_success / 10 (infeasible counts as failure)
-Report also: n_infeasible / 10, n_feasible_but_fail / 10, feasible-only mean J-drop (diagnostic)
+### Change 2 — Pre-register A3 hook behavior (IMPORTANT)
+
+- **R3 reviewer**: pre-register exactly what `BlockInsertMemoryWritesHook` modifies, so reviewers can't claim intervention changed more than memory writes.
+- **Action**: Hook specification:
+```python
+class BlockInsertMemoryWritesHook:
+    """Nulls memory-bank writes from frames at insert positions W*.
+    
+    SAM2.1's `predictor.process_frame(t, ...)` calls 
+    `memory_attention.encode_memory(t, features_t, mask_t)` 
+    which appends a per-frame memory entry to the bank.
+    
+    THIS HOOK: at frames t ∈ W_attacked (the insert positions in attacked-space),
+    skip the encode_memory call. The memory bank does NOT receive an entry from t.
+    
+    Subsequent frames t' > t still query the bank as usual; the bank just lacks 
+    the would-be-decoy entry. The current-frame Hiera forward at t still runs 
+    normally (so the inserted frame is still SEEN by SAM2; only its memory 
+    contribution is suppressed).
+    
+    Everything else unchanged: 
+      - Hiera encoder forward (yes)
+      - mask decoder forward (yes)  
+      - cross-attention to existing bank entries (yes)
+      - bank entries from previous t' < t (yes, untouched)
+    """
 ```
+Pre-registered. Implementation = ~50 LOC patch on `SAM2VideoAdapter`. Reviewers cannot accuse the intervention of modifying more than the targeted memory-write step.
+- **Reasoning**: Hook scope is now PR-quality precise. The intervention removes EXACTLY the inserted-frame memory contribution — and nothing else.
 
-Headline claim in paper is AGAINST THE FULL DAVIS-10 DENOMINATOR. Infeasible = failure.
+### Change 3 — Conditional paper framing pre-committed (IMPORTANT)
 
-### F12 — Phantom insertion positions for δ-only baselines
+- **R3 reviewer**: title/abstract/claim language explicitly conditional on A3 outcome.
+- **Action**: Pre-register both framings:
 
+**Framing-A (Strong pass: A3 ≥ 0.20 abs collapse on ≥7/10)**
 ```
-For "top-δ-only (K_ins=0)":
-  W_phantom = top-K positions from rank-sum scorer (same as "Ours")
-  S_δ = ∪_k NbrSet(W_phantom_k) ∪ {0}
-  No inserts placed. δ optimized on S_δ.
+TITLE: Memory-Mediated Failure of Prompt-Driven Video Segmentation: 
+       Causal Evidence from Internal Decoy Insertion
 
-For "random-δ-only (K_ins=0)":
-  W_phantom = K random non-adjacent positions (5 draws, paired bootstrap)
-  S_δ = ∪_k NbrSet(W_phantom_k) ∪ {0}
-  No inserts placed.
-```
-
-This matches local-δ support between full method and ablation.
-
-### F13 — Signed anti-suppression decomposition
-
-**Before**: `|Δmu_decoy| / |Δmu_true| ≥ 2`
-
-**After**:
-```
-Δmu_true_t  = mu_true_t(attacked)  − mu_true_t(clean)     per t ∈ (inserts ∪ NbrSet)
-Δmu_decoy_t = mu_decoy_t(attacked) − mu_decoy_t(clean)    same t
-
-Aggregated (mean over t):
-  Δmu_true  = mean_t Δmu_true_t
-  Δmu_decoy = mean_t Δmu_decoy_t
-
-Report both separately.
-
-Anti-implicit-suppression guarantee:
-  Δmu_decoy > 0
-  Δmu_decoy ≥ 2 · max(0, -Δmu_true)
-```
-
-First condition: decoy is actually rising. Second: if true-suppression happens (-Δmu_true > 0), decoy rise is at least 2× that amount. This ensures the contrastive margin wins via decoy elevation, not true collapse alone.
-
-### F14 — Absolute + ratio gaps for placement
-
-```
-Placement causality (replaces ratio-only):
-  ours ≥ max(2.0 · random_mean,  random_mean + 0.05)
-  ours ≥ max(3.0 · bottom,       bottom      + 0.05)
-
-Insert presence (already absolute):
-  ours ≥ top-δ-only + 0.10
-
-ν optimization (already absolute):
-  ours ≥ top-base-insert+δ + 0.05
-```
-
-Ratios alone unstable when denominators are near zero; absolute guards prevent false positives.
-
-### F15 — Summary of all causal claims (consolidated)
-
-Paper's pre-committed success bar (≥ 7/10 feasible clips, primary denominator all 10):
-
-| Claim | Condition |
-|---|---|
-| Headline J-drop | J-drop(ours) ≥ 0.35 |
-| Placement vs random | ours ≥ max(2·rand, rand+0.05) |
-| Placement vs bottom | ours ≥ max(3·bot, bot+0.05) |
-| Insert presence | ours ≥ top-δ-only + 0.10 |
-| ν optimization | ours ≥ top-base-insert+δ + 0.05 |
-| Decoy-not-suppression | Δmu_decoy > 0 AND Δmu_decoy ≥ 2·max(0, -Δmu_true) |
-| Mechanism attribution (Hiera) | R2 restoration ≥ +0.20 |
-| Mechanism attribution (bank) | R3 restoration ≤ +0.02 |
-
-## Revised Proposal (round-3)
-
-### Problem Anchor
-(verbatim, unchanged)
-
-### Method Thesis
-
-Vulnerability-aware insertion for SAM2 dataset protection: rank-sum 3-signal scorer picks top-K non-adjacent positions from clean-SAM2 signals; insert content (ν, LPIPS-TV bound) + local δ on insert neighborhoods are jointly optimized under a contrastive decoy-margin loss (no suppression, no object_score). Causal isolation via 10-config matched-budget study; mechanism attribution via restoration counterfactuals.
-
-### Contribution Focus
-
-- **C1 (dominant)**: vulnerability-aware insertion with full causal isolation — placement (top/random/bottom), insert presence (vs δ-only), and insert optimization (vs base-insert) — achieving J-drop ≥ 0.35 at fidelity triad on DAVIS-10, with signed decoy-vs-suppression decomposition.
-- **C2 (supporting)**: restoration-counterfactual attribution confirming damage lives in current-frame Hiera pathway at insert positions.
-- **Non-contributions**: as before.
-
-### Complexity Budget
-
-Unchanged.
-
-### System Overview
-
-```
-Offline (GT-free):
-  clean_SAM2 forward → m̂_true_t, confidence_t, H_t
-  Rank-sum 3-signal scorer → W = top-K non-adjacent
-  decoy_offset geometric; m̂_decoy_t = shift_mask(m̂_true_t)
-
-Per-video PGD (100 steps, 3 stages):
-  δ supported on S_δ = ∪_k NbrSet(W_k) ∪ {0}
-  base_insert_k = 0.5·x_{W_k-1} + 0.5·x_{W_k}
-  insert_k = clamp(base_insert_k + ν_k) ∘ fake_quant
-  x'_t = clamp(x_t + δ_t) ∘ fake_quant for t ∈ S_δ; else x_t
-  processed = interleave(x', insert_k at W)
-  
-  Forward → pred_logits_t per processed-time frame
-  mu_true_t  = confidence-weighted mean(pred_logits_t on m̂_true_t)
-  mu_decoy_t = confidence-weighted mean(pred_logits_t on m̂_decoy_t)
-  
-  L_margin_insert   = Σ_k softplus(mu_true_{W_k} − mu_decoy_{W_k} + 0.75)
-  L_margin_neighbor = Σ_{t ∈ NbrSet\inserts} 0.5·softplus(mu_true_t − mu_decoy_t + 0.75)
-  L_fid_orig = Σ_{t ∈ S_δ, t≥1} max(0, LPIPS(x'_t, x_t) − 0.20)
-  L_fid_ins  = Σ_k max(0, LPIPS(insert_k, base_insert_k) − 0.35)
-  L_fid_TV   = Σ_k max(0, TV(insert_k) − 1.2·TV(base_insert_k))
-  L_fid_f0   = max(0, 1 − SSIM(x'_0, x_0) − 0.02)
-  
-  L = L_margin_insert + L_margin_neighbor + λ(step)·(L_fid_orig + L_fid_ins + L_fid_TV) + λ_0·L_fid_f0
-  
-  PGD step; clip δ_0 ε=2/255, δ_{t≥1, t∈S_δ} ε=4/255; ν unbounded by ε
-  log: mu_true_trace_t, mu_decoy_trace_t, surrogate_J_drop, per-frame LPIPS, f0 SSIM
-  
-  S_feas = {steps : L_fid_orig=L_fid_ins=L_fid_TV=L_fid_f0 = 0}
-  If S_feas empty → clip = INFEASIBLE (failure in primary denominator)
-  Else → (δ*, ν*) = argmax surrogate_J_drop over S_feas
+ABSTRACT thesis sentence:
+"We show that SAM2's prompt-conditioned temporal memory propagation is the 
+DOMINANT failure mode under publisher-side adversarial attack, providing 
+causal evidence via memory-write blocking that internal decoy insertion 
+attacks lose ≥0.20 absolute J-drop when the inserted frames cannot enter 
+the memory bank."
 ```
 
-### Pilot Gate (unchanged)
+**Framing-B (Partial pass: 0.10 ≤ collapse < 0.20 OR <7/10 clips)**
+```
+TITLE: Memory-Mediated Persistence in Adversarial Attacks on Prompt-Driven 
+       Video Segmentation
 
-3 clips × 4 configs. GO if (a) Δ_top ≥ 0.05 on 2/3 AND (b) J-drop(K=3 top) ≥ 0.20 on 2/3, AND pilot anti-suppression check: `Δmu_decoy > 0 AND Δmu_decoy ≥ 2·max(0,-Δmu_true)` on ≥ 2/3.
+ABSTRACT thesis sentence:
+"We provide evidence that SAM2's prompt-conditioned temporal memory 
+propagation is a SUBSTANTIAL component of failure mode under publisher-
+side adversarial attack, with internal decoy insertion attacks losing 
+≥0.10 absolute J-drop when inserted-frame memory writes are blocked, 
+while bridge-frame perturbations measurably extend the memory divergence 
+beyond the insert-only baseline."
+```
 
-### Validation (round-2 10-row main table unchanged in content; add F11 reporting)
+**Framing-C (Fail: <0.10 abs collapse on majority)**
+```
+DECISION: Pre-registered workshop pivot. The paper retires the memory-
+mediated mechanism claim; resubmit as workshop paper "Engineered Insertion 
++ Sparse Perturbation Attack on SAM2" with empirical effectiveness as the 
+contribution and mechanism analysis explicitly inconclusive.
+```
 
-Main headline: J-drop (primary denominator = **ALL 10** DAVIS-10 clips, infeasible = failure). Plus side-table: n_infeasible / 10, feasible-only mean.
+- **Reasoning**: Reviewers see honest pre-commitment. Result-driven framing is built in.
 
-### Compute
+### Change 4 — Main vs Deployment results separation (MINOR)
 
-Unchanged ~20 GPU-hours.
+- **R3 reviewer**: raw-joint = main table; wrapper-selected = separate column.
+- **Action**: Results structure pre-registered:
+
+**Table 1 (MAIN — RAW JOINT v5 vs A0, paired)**:
+| Clip | A0 J-drop | RAW v5 J-drop | Lift | Win? | polish_applied? |
+|---|---|---|---|---|---|
+
+Headline gates apply to RAW v5 column ONLY. polish_applied column documents whether bridge δ was kept by the optimizer's internal best-step selection (this is internal Stage 14 best-of-30; NOT the export-time wrapper).
+
+**Table 2 (DEPLOYMENT — wrapper-selected, separate)**:
+| Clip | RAW v5 J-drop | A0 J-drop | Wrapper publishes | Final J-drop |
+|---|---|---|---|---|
+
+Wrapper-selected = max(RAW v5, A0) per clip. Reported for deployment readers; NOT used for headline gates.
+
+### Change 5 — E1 framed as openly necessary engineering (MINOR)
+
+- **R3 reviewer**: Don't hide E1; don't compete with C1; openly label as enabling search procedure.
+- **Action**: §Discussion E1 paragraph slightly tweaked. Removes "this is itself a finding" elevation; kept as "engineering necessity given empirically validated failure of vulnerability heuristics on memory-bank VOS."
+- New text:
+> "Why search, not heuristic: We rely on a joint curriculum search for placement because vulnerability heuristics adapted from per-frame fragility (a 3-signal scorer combining confidence drop, mask discontinuity, and Hiera discontinuity) were empirically falsified on a 10-clip ranked-vs-random comparison (mean J-drop 0.488 ranked vs 0.534 random — anti-correlated). The search is necessary engineering for this attack surface; we do not claim it as a primary contribution."
+
+### Change 6 — Compress traj+α+warp+R in main paper (MINOR)
+
+- **R3 reviewer**: compress to "masked bridge-edit parameterization"; full math in Appendix B.
+- **Action**: Main paper §Method now says:
+> "Bridge δ is parameterized as a **masked bridge-edit composite**: a learned alpha-paste of a duplicate-object decoy onto each bridge frame, with a small spatial warp and a masked residual confined to the decoy support. Full equations in Appendix B."
+
+Appendix B retains the (traj.anchor_offset, traj.delta_offset, alpha_logits, warp_s, warp_r, R[k, l]) parameterization details.
+
+### Change 7 — T_obj sensitivity appendix (MINOR modernization)
+
+- **R3 reviewer**: appendix sensitivity on T_obj (16/32/64 tokens).
+- **Action**: Add appendix experiment running A3 + d_mem trace with T_obj = 16, 32, 64. Same hardware, ~1 GPU-h additional.
+- **Reasoning**: Strengthens d_mem diagnostic robustness without main-story bloat.
+
+---
+
+## Revised Proposal (full, R3-locked)
+
+### Title (CONDITIONAL)
+
+- **Strong pass**: *Memory-Mediated Failure of Prompt-Driven Video Segmentation: Causal Evidence from Internal Decoy Insertion*
+- **Partial pass**: *Memory-Mediated Persistence in Adversarial Attacks on Prompt-Driven Video Segmentation*
+- **Fail**: workshop pivot
+
+### Method Thesis (CONDITIONAL)
+
+(Strong pass) — "memory propagation is the DOMINANT failure mode; causal evidence ≥0.20 collapse."
+(Partial pass) — "memory propagation is a SUBSTANTIAL component; ≥0.10 collapse + bridge δ extends d_mem."
+
+### Contribution Focus (R2-locked, R3-conditional language)
+
+- **C1** (main, mechanism, paired):
+  - C1.a: J-drop COLLAPSES (≥0.20 strong / ≥0.10 partial pre-registered) under memory-write blocking
+  - C1.b: bridge δ extends d_mem(t) above insert-only on ≥75% clips
+- **E1** (enabling search, openly necessary engineering — heuristic anti-correlated)
+- **E2** (enabling no-regression L_keep_full)
+- **Deployment policy** (separately reported wrapper)
+- **Non-contributions**: same as R2
+
+### Complexity Budget (≤2 trainable, R2-locked)
+
+- Frozen: SAM2.1-Tiny, SAM2VideoAdapter, LPIPS, STE, A0, decoy alpha-paste compositor.
+- New trainable (2): δ on bridge frames; ν on inserts.
+- Diagnostic-only (no training signal): `BlockInsertMemoryWritesHook` (R3 hook spec); memory-readout extractor (R2 protocol).
+- Non-contribution components: joint curriculum placement search (E1); dense L_keep_full (E2); export wrapper (deployment).
+
+### Core Mechanism (mathematically locked, R2 d_mem)
+
+(decoy family, optimized variables, loss, d_mem protocol — ALL UNCHANGED from R2)
+
+### Validation (R2 + R3 operational locks)
+
+#### C1.a — memory causality
+- **Experiment**: 10-clip held-out + `BlockInsertMemoryWritesHook` (R3 spec).
+- **Strong / Partial / Fail** (R2 pre-registered).
+
+#### C1.b — persistence extension
+- **Experiment**: per-clip d_mem(t) trace per R2 protocol.
+- **Acceptance**: integral of (d_mem_full − d_mem_only) over (w_K, w_K + L) > 0 on ≥7/10.
+- **Sensitivity (R3 appendix)**: T_obj ∈ {16, 32, 64}.
+
+#### C2 — RAW joint headline (R3 locked)
+- **MAIN TABLE = RAW JOINT v5 vs A0 paired**
+- Wrapper-selected = SEPARATE deployment table
+- Headline gates apply to RAW JOINT only:
+  - ≥5/10 strict wins
+  - mean ≥+0.05
+  - median > 0
+  - top contributor < 40%
+  - mean joint J-drop ≥ 0.55
+
+#### Ablations (R3 locked)
+
+| # | Ablation | R3 lock | Acceptance |
+|---|---|---|---|
+| **A1** | Bridge δ contribution, isolated | Same upstream W*, ν, decoy_seeds; ONLY bridge variables (traj/α/warp/R) zeroed in control arm | ≥+0.05 mean lift, ≥6/10 strict, positive median |
+| **A2** | Placement matters | Random K=3 vs joint search, both with full v5 polish | Search > random by ≥+0.10 mean lift |
+| **A3** | Memory-causality | Full v5 vs full v5 + R3-spec'd hook | Strong (≥0.20/7-clip) / Partial (≥0.10/6-clip) / Fail |
+
+### Failure Modes & Decisions (R2 + R3)
+
+| Failure | Detection | Pre-registered decision |
+|---|---|---|
+| Bridge δ regress per clip | RAW joint < A0 | Report honestly |
+| A3 strong | ≥0.20/7-clip | Framing-A |
+| A3 partial | ≥0.10/6-clip OR <7/10 | Framing-B |
+| A3 fail | <0.10/majority | Framing-C (workshop pivot) |
+
+### Compute & Timeline (R2 ordering)
+
+| Day | Task | Compute | Decision gate |
+|---|---|---|---|
+| Day 1 AM | Implement R3-spec hook (~2h) + extractor (~1h) | minimal | code review |
+| Day 1 PM | A3 + d_mem trace 10 clips | 7 GPU-h | **A3 verdict gates framing** |
+| Day 2 | C2 RAW joint v5 + A0 paired + A1 (paired) overnight | 8 GPU-h | Headline gates |
+| Day 3 AM | A2 random + T_obj sensitivity | 5+1 GPU-h | Ablation table |
+| Day 3 PM | Writeup with conditional framing | 4 author-h | Submit |
+| **Total** | | **~21 GPU-h** | **3 days** |
+
+### Discussion (R3 E1 ownership re-tweaked)
+
+> "Why search, not heuristic: We rely on a joint curriculum search for placement because vulnerability heuristics adapted from per-frame fragility (3-signal scorer: confidence drop, mask discontinuity, Hiera discontinuity) were empirically falsified on 10-clip ranked-vs-random (mean J-drop 0.488 vs 0.534 — anti-correlated). The search is necessary engineering for this attack surface; we do not claim it as a primary contribution."
+
+### Experiment Handoff Inputs
+
+- **Must-prove claims**: C1.a (strong / partial / fail tier), C1.b, C2 RAW joint headline gates.
+- **Must-run ablations**: A1 (R3-locked), A2, A3 (FIRST, R3-locked hook).
+- **Must-do appendices**: T_obj 16/32/64 sensitivity.
+- **Critical datasets / metrics**: DAVIS-2017 10 held-out, J-drop on uint8 export, d_mem(t) per R2 protocol.
+- **Highest-risk assumptions**: A3 collapse magnitude (pre-registered narrowing); RAW joint headline gates; hook implementation modularity.

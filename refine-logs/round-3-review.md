@@ -1,103 +1,86 @@
-# Round 3 Review (VADI)
+# Round 3 Review
 
-**Reviewer**: gpt-5.4 @ xhigh reasoning
-**Thread**: `019db8a1-7059-76b1-9958-ba5edc222de5`
-**Date**: 2026-04-23
+**Reviewer**: GPT-5.4 xhigh (same thread)
+**Thread**: `019dcd87-c42b-7b03-9139-34df6b6ebd89`
+**Date**: 2026-04-27
+**Verdict**: **REVISE** (7.8/10, +0.6 from R2)
 
-## Parsed Scores
+## Scores
 
-| Dimension | Score |
-|---|---:|
-| Problem Fidelity | 9.2 |
-| Method Specificity | 8.5 |
-| Contribution Quality | 8.2 |
-| Frontier Leverage | 7.6 |
-| Feasibility | 6.9 |
-| Validation Focus | 8.7 |
-| Venue Readiness | 7.3 |
-| **Weighted Overall** | **8.2 / 10** |
+| Dimension | R1 | R2 | **R3** | Δ R2→R3 |
+|---|---|---|---|---|
+| Problem Fidelity | 6 | 8 | **9** | +1 |
+| Method Specificity | 6 | 7 | **8** | +1 |
+| Contribution Quality | 5 | 7 | **7** | 0 |
+| Frontier Leverage | 7 | 8 | **8** | 0 |
+| Feasibility | 8 | 7 | **8** | +1 |
+| Validation Focus | 5 | 6 | **8** | +2 |
+| Venue Readiness | 5 | 6 | **6** | 0 |
+| **Overall** | 6.0 | 7.2 | **7.8** | +0.6 |
 
-## Verdict
+**Drift**: NONE.
 
-**REVISE / strong PILOT-READY, not READY.** "Focused, elegant, implementable proposal. Next score jump depends on empirical evidence, not more proposal polishing."
+## Key codex assessments
 
-## Drift Warning
+- **A1 fix**: correctly isolating bridge δ (with caveat: enforce same upstream W* and ν, ONLY zero bridge variables in control)
+- **d_mem fix**: largely free of circularity. Remaining issue is arbitrariness (top-32, c_K_clean) — pre-registered + appendix sensitivity is enough
+- **A3 pre-registration**: honest, sufficient
+- **A3 first**: right scientific sequencing
+- **READY blocker**: empirical dependence of headline on A3 + nontrivial search dependence. "Now a credible AAAI candidate contingent on results, not READY-level by proposal quality alone."
 
-**NONE.**
+## Remaining issues (action items)
 
-## P0 Sub-7 Fix
+### IMPORTANT — Operationally lock A1
+Same W*, same ν, same fidelity accounting; **ONLY** bridge variables (traj, α, warp, R) zeroed. Add pseudocode showing the same upstream branch.
 
-### F11 — Feasibility denominator (Feasibility, 6.9)
+### IMPORTANT — Pre-register hook behavior for A3
+`BlockInsertMemoryWritesHook` must specify EXACTLY what it modifies (so reviewers can't claim intervention changed more than memory writes).
 
-"Excluding infeasible clips from success counting" reads as hiding failures.
+### IMPORTANT — Conditional paper framing pre-committed
+Title / abstract / claim language explicitly conditional on A3 outcome:
+- Strong pass: "dominant failure mode"
+- Partial pass: "substantial memory-mediated component"
+- Fail: workshop pivot
+Pre-register both templates.
 
-- **Fix**: primary success denominator = **ALL 10 clips**. Infeasible clips count as **failures**. Report `n_infeasible / 10` and feasible-only performance SEPARATELY as diagnostic, not as primary success metric.
+### MINOR — Main vs deployment table separation
+Raw-joint = main table. Wrapper-selected = separate "Deployment" column / table.
 
-## Other Precision Improvements (not sub-7 but push toward 8.3-8.4)
+### MINOR — E1 honest engineering label
+Don't hide E1; don't elevate it to compete with C1; just label as "the empirically necessary search procedure for placement."
 
-### F12 — Matched local-δ support via phantom insertion positions
+### MINOR — Appendix sensitivity on T_obj (16/32/64 tokens)
+Strengthens diagnostic, no main-story bloat.
 
-- `top-δ-only (K=0)` and `random-δ-only (K=0)` are ambiguous: what positions define their local δ support?
-- **Fix**: use PHANTOM insertion positions (same top-K / random-K ranks) to define the δ support S_δ. The "phantom" inserts themselves are NOT placed; only δ at the neighborhoods of those positions is optimized. This matches the local-δ support between full-method and ablation.
+### MINOR — Compress traj+α+warp+R in main paper
+Use "masked bridge-edit parameterization" in main; full equations in Appendix B.
 
-### F13 — Signed anti-suppression decomposition (replaces ratio)
-
-**Before**: `|Δmu_decoy| / |Δmu_true| ≥ 2`
-
-**After** (signed):
-```
-require:  Δmu_decoy > 0  AND  Δmu_decoy ≥ 2 · max(0, -Δmu_true)
-report:   Δmu_true and Δmu_decoy separately
-```
-
-Rationale: ratios are unstable when denominators are small; and both-negative cases can pass `|ratio|≥2` trivially. Signed form ensures decoy is actually rising AND the true-suppression contribution is bounded.
-
-### F14 — Absolute + ratio gaps (not just ratio)
-
-**Before**: "ours ≥ 2× random" (ratio)
-
-**After** (ratio + absolute):
-```
-ours ≥ max(2 × random, random + 0.05)      [placement vs random]
-ours ≥ max(3 × bottom, bottom + 0.05)      [placement vs bottom]
-ours ≥ top-δ-only + 0.10                  [insert presence — already absolute]
-ours ≥ top-base-insert+δ + 0.05           [ν optimization — already absolute]
-```
-
-Prevents "ratio satisfied but both near zero" passing.
-
-## Answers (detailed)
-
-1. **4 causal claims cover insert causality?** Mostly yes. Need F12 precision (phantom insertion positions for δ-only baselines).
-2. **Rank-sum simple enough?** Yes.
-3. **Hard feasibility acceptance honest enough?** No — F11 fix needed.
-4. **Ratio anti-suppression sufficient?** No — F13 signed form needed.
-5. **Pre-pilot ceiling?** 8.2 → 8.3-8.4 with F11-F14. **Cannot honestly reach ≥ 8.5 without pilot evidence.**
-
-## Raw
+## Raw response
 
 <details>
-<summary>Click</summary>
+<summary>Codex R3 (verbatim, key passages)</summary>
 
-R3 score: **8.2 / 10, strong PILOT-READY, not READY**.
+Scores: PF 9, MS 8, CQ 7, FL 8, F 8, VF 8, VR 6. Overall 7.8.
 
-Scores:
-- Problem Fidelity 9.2, Method Specificity 8.5, Contribution Quality 8.2, Frontier Leverage 7.6, Feasibility 6.9, Validation Focus 8.7, Venue Readiness 7.3.
+A1 is now correctly isolating bridge δ, with caveat: W* and ν must be frozen from same upstream branch, control arm only zeros/disables bridge-edit variables.
 
-Sub-7: Feasibility — infeasible-clip accounting. Primary success denominator = 10, infeasible = failure. Feasible-only as side diagnostic.
+d_mem fix largely free of circularity. Top-32 and c_K_clean are design choices, acceptable if pre-registered with appendix sensitivity.
 
-4 causal claims mostly cover gap. Add: top-δ-only / random-δ-only use PHANTOM insertion positions to match local-δ support.
+Dual-threshold A3 pre-registration honest. Strong/partial/fail much better than post-hoc reframing.
 
-Rank-sum simple enough. Yes.
+Putting A3 first is right scientific sequencing.
 
-Hard feasibility + n/10 good, but excluding from success is hiding failures. Primary denominator = all 10.
+Contribution structure now sharper but not at AAAI ≥9 ex ante. Credible AAAI candidate contingent on results, not READY by proposal quality alone.
 
-Ratio anti-suppression insufficient. Use signed: `Δmu_decoy > 0 AND Δmu_decoy ≥ 2·max(0, -Δmu_true)`. Report Δmu_true separately.
+Why not READY: empirical dependence on A3 + nontrivial search dependence. C1 properly framed but paper lives/dies on memory-write-blocking collapse magnitude.
 
-Absolute gaps beside ratios: `ours ≥ 2× random AND ours ≥ random + 0.05` etc.
+Action items:
+1. Lock A1 operationally
+2. Pre-register exact hook behavior for A3
+3. Final paper framing conditional on A3 strong vs partial
+4. Raw-joint main, wrapper deployment column
+5. E1 openly necessary engineering, not hide
 
-Pre-pilot ceiling around 8.2-8.4. Cannot honestly hit ≥ 8.5 without pilot evidence.
-
-Verdict: REVISE / pilot-ready. No drift. Move to pilot.
+Verdict: REVISE.
 
 </details>

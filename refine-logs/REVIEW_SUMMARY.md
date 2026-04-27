@@ -1,66 +1,43 @@
-# Review Summary — VADI (Vulnerability-Aware Decoy Insertion)
+# Review Summary
 
-**Problem**: User rejected prior v3 pure-suppression direction. Keep insert+modify strategy. Design principled insertion method using publisher's access to clean video to find optimal insertion points that make SAM2 lose the target.
-
-**Initial approach**: Per-video PGD with K_ins inserts at rank-sum-scored vulnerability windows + local δ on insert neighborhoods + contrastive decoy-margin loss (no suppression).
-
-**Date**: 2026-04-23
-
+**Problem**: Adversarial attack on SAM2 video segmentation (publisher-side, white-box, per-clip targeted) using BOTH internal frame insertion AND sparse δ on adjacent original (bridge) frames.
+**Initial Approach**: Memory-hijack insertion + bridge δ + adaptive wrapper (v4.1 retest evidence).
+**Date**: 2026-04-27
 **Rounds**: 4 / 5
+**Final Score**: **8.4 / 10** (proposal-stage ceiling)
+**Final Verdict**: **REVISE (CEILING)** — architecture at natural max; READY blocked only by unrun A3.
 
-**Final score**: 8.4 / 10 (pre-pilot ceiling reached & explicitly confirmed by reviewer)
+## Problem Anchor
 
-**Final verdict**: REVISE (formal) / PRE-PILOT CEILING (internal — pilot is mandatory next step)
+(See `PROBLEM_ANCHOR_2026-04-27.md`)
 
-## Problem Anchor (verbatim, preserved across all rounds)
-
-See `PROBLEM_ANCHOR_2026-04-23_v4-insert.md`. Key invariants:
-- Insert+modify (K_ins ∈ {1,2,3}) is required.
-- Placement must be principled via vulnerability scoring (not canonical FIFO).
-- No suppression loss; contrastive decoy-margin only.
-- Insert works via current-frame Hiera pathway (consistent with B2 bank non-causality finding), not via bank poisoning.
-- Two-tier fidelity: f0 (ε=2/255+SSIM≥0.98), originals (ε=4/255+LPIPS≤0.20), inserts (LPIPS≤0.35 vs midframe base+TV≤1.2×base, no ε).
-- GT-free throughout.
+Bottom-line: publisher-side SAM2 attack via internal insertion + sparse bridge δ on memory-bank VOS, must address Chen WACV 2021 / UAP-SAM2 NeurIPS 2025 / Li T-CSVT 2023 / PATA 2310.10010 prior arts, must keep BOTH insert + bridge δ (CLAUDE.md hard rule + this round user constraint), AAAI venue.
 
 ## Round-by-Round Resolution Log
 
-| Round | Main reviewer concerns | What changed | Score | Solved? |
-|---|---|---|---|---|
-| 1 | L_obj = suppression in disguise; scorer ad hoc; decoy loss not contrastive; dense δ may dominate; scheduler-tuning accusation risk; ν=8/255 underuses LPIPS budget; K=3 top unproven | Removed L_obj; rank-based robust-z over 3 signals; contrastive margin `softplus(mu_true - mu_decoy + 0.75)`; local δ on insert neighborhoods; top/random/bottom + multi-draw random; LPIPS+TV on ν (no ε); gated 3-clip pilot | 6.3 → 7.7 | Mostly |
-| 2 | Top-K advantage may come from LOCAL δ at vulnerable frames, not inserts; ratio anti-suppression insufficient; scorer math over-elaborate; hard feasibility | Added top-δ-only / random-δ-only / top-base-insert+δ controls; signed Δmu_decoy vs Δmu_true decomposition; rank-sum (not robust-z); hard S_feas acceptance | 7.7 → 8.2 | Yes |
-| 3 | Excluding infeasible from success = hiding failures; need phantom positions for δ-only; ratio-only unstable | Primary denominator = all 10, infeasible = failure; phantom W for δ-only baselines; ratio + absolute gap both required | 8.2 → 8.4 | Yes |
-| 4 | Internal-float feasibility may not match exported-artifact feasibility (quantization/JPEG) | Re-measure all metrics on EXPORTED uint8 artifact; S_feas on export, not internal | 8.4 (ceiling) | Yes, plus last tightening |
+| Round | Score | Main reviewer concerns | What this round simplified / modernized | Solved? | Remaining risk |
+|---|---|---|---|---|---|
+| 1 | 6.0 | Wrapper drift; demoted contributions dishonest; A3 confounded; "first demonstration" overclaim | — (initial proposal) | — | many |
+| 2 | 7.2 | A1 confounded; d_mem circular; A3 0.20/7-clip too aggressive; placement ownership | Reframed C1 + E1/E2; raw joint = science; A3 dual-threshold; d_mem token set from clean fix; novelty narrowed; memory-causality replaces "all-frames-δ" | mostly | A1 still confounded; T_obj arbitrariness |
+| 3 | 7.8 | A1 still bundles upstream search/ν; d_mem layer/projection unspecified; conditional framing not pre-committed | A1 operationally locked (same upstream W*, ν, decoy_seeds); d_mem pre-registered (last cross-attention block, pre-projection V, top-32 frozen tokens); A3-first sequencing; conditional Framing A/B/C pre-registered | yes | venue readiness contingent on A3 |
+| 4 | **8.4** | Empirical contingency only — no architectural blocker | Added negative-control hook A3-control (matched non-insert frames blocking); froze A1+A3 implementations; ceiling declared | partial | A3 not yet run |
 
 ## Overall Evolution
 
-- **Anchor**: preserved throughout; all drift-warnings flagged by Codex explicitly rejected with user directive backing.
-- **Dominant contribution sharpened**: from vague "insertion method" (R0) to "vulnerability-aware insertion with full causal isolation + mechanism attribution + GT-free + exported-artifact feasibility" (R4). One paper thesis, no parallel contributions.
-- **Unnecessary complexity removed**: L_obj (suppression in disguise); ProPainter (replaced by temporal midframe); motion-discontinuity scorer term (unjustified); hard ε bound on ν (replaced by LPIPS-TV); flow signal (dropped).
-- **Frontier leverage appropriate**: SAM2.1 as both target and pseudo-label source; no LLM/diffusion/RL decoration; gradient-based scorer kept only as fallback modernization.
-- **Validation discipline**: top/random/bottom + δ-only-top/random + base-insert-top + canonical + multi-draw random + restoration attribution + signed decoy decomposition + exported-artifact measurement. 10-row main table, every row isolates a specific causal claim.
+- **R1 → R2**: massive reframe — wrapper demoted from contribution to deployment policy; raw joint became scientific method; A3 replaced with memory-causality ablation. +1.2 score.
+- **R2 → R3**: operational locking — A1 isolation tightened, d_mem protocol pre-registered, A3 dual-threshold pre-committed, conditional framings pre-written. +0.6.
+- **R3 → R4**: final structural upgrade — negative control for A3 (matched non-insert frame blocking); insert-position-specific collapse claim. +0.6. CEILING.
 
 ## Final Status
 
-- **Anchor status**: preserved across 4 rounds.
-- **Focus status**: tight. 2 trainable tensors (δ, ν), 1 heuristic scorer, 1 paper thesis.
-- **Modernity**: appropriately frontier-aware (SAM2 internals; no decoration).
-- **Strongest parts of final method**:
-  1. Principled placement via rank-sum 3-signal scorer on clean-SAM2 signals.
-  2. Contrastive decoy-margin loss with signed anti-suppression guarantee.
-  3. Causal isolation via 3-way placement controls + 3-way insert-value controls + restoration attribution.
-  4. Exported-artifact feasibility (closes optimization-vs-delivery loophole).
-  5. Pre-committed 8-claim success bar.
-- **Remaining weaknesses**:
-  1. All claims empirically unproven. Historical J-drop for matched settings was 0.001-0.0013.
-  2. If top-δ-only ≈ ours, inserts are decorative (conflicts with user constraint; honestly reported as NO-GO pivot).
-  3. Pilot may trigger NO-GO → paper pivots to attack-surface analysis.
-  4. SAM2Long install still pending (2-3 GPU-hours).
+- **Anchor**: preserved (raw joint = scientific method; wrapper = deployment).
+- **Focus**: tight (1 main C1 + 2 enabling E1/E2 + 1 deployment).
+- **Modernity**: appropriate (SAM2 = foundation-era target; memory-readout instrumentation as causal diagnostic; no LLM/VLM/Diffusion/RL bolt-ons).
+- **Strongest parts**: causal A3 ablation with negative control; pre-registered Framing A/B/C; complete d_mem protocol; honest E1 ownership.
+- **Remaining weaknesses**: AAAI-level novelty contingent on A3 strong-pass; raw joint headline gates not yet validated on held-out 10 clips; bmx-trees-like clips still revert occasionally (needs lambda_keep_full=50 tuning ablation in supplementary).
 
-## Output Files
+## Pattern Note
 
-- **Final proposal**: `refine-logs/FINAL_PROPOSAL.md`
-- **Round logs**: `refine-logs/round-0-initial-proposal.md`, `round-N-review.md`, `round-N-refinement.md` (N=1..4)
-- **Score evolution**: `refine-logs/score-history.md`
-- **Problem anchor**: `refine-logs/PROBLEM_ANCHOR_2026-04-23_v4-insert.md`
-- **Archived v3 suppression proposal**: `refine-logs/archive-2026-04-23-v3-suppression__*.md`
-- **Design-constraint note in CLAUDE.md**: section "Method Design Constraints (2026-04-23)"
+Score plateau at 8.4 matches the 2026-04-23 v4-vadi run (different reframe, same ceiling). Structural feature: when implementation already exists + paper claim plausible + validation experiments unrun → proposal-stage scores asymptote ~8.4. The 0.6 gap to READY=9 is data-bound, not architecture-bound.
+
+Codex explicit guidance: **"STOP proposal iteration after this. The next acceptance-lift comes from data, not wording."**
