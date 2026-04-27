@@ -203,28 +203,32 @@ def process_one_clip(
     clip_name: str,
     *,
     davis_root: Path,
-    checkpoint_path: Path,
     v5_run_dir: Path,
     out_dir: Path,
     device: torch.device,
+    clean_fac: Any,
+    fwd_fac: Any,
     smoke: bool = False,
     control_seed: int = 0,
     top_k: int = 32,
     artifact_mode: str = "raw_joint",
 ) -> Dict[str, Any]:
     """Run baseline / attacked / control eval + clean reference + d_mem(t)
-    on one clip. Returns aggregated results dict."""
+    on one clip. Returns aggregated results dict.
+
+    OOM-FIX (2026-04-27 round 4): adapters (clean_fac, fwd_fac) are now
+    built ONCE at main() level and passed in, instead of being rebuilt
+    per clip. Building adapters per clip allocates a new SAM2 predictor
+    per clip (~1-2 GB GPU each); accumulating across clips OOM'd at
+    bmx-trees (~3rd predictor in the same Python process). Reusing a
+    single predictor across all clips fixes the leak.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Lazy imports.
-    from scripts.run_vadi_pilot import build_pilot_adapters, load_davis_clip
+    from scripts.run_vadi_pilot import load_davis_clip
     from memshield.causal_diagnostics import (
         MemoryReadoutExtractor, build_control_frames, compute_d_mem_trace,
-    )
-
-    print(f"[a3] {clip_name}: building adapters")
-    clean_fac, fwd_fac, lpips_fn, ssim_fn, _ = build_pilot_adapters(
-        checkpoint_path=str(checkpoint_path), device=device,
     )
 
     print(f"[a3] {clip_name}: loading clean clip + first-frame mask")
@@ -646,6 +650,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"[a3] SMOKE mode: limiting to first clip ({args.clips[0]})")
         args.clips = args.clips[:1]
 
+    # OOM-FIX (2026-04-27 round 4): build SAM2 predictor + adapters ONCE
+    # at top level, reuse across all clips. Previously each clip rebuilt
+    # them, allocating a fresh ~1-2 GB SAM2 predictor per clip → OOM at
+    # ~3rd clip on a 96 GB GPU when the prior predictors weren't freed.
+    print(f"[a3] building SAM2 adapters (once for all clips) ...")
+    from scripts.run_vadi_pilot import build_pilot_adapters
+    clean_fac, fwd_fac, lpips_fn, ssim_fn, _ = build_pilot_adapters(
+        checkpoint_path=str(args.checkpoint), device=device,
+    )
+
     summary: Dict[str, Any] = {
         "v5_root": str(args.v5_root),
         "out_root": str(args.out_root),
@@ -657,16 +671,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "per_clip": {},
     }
 
+    import gc
     for clip in args.clips:
         clip_out = args.out_root / clip
         try:
             res = process_one_clip(
                 clip,
                 davis_root=args.davis_root,
-                checkpoint_path=args.checkpoint,
                 v5_run_dir=args.v5_root,
                 out_dir=clip_out,
                 device=device,
+                clean_fac=clean_fac,
+                fwd_fac=fwd_fac,
                 smoke=args.smoke,
                 control_seed=args.control_seed,
                 top_k=args.top_k,
@@ -692,6 +708,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"[a3] ERROR on clip {clip}: {e}")
             traceback.print_exc()
             summary["per_clip"][clip] = {"error": str(e)}
+        finally:
+            # codex round 4 hardening: per-clip cleanup runs even when
+            # the clip raised. Otherwise a failed clip's transient GPU
+            # state could poison the next clip's forward.
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     # ============ pre-registered tier verdict ============
     if not args.smoke:
