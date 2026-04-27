@@ -440,6 +440,18 @@ class Stage14LossDiagnostics:
                          # Zero tensor when suffix probes are not used
                          # (phase 1-2 of v3 curriculum, or v2 / v2.1
                          # backwards-compat paths).
+    # v4 (Anchored Stage 14, codex spec 2026-04-26): no-regression vs A0
+    # baseline (frozen-nu, no bridge polish) plus explicit suffix gain.
+    # All zero when teacher=None (v3 / v2 backwards-compat path).
+    L_keep_margin: Tensor    # mean_t relu(margin_loss_cur - margin_loss_A0)
+                              # (penalize when current margin loss exceeds
+                              # A0 -- i.e. attack got weaker than baseline).
+    L_keep_suffix: Tensor    # sum_t relu(u_cur(t) - u_A0(t))
+                              # (penalize when current suffix IoU exceeds
+                              # A0 -- i.e. true-mask retention regressed).
+    L_gain_suffix: Tensor    # sum_t u_cur(t)
+                              # (minimize current suffix IoU directly --
+                              # the explicit attack-improvement term).
 
     # Detached / floated diagnostic scalars.
     mean_decoy_overlap: float
@@ -453,6 +465,142 @@ class Stage14LossDiagnostics:
     warp_disp_max: float
     n_bridge: int
     n_suffix_probes: int
+
+
+# ---------------------------------------------------------------------------
+# Stage 14 v4: Anchored Stage 14 teacher signals (A0 baseline, frozen-nu,
+# no bridge polish). Used as no-regression anchor in stage14_forward_loss.
+# Codex thread 019dc51a-c71a-7971-bece-116a592de2f5 round 6 R3 GO design v4.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Stage14TeacherSignals:
+    """A0-baseline (no Stage 14 polish) per-frame signals for v4 anchoring.
+
+    Fields:
+      margin_by_t: per-frame margin_loss tensor at each margin_query_frame.
+        Detached. Used as no-regression anchor in L_keep_margin.
+      suffix_iou_by_t: per-frame soft-IoU(p_t, m_true_t) under A0 at each
+        suffix probe. Detached. Used as no-regression anchor in
+        L_keep_suffix.
+      suffix_probe_frames: the attacked-space frame indices used as probes
+        (must match what stage14_forward_loss receives via suffix_probe_-
+        frames kwarg).
+    """
+
+    margin_by_t: Dict[int, Tensor]
+    suffix_iou_by_t: Dict[int, Tensor]
+    suffix_probe_frames: List[int]
+
+
+def build_suffix_probe_frames(
+    W_attacked: Sequence[int],
+    T_proc: int,
+    *,
+    n_probes: int,
+) -> List[int]:
+    """Choose `n_probes` evenly-spaced attacked-space frame indices in
+    [w_first+1, T_proc-1], EXCLUDING the inserts themselves (W_attacked).
+
+    Returns sorted attacked-space ints. Duplicates are removed; the function
+    is robust to small T_proc / large n_probes (gracefully clipped to all
+    available non-insert suffix frames).
+    """
+    if n_probes <= 0:
+        return []
+    W_set = set(int(w) for w in W_attacked)
+    if not W_attacked:
+        return []
+    w_first = min(int(w) for w in W_attacked)
+    candidates = [t for t in range(w_first + 1, T_proc) if t not in W_set]
+    if not candidates:
+        return []
+    if len(candidates) <= n_probes:
+        return sorted(candidates)
+    # Evenly sample n_probes from candidates by index.
+    if n_probes == 1:
+        return [candidates[len(candidates) // 2]]
+    step = (len(candidates) - 1) / (n_probes - 1)
+    selected = sorted({
+        candidates[int(round(i * step))] for i in range(n_probes)
+    })
+    return selected
+
+
+def build_stage14_teacher_signals(
+    state: "AttackState",
+    *,
+    x_clean: Tensor,
+    nu_teacher: Tensor,
+    forward_fn: Any,
+    config: Any,
+    suffix_probe_frames: Sequence[int],
+) -> Stage14TeacherSignals:
+    """Compute A0 baseline teacher signals via no_grad SAM2 forward.
+
+    A0 baseline = decoy_seeds + nu_teacher inserted at W_attacked, NO bridge
+    polish (no alpha_paste, warp, R, traj-driven content edits). This is the
+    "K3 insert-only" reference whose mean J-drop ≈ 0.537 set the v4 no-
+    regression target.
+
+    Returns Stage14TeacherSignals with detached per-frame margin tensors
+    and detached per-probe suffix IoU tensors.
+    """
+    device = x_clean.device
+    with torch.no_grad():
+        inserts_t = (state.decoy_seeds + nu_teacher).clamp(0.0, 1.0)
+        x_full_t = x_clean
+        if config.train_ste_quantize:
+            from memshield.losses import fake_uint8_quantize
+            x_full_t = fake_uint8_quantize(x_full_t)
+            inserts_t = fake_uint8_quantize(inserts_t)
+        processed_t = build_processed(
+            x_full_t, inserts_t, state.W_attacked)
+
+        return_at_set = set(int(t) for t in state.margin_query_frames)
+        for t in suffix_probe_frames:
+            t_int = int(t)
+            if 0 <= t_int < state.T_proc:
+                return_at_set.add(t_int)
+        return_at_list = sorted(return_at_set)
+        logits_by_t_t, _ = forward_fn.forward_with_objectness(
+            processed_t, return_at=return_at_list,
+            objectness_at=state.bridge_polish,
+        )
+
+        margins_by_t: Dict[int, Tensor] = {}
+        for t in state.margin_query_frames:
+            t_int = int(t)
+            if (t_int not in state.m_true_by_t
+                    or t_int not in state.m_decoy_by_t
+                    or t_int not in logits_by_t_t):
+                continue
+            fmo = decoy_margin_per_frame(
+                logits_by_t_t[t_int],
+                state.m_true_by_t[t_int], state.m_decoy_by_t[t_int],
+                margin=config.margin_threshold,
+            )
+            margins_by_t[t_int] = fmo.margin_loss.detach()
+
+        suffix_iou_by_t: Dict[int, Tensor] = {}
+        for t in suffix_probe_frames:
+            t_int = int(t)
+            if (t_int not in state.m_true_by_t
+                    or t_int not in logits_by_t_t):
+                continue
+            p_t = torch.sigmoid(logits_by_t_t[t_int]).flatten()
+            m_t = state.m_true_by_t[t_int].flatten().float()
+            inter = (p_t * m_t).sum()
+            union = (p_t + m_t - p_t * m_t).sum()
+            iou = inter / union.clamp_min(1e-6)
+            suffix_iou_by_t[t_int] = iou.detach()
+
+    return Stage14TeacherSignals(
+        margin_by_t=margins_by_t,
+        suffix_iou_by_t=suffix_iou_by_t,
+        suffix_probe_frames=sorted(int(t) for t in suffix_probe_frames),
+    )
 
 
 def stage14_forward_loss(
@@ -470,6 +618,11 @@ def stage14_forward_loss(
     R_active: bool = False,
     suffix_probe_frames: Optional[Sequence[int]] = None,
     lambda_suffix: float = 0.0,
+    teacher: Optional[Stage14TeacherSignals] = None,
+    lambda_keep_margin: float = 0.0,
+    lambda_keep_suffix: float = 0.0,
+    lambda_gain_suffix: float = 0.0,
+    margin_loss_scale: float = 1.0,
 ) -> Tuple[Tensor, Stage14LossDiagnostics, Tensor]:
     """One Stage 14 forward + loss computation.
 
@@ -491,6 +644,24 @@ def stage14_forward_loss(
       automatically merged into `forward_fn.return_at` so no extra
       forward call is needed. Defaults (`suffix_probe_frames=None`,
       `lambda_suffix=0.0`) reproduce the v2 / v2.1 behavior exactly.
+
+    v4 (Anchored Stage 14, codex 2026-04-26):
+      `teacher` (precomputed via `build_stage14_teacher_signals`) anchors
+      the optimization to the A0 baseline (frozen-nu, no bridge polish):
+        L_keep_margin = mean_t relu(margin_loss_cur(t) - margin_loss_A0(t))
+                        -- penalize when current attack-margin loss is
+                           ABOVE A0's (i.e., attack got weaker).
+        L_keep_suffix = sum_t  relu(u_cur(t) - u_A0(t))
+                        -- penalize when current suffix IoU exceeds A0
+                           (i.e., true-mask retention regressed).
+        L_gain_suffix = sum_t  u_cur(t)
+                        -- minimize current suffix IoU directly (the
+                           attack-improvement term).
+      `margin_loss_scale` rescales the existing aggregate L_margin term
+      (so that v4 can attenuate it relative to the keep_margin no-
+      regression term, matching codex's recommended 0.10-0.30 range).
+      Defaults (`teacher=None`, all four kwargs at their zero/identity
+      defaults) reproduce v3 / v2 behavior exactly.
     """
     device = x_clean.device
     dtype = x_clean.dtype
@@ -706,8 +877,11 @@ def stage14_forward_loss(
     # term aligns the placement gradient with the global mean-J-drop
     # objective, which the local L_margin surrogate alone misses on
     # clips with sharp local fragility (e.g. blackswan).
-    if suffix_probes_clean and lambda_suffix > 0.0:
-        suffix_iou_terms: List[Tensor] = []
+    # v3/v4 per-probe soft-IoU computation.
+    # Cache per-probe iou values so v4 keep_suffix / gain_suffix can reuse
+    # them without a second pass through logits_by_t.
+    suffix_iou_cur_by_t: Dict[int, Tensor] = {}
+    if suffix_probes_clean:
         for t in suffix_probes_clean:
             t_int = int(t)
             if t_int not in state.m_true_by_t:
@@ -719,16 +893,64 @@ def stage14_forward_loss(
             inter = (p_t * m_t).sum()
             union = (p_t + m_t - p_t * m_t).sum()
             iou = inter / union.clamp_min(1e-6)
-            suffix_iou_terms.append(iou)
-        if suffix_iou_terms:
-            L_suffix = torch.stack(suffix_iou_terms, dim=0).sum()
-        else:
-            L_suffix = torch.zeros((), dtype=dtype, device=device)
+            suffix_iou_cur_by_t[t_int] = iou
+
+    # v3 (Coverage-Constrained Joint Suffix Optimization, codex spec):
+    # soft-IoU of true-mask retention at sparse probe frames spanning
+    # the attacked-suffix horizon. The inserted-perturbation pipeline
+    # tries to MINIMIZE this term (low IoU = SAM2 lost the true object
+    # at that probe = good attack at that horizon point). The suffix
+    # term aligns the placement gradient with the global mean-J-drop
+    # objective, which the local L_margin surrogate alone misses on
+    # clips with sharp local fragility (e.g. blackswan).
+    if suffix_iou_cur_by_t and lambda_suffix > 0.0:
+        L_suffix = torch.stack(list(suffix_iou_cur_by_t.values()),
+                               dim=0).sum()
     else:
         L_suffix = torch.zeros((), dtype=dtype, device=device)
 
+    # v4 (Anchored Stage 14): no-regression vs A0 + explicit suffix gain.
+    # Active only when teacher is supplied AND the corresponding lambda is
+    # > 0. Each term is computed as a separate scalar tensor so it shows up
+    # individually in diagnostics for trace plots.
+    L_keep_margin = torch.zeros((), dtype=dtype, device=device)
+    L_keep_suffix = torch.zeros((), dtype=dtype, device=device)
+    L_gain_suffix = torch.zeros((), dtype=dtype, device=device)
+    if teacher is not None:
+        if lambda_keep_margin > 0.0 and teacher.margin_by_t:
+            keep_terms: List[Tensor] = []
+            for t in state.margin_query_frames:
+                t_int = int(t)
+                if t_int not in margins_by_t:
+                    continue
+                if t_int not in teacher.margin_by_t:
+                    continue
+                # margin_loss_cur(t) - margin_loss_A0(t) > 0 means current
+                # attack is WEAKER than A0 (loss is HIGHER). Penalize.
+                m_cur = margins_by_t[t_int].margin_loss
+                m_A0 = teacher.margin_by_t[t_int]
+                keep_terms.append(torch.relu(m_cur - m_A0))
+            if keep_terms:
+                L_keep_margin = torch.stack(keep_terms, dim=0).mean()
+        if lambda_keep_suffix > 0.0 and teacher.suffix_iou_by_t:
+            ks_terms: List[Tensor] = []
+            for t in suffix_probes_clean:
+                t_int = int(t)
+                if t_int not in suffix_iou_cur_by_t:
+                    continue
+                if t_int not in teacher.suffix_iou_by_t:
+                    continue
+                u_cur = suffix_iou_cur_by_t[t_int]
+                u_A0 = teacher.suffix_iou_by_t[t_int]
+                ks_terms.append(torch.relu(u_cur - u_A0))
+            if ks_terms:
+                L_keep_suffix = torch.stack(ks_terms, dim=0).sum()
+        if lambda_gain_suffix > 0.0 and suffix_iou_cur_by_t:
+            L_gain_suffix = torch.stack(
+                list(suffix_iou_cur_by_t.values()), dim=0).sum()
+
     L = (
-        config.oracle_traj_lambda_margin * L_margin
+        float(margin_loss_scale) * config.oracle_traj_lambda_margin * L_margin
         + config.oracle_traj_lambda_obj * L_obj
         + config.oracle_traj_lambda_area * L_area
         + lambda_fid_val * L_fid_total
@@ -737,6 +959,9 @@ def stage14_forward_loss(
         + config.oracle_traj_lambda_residual_tv * L_R_tv
         + L_traj
         + float(lambda_suffix) * L_suffix
+        + float(lambda_keep_margin) * L_keep_margin
+        + float(lambda_keep_suffix) * L_keep_suffix
+        + float(lambda_gain_suffix) * L_gain_suffix
     )
 
     # Diagnostics.
@@ -788,6 +1013,9 @@ def stage14_forward_loss(
         L_fid_bridge=L_fid_bridge, L_fid_ins=L_fid_ins, L_fid_TV=L_fid_TV,
         L_alpha=L_alpha, L_warp=L_warp, L_traj=L_traj, L_R_tv=L_R_tv,
         L_suffix=L_suffix,
+        L_keep_margin=L_keep_margin,
+        L_keep_suffix=L_keep_suffix,
+        L_gain_suffix=L_gain_suffix,
         mean_decoy_overlap=float(mean_decoy_overlap),
         mean_true_overlap=float(mean_true_overlap),
         delta_overlap=float(mean_decoy_overlap - mean_true_overlap),
@@ -1076,6 +1304,258 @@ def _test_supervision_masks_insert_override() -> None:
     print("  supervision-mask insert-override OK")
 
 
+def _test_v4_suffix_probe_builder() -> None:
+    """build_suffix_probe_frames excludes W_attacked, evenly samples,
+    handles edge cases."""
+    # Standard case: K=3 W=[5,13,22], T_proc=33, n_probes=6.
+    W_attacked = [5, 13, 22]
+    T_proc = 33
+    probes = build_suffix_probe_frames(W_attacked, T_proc, n_probes=6)
+    assert len(probes) == 6, f"expected 6 probes, got {len(probes)}"
+    assert all(p not in W_attacked for p in probes), (
+        f"probes overlap with inserts: {probes} vs {W_attacked}")
+    assert all(min(W_attacked) < p < T_proc for p in probes), (
+        f"probes out of suffix range: {probes}")
+    assert probes == sorted(probes), f"probes not sorted: {probes}"
+    assert len(set(probes)) == len(probes), f"duplicates: {probes}"
+    # Exhausted candidates (n_probes > suffix length).
+    short_probes = build_suffix_probe_frames([5, 6], T_proc=8, n_probes=6)
+    assert short_probes == [7], (
+        f"expected [7] (only candidate), got {short_probes}")
+    # n_probes=0 -> empty.
+    assert build_suffix_probe_frames([5, 13, 22], T_proc, n_probes=0) == []
+    # Empty W_attacked -> empty.
+    assert build_suffix_probe_frames([], T_proc, n_probes=6) == []
+    # n_probes=1 -> one mid-suffix frame (no overlap with inserts).
+    one_probe = build_suffix_probe_frames(W_attacked, T_proc, n_probes=1)
+    assert len(one_probe) == 1
+    assert one_probe[0] not in W_attacked
+    print("  v4 suffix probe builder OK")
+
+
+class _StubForwardFn:
+    """Deterministic stub for SAM2 forward used in v4 self-tests.
+
+    `logits_per_t`: dict t -> [H, W] tensor (will be returned for any call).
+    `obj_per_t`: dict t -> scalar (objectness logit).
+
+    Both A0 and current-step calls receive the SAME `logits_per_t` so that
+    L_keep_margin / L_keep_suffix evaluate to exactly zero (pure relu(0)),
+    confirming the no-regression sign convention.
+    """
+
+    def __init__(self, logits_per_t: Dict[int, Tensor],
+                 obj_per_t: Dict[int, float]):
+        self._logits = logits_per_t
+        self._obj = obj_per_t
+
+    def forward_with_objectness(
+        self, processed: Tensor, *, return_at: List[int],
+        objectness_at: List[int],
+    ) -> Tuple[Dict[int, Tensor], Dict[int, Tensor]]:
+        H, W = next(iter(self._logits.values())).shape
+        device = processed.device
+        dtype = processed.dtype
+        out_logits: Dict[int, Tensor] = {}
+        for t in return_at:
+            if t in self._logits:
+                out_logits[int(t)] = self._logits[int(t)].to(device).to(dtype)
+            else:
+                out_logits[int(t)] = torch.zeros(
+                    (H, W), device=device, dtype=dtype)
+        out_obj: Dict[int, Tensor] = {}
+        for t in objectness_at:
+            v = self._obj.get(int(t), 0.0)
+            out_obj[int(t)] = torch.tensor(
+                [v], device=device, dtype=dtype)
+        return out_logits, out_obj
+
+
+def _test_v4_teacher_zero_regression() -> None:
+    """When current logits == A0 logits (stubbed), L_keep_margin and
+    L_keep_suffix must be exactly zero (sign sanity), and L_gain_suffix
+    equals sum_t soft-IoU(A0)."""
+    torch.manual_seed(123)
+    np.random.seed(123)
+    T_clean, H, W = 18, 24, 24
+    x_clean = torch.rand(T_clean, H, W, 3)
+    pseudo_masks: List[np.ndarray] = []
+    for t in range(T_clean):
+        m = np.zeros((H, W), dtype=np.float32)
+        c = min(W - 4, max(0, t // 2))
+        m[8:14, c:c + 4] = 1.0
+        pseudo_masks.append(m)
+
+    cfg = _DummyConfig()
+    W_clean = [5, 9, 14]
+    state = build_attack_state_from_W(W_clean, x_clean, pseudo_masks, cfg)
+
+    # Build canned logits: random per t (but identical across A0 / current).
+    logits_per_t: Dict[int, Tensor] = {}
+    obj_per_t: Dict[int, float] = {}
+    all_t = sorted(set(state.margin_query_frames) | set(state.bridge_polish))
+    for t in all_t:
+        logits_per_t[t] = torch.randn(H, W) * 0.5
+        obj_per_t[t] = 0.5
+    # Suffix probes too.
+    probes = build_suffix_probe_frames(
+        state.W_attacked, state.T_proc, n_probes=4)
+    for t in probes:
+        if t not in logits_per_t:
+            logits_per_t[t] = torch.randn(H, W) * 0.5
+
+    forward_fn = _StubForwardFn(logits_per_t, obj_per_t)
+
+    # nu_teacher = nu = zeros (so identical inputs).
+    nu = torch.zeros_like(state.decoy_seeds)
+    teacher = build_stage14_teacher_signals(
+        state, x_clean=x_clean, nu_teacher=nu, forward_fn=forward_fn,
+        config=cfg, suffix_probe_frames=probes,
+    )
+    assert len(teacher.suffix_iou_by_t) > 0, (
+        "teacher suffix IoUs not populated")
+    assert len(teacher.margin_by_t) > 0, (
+        "teacher margin tensors not populated")
+
+    # Build Stage 14 inputs (traj/edit_params/R minimal).
+    K = state.K
+    L_max = state.L_max
+    traj = FalseTrajectoryParams(
+        anchor_offset=torch.zeros(K, 2),
+        delta_offset=torch.zeros(K, L_max, 2),
+        L=int(L_max),
+    )
+
+    @dataclass
+    class _EditParams:
+        alpha_logits: Tensor
+        warp_s: Tensor
+        warp_r: Tensor
+
+    edit = _EditParams(
+        alpha_logits=torch.full((K, L_max), -3.0),
+        warp_s=torch.zeros(K, L_max),
+        warp_r=torch.zeros(K, L_max),
+    )
+
+    def lpips_stub(a: Tensor, b: Tensor) -> Tensor:
+        return torch.zeros((), dtype=x_clean.dtype, device=x_clean.device)
+
+    L, diag, _ = stage14_forward_loss(
+        state, x_clean=x_clean, traj=traj, edit_params=edit, R=None, nu=nu,
+        forward_fn=forward_fn, lpips_fn=lpips_stub, config=cfg,
+        lambda_fid_val=1.0,
+        suffix_probe_frames=probes, lambda_suffix=0.0,
+        teacher=teacher,
+        lambda_keep_margin=1.0, lambda_keep_suffix=10.0,
+        lambda_gain_suffix=2.0, margin_loss_scale=0.1,
+    )
+
+    L_keep_margin_val = float(diag.L_keep_margin.detach().item())
+    L_keep_suffix_val = float(diag.L_keep_suffix.detach().item())
+    L_gain_suffix_val = float(diag.L_gain_suffix.detach().item())
+    assert L_keep_margin_val < 1e-5, (
+        f"L_keep_margin should be 0 (cur==A0), got {L_keep_margin_val}")
+    assert L_keep_suffix_val < 1e-5, (
+        f"L_keep_suffix should be 0 (cur==A0), got {L_keep_suffix_val}")
+    # Gain term equals sum of A0 suffix IoUs.
+    expected_gain = float(sum(
+        v.item() for v in teacher.suffix_iou_by_t.values()))
+    assert abs(L_gain_suffix_val - expected_gain) < 1e-3, (
+        f"L_gain_suffix={L_gain_suffix_val} != expected={expected_gain}")
+    print("  v4 teacher zero-regression OK")
+
+
+def _test_v4_keep_margin_sign_sanity() -> None:
+    """L_keep_margin > 0 when current margin_loss > A0 margin_loss
+    (current attack is WEAKER than A0). This validates the sign convention
+    and rules out the inverse-direction bug."""
+    torch.manual_seed(7)
+    np.random.seed(7)
+    T_clean, H, W = 14, 16, 16
+    x_clean = torch.rand(T_clean, H, W, 3)
+    pseudo_masks: List[np.ndarray] = []
+    for t in range(T_clean):
+        m = np.zeros((H, W), dtype=np.float32)
+        m[6:10, 4:8] = 1.0
+        pseudo_masks.append(m)
+
+    cfg = _DummyConfig()
+    W_clean = [3, 7, 11]
+    state = build_attack_state_from_W(W_clean, x_clean, pseudo_masks, cfg)
+
+    # A0 logits: strongly favor decoy region (low margin_loss = strong A0).
+    # Current logits: strongly favor true region (high margin_loss = weak).
+    logits_A0: Dict[int, Tensor] = {}
+    logits_cur: Dict[int, Tensor] = {}
+    obj = {t: 0.5 for t in state.bridge_polish}
+    all_t = sorted(set(state.margin_query_frames) | set(state.bridge_polish))
+    for t in all_t:
+        # A0: -2 on true region, +2 on decoy region.
+        l_a = torch.full((H, W), -2.0)
+        l_a[6:10, 4:8] = -3.0
+        l_a[6:10, 8:12] = 3.0     # decoy shift +4 in x.
+        # Current: opposite (true region wins, weaker attack).
+        l_c = torch.full((H, W), -2.0)
+        l_c[6:10, 4:8] = 3.0
+        l_c[6:10, 8:12] = -3.0
+        logits_A0[t] = l_a
+        logits_cur[t] = l_c
+
+    nu = torch.zeros_like(state.decoy_seeds)
+    teacher = build_stage14_teacher_signals(
+        state, x_clean=x_clean, nu_teacher=nu,
+        forward_fn=_StubForwardFn(logits_A0, obj), config=cfg,
+        suffix_probe_frames=[],
+    )
+
+    # Confirm teacher per-frame margin_loss is small (strong A0).
+    teacher_margin_means = (
+        sum(float(v.item()) for v in teacher.margin_by_t.values())
+        / max(1, len(teacher.margin_by_t)))
+
+    # Run forward with current (weaker) logits.
+    K = state.K
+    L_max = state.L_max
+    traj = FalseTrajectoryParams(
+        anchor_offset=torch.zeros(K, 2),
+        delta_offset=torch.zeros(K, L_max, 2),
+        L=int(L_max),
+    )
+
+    @dataclass
+    class _EditParams:
+        alpha_logits: Tensor
+        warp_s: Tensor
+        warp_r: Tensor
+
+    edit = _EditParams(
+        alpha_logits=torch.full((K, L_max), -3.0),
+        warp_s=torch.zeros(K, L_max),
+        warp_r=torch.zeros(K, L_max),
+    )
+
+    def lpips_stub(a: Tensor, b: Tensor) -> Tensor:
+        return torch.zeros((), dtype=x_clean.dtype, device=x_clean.device)
+
+    L, diag, _ = stage14_forward_loss(
+        state, x_clean=x_clean, traj=traj, edit_params=edit, R=None, nu=nu,
+        forward_fn=_StubForwardFn(logits_cur, obj), lpips_fn=lpips_stub,
+        config=cfg, lambda_fid_val=1.0,
+        suffix_probe_frames=[], lambda_suffix=0.0,
+        teacher=teacher,
+        lambda_keep_margin=1.0, lambda_keep_suffix=0.0,
+        lambda_gain_suffix=0.0, margin_loss_scale=0.1,
+    )
+
+    keep_margin = float(diag.L_keep_margin.detach().item())
+    assert keep_margin > 0.0, (
+        f"L_keep_margin should be > 0 when current is weaker than A0; "
+        f"got {keep_margin} (teacher margin mean = {teacher_margin_means})")
+    print(f"  v4 L_keep_margin sign sanity OK "
+          f"(current_weaker -> L_keep_margin = {keep_margin:.4f})")
+
+
 def _self_test() -> None:
     print("memshield.stage14_helpers self-tests:")
     _test_attack_state_invariants()
@@ -1084,6 +1564,9 @@ def _self_test() -> None:
     _test_attack_state_input_validation()
     _test_remap_masks_processed_space_inline()
     _test_supervision_masks_insert_override()
+    _test_v4_suffix_probe_builder()
+    _test_v4_teacher_zero_regression()
+    _test_v4_keep_margin_sign_sanity()
     print("memshield.stage14_helpers: all self-tests PASSED")
 
 

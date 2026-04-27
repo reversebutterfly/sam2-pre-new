@@ -327,6 +327,22 @@ class VADIv5Config:
     # for apples-to-apples comparison with v4 K3_insert_only.
     train_ste_quantize: bool = False
 
+    # v4 Anchored Stage 14 (codex thread 019dc51a 2026-04-26): A0 baseline
+    # (frozen-nu, no bridge polish) anchors the optimization with no-
+    # regression losses + explicit suffix gain. Defaults below give
+    # backwards-compat (v3 / v2 behavior) when oracle_traj_v4_use_teacher_-
+    # anchor=False. CLI flag --oracle-traj-v4 enables the v4 path with
+    # the recommended weights (lambda_keep_margin=1.0, lambda_keep_suffix=
+    # 10.0, lambda_gain_suffix=2.0, margin_scale=0.10) and freezes ν for
+    # the entire 30-step trajectory (no Phase B unfreeze).
+    oracle_traj_v4_use_teacher_anchor: bool = False    # default OFF
+    oracle_traj_v4_freeze_nu: bool = False             # default OFF (Phase B unfreezes ν)
+    oracle_traj_v4_n_suffix_probes: int = 6
+    oracle_traj_v4_lambda_keep_margin: float = 1.0     # no-regression on per-frame margin
+    oracle_traj_v4_lambda_keep_suffix: float = 10.0    # no-regression on suffix IoU
+    oracle_traj_v4_lambda_gain_suffix: float = 2.0     # explicit attack-improvement
+    oracle_traj_v4_margin_scale: float = 0.10          # attenuate aggregate L_margin
+
     seed: int = 0
 
 
@@ -2012,6 +2028,7 @@ def _run_oracle_trajectory_pgd(
     )
     from memshield.stage14_helpers import (
         assemble_attack_state, stage14_forward_loss,
+        build_suffix_probe_frames, build_stage14_teacher_signals,
     )
 
     device = x_clean.device
@@ -2133,12 +2150,36 @@ def _run_oracle_trajectory_pgd(
     # identical (LPIPS hinge + TV hinge with λ-escalation on infeasibility).
     lambda_fid_val = config.joint_traj_lambda_fid
 
+    # v4 (Anchored Stage 14): build A0 teacher signals + suffix probe set
+    # ONCE upfront. The teacher uses nu_init (= teacher's nu) and is
+    # invariant across optimization steps. Suffix probes are also fixed.
+    v4_teacher = None
+    v4_suffix_probes: List[int] = []
+    if config.oracle_traj_v4_use_teacher_anchor:
+        v4_suffix_probes = build_suffix_probe_frames(
+            state.W_attacked, state.T_proc,
+            n_probes=int(config.oracle_traj_v4_n_suffix_probes),
+        )
+        v4_teacher = build_stage14_teacher_signals(
+            state, x_clean=x_clean, nu_teacher=nu_init,
+            forward_fn=forward_fn, config=config,
+            suffix_probe_frames=v4_suffix_probes,
+        )
+
     total_steps = (
         config.oracle_traj_phase_a_steps + config.oracle_traj_phase_b_steps)
 
     for step in range(total_steps):
         # Phase B switch: unfreeze ν at low LR.
-        if step == config.oracle_traj_phase_a_steps and not nu_requires_grad:
+        # v4: skip ν unfreeze when oracle_traj_v4_freeze_nu is True (the
+        # teacher anchor is built with nu_init, so ν must stay frozen for
+        # the no-regression invariant to hold).
+        v4_freeze = bool(
+            config.oracle_traj_v4_use_teacher_anchor
+            and config.oracle_traj_v4_freeze_nu)
+        if (step == config.oracle_traj_phase_a_steps
+                and not nu_requires_grad
+                and not v4_freeze):
             nu = nu.detach().clone().requires_grad_(True)
             nu_requires_grad = True
             # Bundle C sub-session 6: when LPIPS-native ν is enabled,
@@ -2201,23 +2242,45 @@ def _run_oracle_trajectory_pgd(
             forward_fn=forward_fn, lpips_fn=lpips_fn,
             config=config, lambda_fid_val=lambda_fid_val,
             R_active=R_requires_grad,
+            suffix_probe_frames=v4_suffix_probes if v4_teacher else None,
+            lambda_suffix=0.0,
+            teacher=v4_teacher,
+            lambda_keep_margin=(
+                config.oracle_traj_v4_lambda_keep_margin
+                if v4_teacher else 0.0),
+            lambda_keep_suffix=(
+                config.oracle_traj_v4_lambda_keep_suffix
+                if v4_teacher else 0.0),
+            lambda_gain_suffix=(
+                config.oracle_traj_v4_lambda_gain_suffix
+                if v4_teacher else 0.0),
+            margin_loss_scale=(
+                config.oracle_traj_v4_margin_scale
+                if v4_teacher else 1.0),
         )
         feas = diag.feasible
 
         if feas:
-            score = -float(
-                config.oracle_traj_lambda_margin
-                * diag.L_margin.detach().item()
-                + config.oracle_traj_lambda_obj
-                * diag.L_obj.detach().item()
-                + config.oracle_traj_lambda_area
-                * diag.L_area.detach().item()
-                + config.oracle_traj_lambda_alpha
-                * diag.L_alpha.detach().item()
-                + config.oracle_traj_lambda_warp
-                * diag.L_warp.detach().item()
-                + diag.L_traj.detach().item()
-            )
+            if v4_teacher is not None:
+                # v4: score = -L_total (the full objective the optimizer
+                # is descending). Includes keep_margin / keep_suffix /
+                # gain_suffix, which collectively encode the no-regression
+                # invariant + suffix improvement objective.
+                score = -float(L.detach().item())
+            else:
+                score = -float(
+                    config.oracle_traj_lambda_margin
+                    * diag.L_margin.detach().item()
+                    + config.oracle_traj_lambda_obj
+                    * diag.L_obj.detach().item()
+                    + config.oracle_traj_lambda_area
+                    * diag.L_area.detach().item()
+                    + config.oracle_traj_lambda_alpha
+                    * diag.L_alpha.detach().item()
+                    + config.oracle_traj_lambda_warp
+                    * diag.L_warp.detach().item()
+                    + diag.L_traj.detach().item()
+                )
             if best is None or score > best[3]:
                 best_params = {
                     "alpha_logits":
@@ -2268,6 +2331,15 @@ def _run_oracle_trajectory_pgd(
             "anchor_max_norm": anchor_max,
             "delta_max_norm": delta_max,
             "n_bridge": diag.n_bridge,
+            # v4 (Anchored Stage 14) diagnostics. All zero when teacher is
+            # not active; non-zero values track no-regression / gain trends
+            # across optimization steps.
+            "L_keep_margin": float(diag.L_keep_margin.detach().item()),
+            "L_keep_suffix": float(diag.L_keep_suffix.detach().item()),
+            "L_gain_suffix": float(diag.L_gain_suffix.detach().item()),
+            "L_suffix": float(diag.L_suffix.detach().item()),
+            "n_suffix_probes": diag.n_suffix_probes,
+            "v4_active": bool(v4_teacher is not None),
             # Bundle B sub-session 4 residual diagnostics.
             "L_R_tv": float(diag.L_R_tv.detach().item()),
             "R_max_abs": (
@@ -3966,6 +4038,46 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--oracle-traj-nu-warmup-steps", type=int, default=0,
                    help="Phase B steps over which to ramp ν Adam LR from "
                         "0 to full (default 0 = no warmup).")
+    # v4 (Anchored Stage 14) CLI flags. Default OFF; enable with
+    # --oracle-traj-v4. Per-component lambdas / margin scale match codex's
+    # recommended defaults from thread 019dc51a (2026-04-26).
+    p.add_argument("--oracle-traj-v4", action="store_true", dest="oracle_traj_v4",
+                   help="Enable v4 Anchored Stage 14 (codex 2026-04-26): "
+                        "A0 baseline (frozen-nu, no bridge polish) anchors "
+                        "the optimization with no-regression losses + "
+                        "explicit suffix gain. Implies --oracle-traj-v4-"
+                        "freeze-nu (the teacher anchor invariant requires "
+                        "ν stay at nu_init throughout Stage 14). Forces "
+                        "the legacy ν path off (oracle_traj_nu_lpips_native "
+                        "becomes irrelevant). The v3 suffix-probe path is "
+                        "subsumed by the v4 gain term, so set "
+                        "--oracle-traj-v4-lambda-gain-suffix to 0 if you "
+                        "want pure no-regression behavior.")
+    p.add_argument("--oracle-traj-v4-no-freeze-nu", action="store_true",
+                   help="Override the v4 default and let Phase B unfreeze "
+                        "ν. WARNING: violates the teacher anchor invariant "
+                        "(teacher signals were computed with nu_init), so "
+                        "the no-regression terms become misleading.")
+    p.add_argument("--oracle-traj-v4-n-suffix-probes", type=int, default=6,
+                   help="Number of evenly-spaced suffix-probe frames for "
+                        "the v4 keep_suffix / gain_suffix terms.")
+    p.add_argument("--oracle-traj-v4-lambda-keep-margin", type=float,
+                   default=1.0,
+                   help="Weight on L_keep_margin (no-regression vs A0 on "
+                        "per-frame margin loss).")
+    p.add_argument("--oracle-traj-v4-lambda-keep-suffix", type=float,
+                   default=10.0,
+                   help="Weight on L_keep_suffix (no-regression vs A0 on "
+                        "suffix soft-IoU).")
+    p.add_argument("--oracle-traj-v4-lambda-gain-suffix", type=float,
+                   default=2.0,
+                   help="Weight on L_gain_suffix (explicit attack-"
+                        "improvement on suffix soft-IoU).")
+    p.add_argument("--oracle-traj-v4-margin-scale", type=float, default=0.10,
+                   help="Multiplier on the aggregate L_margin term in v4 "
+                        "(attenuates the contrastive surrogate that ss7 "
+                        "diagnosis identified as misaligned with full-"
+                        "video J-drop).")
     p.add_argument("--use-profiled-placement", type=str, default=None,
                    help="Path to placement-profile root; per-clip "
                         "<path>/<clip>/profile.json's best.subset is used "
@@ -4042,6 +4154,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("[v5] ERROR: --joint-trajectory and --oracle-trajectory "
               "are mutually exclusive (Codex R5 Q3a).", file=sys.stderr)
         return 2
+
+    # v4 (Anchored Stage 14) mutex guards:
+    #  - Requires --oracle-trajectory (Stage 14 host).
+    #  - Incompatible with --oracle-traj-nu-lpips-native (v4 freezes ν, the
+    #    LPIPS-native ν optimizer would never run; safer to refuse than to
+    #    silently no-op the user's intent).
+    if args.oracle_traj_v4:
+        if not args.oracle_trajectory:
+            print("[v5] ERROR: --oracle-traj-v4 requires --oracle-trajectory "
+                  "(Stage 14 host).", file=sys.stderr)
+            return 2
+        if args.oracle_traj_nu_lpips_native:
+            print("[v5] ERROR: --oracle-traj-v4 freezes ν (teacher anchor "
+                  "invariant); --oracle-traj-nu-lpips-native is a no-op "
+                  "in this mode and is rejected to avoid silent behavior "
+                  "drift.", file=sys.stderr)
+            return 2
 
     # ss7 R6 R3 guardrail #3: joint placement search cannot run with the
     # LPIPS-native ν line-search (Bundle C). The bisection assumes fixed
@@ -4140,6 +4269,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 args.oracle_traj_nu_lpips_bisect_iters),
             oracle_traj_nu_adam_lr=args.oracle_traj_nu_adam_lr,
             oracle_traj_nu_warmup_steps=args.oracle_traj_nu_warmup_steps,
+            oracle_traj_v4_use_teacher_anchor=bool(args.oracle_traj_v4),
+            oracle_traj_v4_freeze_nu=(
+                bool(args.oracle_traj_v4)
+                and not bool(args.oracle_traj_v4_no_freeze_nu)),
+            oracle_traj_v4_n_suffix_probes=(
+                int(args.oracle_traj_v4_n_suffix_probes)),
+            oracle_traj_v4_lambda_keep_margin=(
+                float(args.oracle_traj_v4_lambda_keep_margin)),
+            oracle_traj_v4_lambda_keep_suffix=(
+                float(args.oracle_traj_v4_lambda_keep_suffix)),
+            oracle_traj_v4_lambda_gain_suffix=(
+                float(args.oracle_traj_v4_lambda_gain_suffix)),
+            oracle_traj_v4_margin_scale=(
+                float(args.oracle_traj_v4_margin_scale)),
             profiled_placement_path=args.use_profiled_placement,
         )
 
