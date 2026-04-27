@@ -210,6 +210,7 @@ def process_one_clip(
     smoke: bool = False,
     control_seed: int = 0,
     top_k: int = 32,
+    artifact_mode: str = "raw_joint",
 ) -> Dict[str, Any]:
     """Run baseline / attacked / control eval + clean reference + d_mem(t)
     on one clip. Returns aggregated results dict."""
@@ -231,27 +232,67 @@ def process_one_clip(
     x_clean = x_clean.to(device)
     T_clean = int(x_clean.shape[0])
 
-    # Locate the v5-polished processed dir + results.json. Prefer the
-    # __ot dir (Stage 14 polish); fall back only if absent. LOW-fix
-    # (codex 2026-04-27): require unique match to avoid silent
-    # non-determinism across reruns.
-    ot_dirs = list((v5_run_dir / clip_name).glob("*__ot/processed"))
+    # Locate the v5-polished processed dir + results.json.
+    #
+    # CODEX-DIRECTED POLICY (2026-04-27 round 3 review):
+    #
+    # The v5 pipeline emits TWO video directories per clip:
+    #   __ot `<clip>/<config>__ot/processed/`    = Stage 14 raw joint output
+    #                                              (= the polish proposal,
+    #                                               whether wrapper kept
+    #                                               it or not). This is
+    #                                               the SCIENTIFIC OBJECT
+    #                                               for the C1 mechanism
+    #                                               claim and Table 1
+    #                                               headline.
+    #   main `<clip>/<config>/processed/`        = WRAPPER-SELECTED export
+    #                                              (for apply clips: ==
+    #                                               Stage 14 output; for
+    #                                               revert clips: == A0
+    #                                               fallback). This is
+    #                                               the DEPLOYMENT artifact
+    #                                               (Table 2 column).
+    #
+    # `artifact_mode` controls which we load:
+    #   raw_joint (DEFAULT): prefer __ot, fallback to main if no __ot
+    #     -- this keeps the C1.a / C1.b / C2 ablations on a SINGLE attack
+    #        type (raw joint), preserving comparability across apply/revert
+    #        clips
+    #   published: prefer main, fallback to __ot
+    #     -- supplementary analysis on the deployment artifact
+    if artifact_mode not in ("raw_joint", "published"):
+        raise ValueError(
+            f"artifact_mode must be 'raw_joint' or 'published'; got "
+            f"{artifact_mode!r}")
     main_dirs = list((v5_run_dir / clip_name).glob("*/processed"))
     main_dirs = [d for d in main_dirs if not d.parent.name.endswith("__ot")]
-    if ot_dirs:
-        if len(ot_dirs) > 1:
+    ot_dirs = list((v5_run_dir / clip_name).glob("*__ot/processed"))
+    if artifact_mode == "raw_joint":
+        primary_dirs, primary_label = ot_dirs, "__ot"
+        fallback_dirs, fallback_label = main_dirs, "main"
+    else:  # published
+        primary_dirs, primary_label = main_dirs, "main"
+        fallback_dirs, fallback_label = ot_dirs, "__ot"
+    if primary_dirs:
+        if len(primary_dirs) > 1:
             raise RuntimeError(
-                f"Multiple __ot/processed dirs in {v5_run_dir / clip_name}: "
-                f"{ot_dirs}. Pass an explicit config dir or remove duplicates."
-            )
-        processed_dir = ot_dirs[0]
-    elif main_dirs:
-        if len(main_dirs) > 1:
+                f"Multiple {primary_label}/processed dirs in "
+                f"{v5_run_dir / clip_name}: {primary_dirs}. Pass an "
+                f"explicit config dir or remove duplicates.")
+        processed_dir = primary_dirs[0]
+        artifact_source = primary_label
+    elif fallback_dirs:
+        if len(fallback_dirs) > 1:
             raise RuntimeError(
-                f"Multiple */processed dirs in {v5_run_dir / clip_name}: "
-                f"{main_dirs}."
-            )
-        processed_dir = main_dirs[0]
+                f"Multiple {fallback_label}/processed dirs in "
+                f"{v5_run_dir / clip_name}: {fallback_dirs}.")
+        processed_dir = fallback_dirs[0]
+        artifact_source = fallback_label
+        print(f"[a3] {clip_name}: WARNING — artifact_mode={artifact_mode} "
+              f"requested {primary_label}/, using {fallback_label}/ "
+              f"fallback. Comparability across clips may be affected if "
+              f"some clips use {primary_label} and others use "
+              f"{fallback_label}.")
     else:
         raise FileNotFoundError(
             f"No processed/ dir under {v5_run_dir / clip_name}")
@@ -517,6 +558,11 @@ def process_one_clip(
         "v5_run_dir": str(v5_run_dir),
         "v5_results_path": str(results_json),
         "v5_exported_j_drop": v5_results.get("exported_j_drop"),
+        "v5_polish_applied": v5_results.get("polish_applied"),
+        "v5_polish_reverted": v5_results.get("polish_reverted"),
+        "artifact_mode": artifact_mode,
+        "artifact_source": artifact_source,
+        "processed_dir": str(processed_dir),
 
         "J_baseline_mean": J_base_mean,
         "J_attacked_mean": J_att_mean,
@@ -581,6 +627,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--control-seed", type=int, default=0)
     p.add_argument("--top-k", type=int, default=32,
                    help="d_mem aggregation top-K (default 32).")
+    p.add_argument("--artifact-mode",
+                   choices=["raw_joint", "published"],
+                   default="raw_joint",
+                   help="Which v5 output dir to load for A3 eval. "
+                        "'raw_joint' (default) prefers <clip>/<config>__ot/"
+                        "processed/ (Stage 14 raw output) — preserves the "
+                        "pre-registered C1 mechanism gate by keeping a SINGLE "
+                        "attack type across apply/revert clips. 'published' "
+                        "prefers <clip>/<config>/processed/ (wrapper-selected "
+                        "export) for deployment-mode supplementary analysis.")
     args = p.parse_args(argv)
 
     device = torch.device(args.device)
@@ -595,6 +651,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "out_root": str(args.out_root),
         "clips": list(args.clips),
         "smoke": bool(args.smoke),
+        "artifact_mode": args.artifact_mode,
+        "control_seed": args.control_seed,
+        "top_k": args.top_k,
         "per_clip": {},
     }
 
@@ -611,6 +670,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 smoke=args.smoke,
                 control_seed=args.control_seed,
                 top_k=args.top_k,
+                artifact_mode=args.artifact_mode,
             )
             if not args.smoke:
                 summary["per_clip"][clip] = {
