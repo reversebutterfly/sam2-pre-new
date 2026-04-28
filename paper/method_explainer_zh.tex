@@ -1,0 +1,428 @@
+\documentclass[11pt,a4paper]{ctexart}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue}
+
+\title{SAM2 视频对象分割对抗攻击\\ 方法讲解文档}
+\author{VADI v4.1 项目}
+\date{2026 年 4 月}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本文档面向项目内部讲解，系统说明当前对 SAM2.1-Tiny 视频对象分割模型的对抗攻击方法（VADI v4.1）。讲解顺序为：
+（1）SAM2 的工作机理；
+（2）实验中识别出的薄弱环节；
+（3）针对这些薄弱环节设计的``插入诱饵帧 + 原始帧稀疏扰动''联合攻击策略；
+（4）每一项设计的依据与已有实验证据；
+（5）当前的实验进度与下一步计划。
+本方法的目标是在严格保真度约束（首帧 $\epsilon{=}2/255$、其余帧 $\epsilon{=}4/255$ 且 LPIPS 受限）以及``无真值监督''的前提下，最大化整段视频的 J-drop。
+\end{abstract}
+
+\tableofcontents
+
+% =====================================================================
+\section{项目概览与现状}
+\label{sec:overview}
+
+\textbf{研究目标。} 在攻击者可访问完整原始视频，但只能在视频处理流水线中``插入合成帧''与``在原始帧上施加 $\delta$ 扰动''的威胁模型下，攻击 SAM2.1-Tiny 的提示驱动视频对象分割（VOS）。评估口径为``处理后整段视频''（包含插入帧与 $\delta$ 帧），不是裁掉插帧后的 clean-suffix。
+
+\textbf{当前版本。} VADI v4.1，方法核心由三部分组成（详见第 \ref{sec:method} 节）：
+\begin{enumerate}[leftmargin=2em]
+    \item K=3 内部诱饵帧插入（vulnerability-aware top-K 位置）；
+    \item 在每个插入点附近的少量原始帧上施加桥接 $\delta$；
+    \item 部署侧的``polish/revert 自适应包装器''。
+\end{enumerate}
+
+\textbf{已有结果。}
+\begin{itemize}[leftmargin=2em]
+    \item 13 个 DAVIS 验证片段上完成 v5 polish 与 Stage 14 v4.1。
+    \item A3 因果切除实验（4 个片段已完成）：4/4 STRONG，证实``插入位置上的 memory hijack''机制存在。
+    \item 关键的反向证据：B2 ablation 否决了原 v2 提出的``memory-bank 中毒''叙事——bank 架构层面并不是关键路径，真正起作用的是``当前帧 Hiera 特征通路''。
+    \item 决断性 10-clip 实验（K3\_insert\_only\_top）平均 J-drop 0.537，是当前最强单一配置。
+\end{itemize}
+
+\textbf{当前阻塞。} A3 在剩余 9 个片段的扩展受到服务器侧 swap 全满（其他用户作业占用）导致 systemd-oomd 反复杀掉初始化阶段的 python 进程，需等待资源恢复或迁移到 V100。
+
+% =====================================================================
+\section{SAM2 工作机理}
+\label{sec:sam2}
+
+% ---------------------------------------------------------------------
+\subsection{整体架构}
+
+SAM2 的视频分割流程可以抽象为``逐帧前向 + 跨帧记忆''的循环。对一段长度为 $T$ 的视频 $\{I_t\}_{t=0}^{T-1}$：
+
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{首帧（$t=0$）}：用户给出提示（mask 或 box），SAM2 在该帧上做一次完整 prompt-driven 分割，得到首帧 mask $\hat{M}_0$，并把首帧的高维特征写入 memory bank。
+    \item \textbf{后续帧（$t \geq 1$）}：
+    \begin{enumerate}[leftmargin=1.5em]
+        \item Hiera 主干对 $I_t$ 提取多尺度图像特征 $F_t$；
+        \item Memory Attention 模块以 $F_t$ 作为 query，对 memory bank 中过往帧的 (key, value) 做 cross-attention，得到``记忆增强''的特征 $\tilde{F}_t$；
+        \item Mask Decoder 在 $\tilde{F}_t$ 上做一次轻量解码，得到当前帧 mask $\hat{M}_t$；
+        \item 当前帧的特征以 (key, value, temporal\_pos\_emb) 的形式 \emph{写回 memory bank}，供后续帧使用；FIFO 队列：bank 满则丢弃最旧的非提示帧。
+    \end{enumerate}
+\end{enumerate}
+
+% ---------------------------------------------------------------------
+\subsection{Memory Bank 的容量与组织}
+
+SAM2.1-Tiny 默认 memory bank 容量为 7 帧（1 个 prompt-anchored 槽位 + 6 个 FIFO 槽位）。bank 中每个槽位存储：
+\begin{itemize}[leftmargin=2em]
+    \item 该帧的 Hiera 投影后特征 $V \in \mathbb{R}^{H' \times W' \times C}$（cross-attention 的 value）；
+    \item 对应的 key（cross-attention 的 key）；
+    \item 时序位置嵌入（temporal positional embedding）；
+    \item 该帧 mask 的 dense embedding。
+\end{itemize}
+
+% ---------------------------------------------------------------------
+\subsection{Cross-Attention 的角色}
+
+在 \texttt{memory\_attention.layers[-1].cross\_attn\_image} 这一关键算子中，当前帧的每一个空间 token 与 bank 中所有历史帧的所有空间 token 做注意力，得到一个加权后的 ``跨帧记忆读出'' 向量。这个读出与当前帧自身特征经残差连接、归一化后，最终送入 mask decoder。
+
+\textbf{关键观察}：当前帧的分割结果不仅取决于自身 Hiera 特征，还取决于它从 memory bank 中``读到了什么''。这是 SAM2 强于 image-only SAM 的根本，但也是攻击面所在。
+
+% =====================================================================
+\section{SAM2 的薄弱环节}
+\label{sec:weakness}
+
+通过 v1 \(\to\) v4 的迭代实验，我们识别出三类可被利用的薄弱环节。每一类都有对应的实验证据支撑（或反证）。
+
+% ---------------------------------------------------------------------
+\subsection{薄弱点 A：当前帧 Hiera 通路（已验证）}
+
+\textbf{现象。} 一旦在视频流中插入一个``扰动可控的合成帧''，该帧的 Hiera 特征会无差别经过 memory attention 与 mask decoder，与原视频内容产生不一致的``假证据''；这一``假证据''会进入 memory bank，并污染后续帧的 cross-attention 读出。
+
+\textbf{反驳老叙事。} VADI v2 最初的解释是``毒化 memory bank 槽位''，但 B2 ablation（直接屏蔽 bank 中相应槽位的写入）显示：屏蔽与不屏蔽对最终 J-drop 的影响远小于预期。\textbf{结论：}起作用的并不是``毒化某个 bank 槽位'',而是``当前帧 Hiera 通路本身被合成内容所欺骗''。这一发现迫使我们把 v3 的 ``pure $\delta$'' 路线（无插入）也排除，并最终回到``插入 + $\delta$''的联合形式（详见第 \ref{sec:method} 节）。
+
+\textbf{支撑实验：}
+\begin{itemize}[leftmargin=2em]
+    \item B2 ablation（2026-04-22）：bank-poisoning 假说被证伪。
+    \item A3 ablation（2026-04-27 起）：4/4 STRONG。该实验直接屏蔽``插入帧的 memory write''，并对照``非插入帧的同类屏蔽''；结果表明攻击效应仅在插入位置上才有显著的因果影响，确认插入位置即为攻击发生的物理点。
+\end{itemize}
+
+% ---------------------------------------------------------------------
+\subsection{薄弱点 B：脆弱窗口（vulnerability windows）}
+
+\textbf{现象。} 在原视频上 SAM2 自身就有一些``挣扎时刻''：高速运动、遮挡边界、低对比度、镜头切换处，置信度抖动明显。攻击者拥有原视频访问权，可在攻击前先用 clean-SAM2 跑一遍，识别这些位置，之后把诱饵帧插入到这些位置，攻击效果显著强于固定的 FIFO 周期位置（如 $\{6,12,14\}$）。
+
+\textbf{为何不能盲选 top-K？} 决断性 10-clip ablation 显示：纯 vulnerability top-K placement 反而\emph{输给} random（仅在 2/10 个片段上获胜）。原因是 top-K 容易集中在视频开头几帧，被 SAM2 的 prompt-anchored 帧``盖过''。\textbf{结论：}应使用 top-K 的``松弛变体''——例如避开前 N 帧后再从 top-K 中挑选，或将 top-K 与 random 混合。
+
+% ---------------------------------------------------------------------
+\subsection{薄弱点 C：相邻帧的``桥接窗口''}
+
+\textbf{现象。} 在插入诱饵帧 $t^*$ 后，紧跟其后的 $L$ 个原始帧仍然要经过 memory attention，并读取已经被诱饵污染的 memory bank。如果在这 $L$ 帧上施加少量 $\delta$ 扰动，可以\emph{桥接并放大}诱饵的效应；但若 $\delta$ 加得不当（例如施加到非桥接窗口的远帧），反而是净伤害（10-clip decisive 显示 joint 平均比 insert-only 低 0.156 pp）。
+
+\textbf{结论：}$\delta$ 必须空间和时间上都``聚焦''——只在 $(t^*, t^*{+}L]$ 的桥接窗口生效，且要受 LPIPS 与 SSIM 双约束。
+
+% =====================================================================
+\section{方法设计：插帧 + $\delta$ 联合策略}
+\label{sec:method}
+
+% ---------------------------------------------------------------------
+\subsection{威胁模型与保真度约束}
+
+\textbf{攻击面：}给定原视频 $V = \{I_t\}$ 与首帧提示 $P_0$，攻击者输出处理后视频
+\[
+\tilde{V} = \mathcal{A}(V, P_0; W) = \mathrm{Insert}(V, \{(t^*_k, D_k)\}_{k=1}^{K}) \oplus \delta,
+\]
+其中 $W = \{t^*_1, \dots, t^*_K\}$ 是 $K=3$ 个插入位置，$D_k$ 是第 $k$ 个诱饵帧内容，$\delta$ 是叠加在指定原始帧上的逐像素扰动。
+
+\textbf{保真度约束（双层）：}
+\begin{itemize}[leftmargin=2em]
+    \item 提示帧 $f_0$：$\|\delta_0\|_\infty \leq 2/255$ 且 $\mathrm{SSIM}(I_0, I_0+\delta_0) \geq 0.98$；
+    \item 其余帧：$\|\delta_t\|_\infty \leq 4/255$ 且 $\mathrm{LPIPS}(I_t, I_t+\delta_t) \leq F_{\mathrm{lpips}} \approx 0.20$。
+\end{itemize}
+
+\textbf{评估口径：}处理后整段视频上 SAM2 跟踪的 mask 与 clean-SAM2 自身预测之间的 J（IoU）下降量，记为 J-drop。
+
+% ---------------------------------------------------------------------
+\subsection{步骤 1：脆弱窗口识别（placement）}
+
+输入：clean-SAM2 在 $V$ 上的逐帧 mask 与置信度序列。
+
+\begin{enumerate}[leftmargin=2em]
+    \item 计算每帧的``脆弱性得分'' $s_t$：综合置信度方差、相邻帧 IoU 跳变、运动幅度。
+    \item 候选集 $\mathcal{C} = \{t : s_t \geq \tau\}$。
+    \item 用 \texttt{joint\_curriculum} 三段式搜索（prescreen $\to$ phase\_1 stick-breaking 参数化 $\to$ phase\_2 trust region $\to$ phase\_3 suffix probe）从 $\mathcal{C}$ 中选出 $W^*=\{t^*_1, t^*_2, t^*_3\}$，使后续联合优化的 J-drop 上界最大。
+    \item \textbf{鲁棒化：}避免 $W^*$ 全部落在视频前 5 帧（被 prompt-anchored 帧覆盖），必要时混入 random-K。
+\end{enumerate}
+
+% ---------------------------------------------------------------------
+\subsection{步骤 2：诱饵帧合成（$\nu$ 优化）}
+
+每个插入位置 $t^*_k$ 对应一张 $H \times W \times 3$ 的可学习诱饵图 $D_k = \mathrm{Sigmoid}(\nu_k)$：
+
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{语义构造：}诱饵内容来自``oracle-trajectory v4''——结合相邻原始帧做对象 crop + harmonization，再 paste 到诱饵位置；这是真正的对象/背景级合成（非简单平移），用于诱导 SAM2 把诱饵当作``合理的下一帧''。
+    \item \textbf{优化目标：}见 \ref{subsec:loss}。
+\end{itemize}
+
+% ---------------------------------------------------------------------
+\subsection{步骤 3：桥接 $\delta$（每个插入点附近的稀疏扰动）}
+
+对每个 $t^*_k$ 定义桥接窗口 $\mathcal{B}_k = (t^*_k, t^*_k + L]$（$L$ 由 \texttt{post\_insert\_radius} 控制，默认 2--3 帧）；仅在 $\bigcup_k \mathcal{B}_k$ 上施加 $\delta_t$，其余帧 $\delta_t = 0$。这与 v3 的 ``pure $\delta$''（全帧 $\delta$）有本质不同——后者已被实验证伪。
+
+% ---------------------------------------------------------------------
+\subsection{步骤 4：Anchored Stage 14（v4.1 hot-fix）的优化目标}
+\label{subsec:loss}
+
+整段视频上的损失由三项组成：
+\begin{align}
+\mathcal{L}_{\text{total}} &=
+   \underbrace{\mathcal{L}_{\text{keep margin}}}_{\text{首帧锚定保留}}
+ + \lambda_1 \, \underbrace{\mathcal{L}_{\text{keep full}}}_{\text{密集保留（v4.1 hot-fix）}} \nonumber \\
+ &\quad + \lambda_2 \, \underbrace{\mathcal{L}_{\text{gain suffix}}}_{\text{后缀 J-drop 增益}}.
+\end{align}
+
+\begin{itemize}[leftmargin=2em]
+    \item $\mathcal{L}_{\text{keep margin}}$：在 prompt 帧附近的 $\gamma_{\text{insert}}$ 窗口与 post-insert 后局部 keep 区上保持与 clean-SAM2 一致；
+    \item $\mathcal{L}_{\text{keep full}}$（\textbf{v4.1 关键 hot-fix}）：把 keep 区扩展到\emph{整段后缀的密集 keep frame}——这一改动让 dog 片段的 J-drop 从 0.5005 跳到 0.6351，是 v4 失效模式（loss query window 与 $\delta$ support window 耦合，导致 $\nu$ 失去梯度信号）的根因修复；
+    \item $\mathcal{L}_{\text{gain suffix}}$：仅在攻击希望生效的 J-drop 后缀区上推动 mask 偏离 clean-SAM2。
+\end{itemize}
+
+\textbf{监督信号}：全程使用 clean-SAM2 的伪标签（无真值），并按置信度加权——这是 GT-free 设定下的核心选择。
+
+% ---------------------------------------------------------------------
+\subsection{步骤 5：Polish/Revert 自适应包装器（部署侧）}
+
+由于 v4.1 在不同片段上稳定性差异大，我们在部署阶段引入``polish accept/revert''机制：
+\[
+\tilde{V}_{\text{deploy}} =
+\begin{cases}
+\tilde{V}_{\text{joint}}, & \text{若 } \mathrm{J\text{-}drop}(\tilde{V}_{\text{joint}}) - \mathrm{J\text{-}drop}(\tilde{V}_{\text{insert\_only}}) \geq \theta, \\
+\tilde{V}_{\text{insert\_only}}, & \text{否则}.
+\end{cases}
+\]
+
+\textbf{论文层 claim 改写：}从最初的``joint $>$ only''改为``adaptive wrapper $\geq$ only''——这是面向 AAAI 评审的鲁棒性 claim，既不夸大 joint 的稳定优势，也保留了``有时 joint 更强''的事实。10-clip 验收门槛：$\geq 5/10$ wins、平均 $\geq +0.05$、中位数 $> 0$、top 比例 $< 40\%$。
+
+% =====================================================================
+\section{设计依据：为什么这样设计}
+\label{sec:rationale}
+
+% ---------------------------------------------------------------------
+\subsection{为什么必须保留``插入''}
+
+历史教训非常明确：
+\begin{itemize}[leftmargin=2em]
+    \item v1 仅插入诱饵（无 $\delta$）：效应集中但天花板低；
+    \item v2 插入 + bank-poisoning loss：B2 证伪；
+    \item v3 仅 $\delta$（无插入）：用户拒绝（``纯 $\delta$ 不是我们想攻击的接口''），且实验上表明 J-drop 上限明显劣于 insert-only。
+\end{itemize}
+
+因此插入是\textbf{方法核心机制}（CLAUDE.md 中固化为硬约束）。任何后续重构都必须保留插入。
+
+% ---------------------------------------------------------------------
+\subsection{为什么 $\delta$ 要``稀疏 + 局部''}
+
+10-clip decisive ablation 给出三条强信号：
+\begin{enumerate}[leftmargin=2em]
+    \item 全帧 $\delta$（v3）相对于 insert-only 是\emph{净伤害} ($-0.156$ pp 平均)；
+    \item insert-only with vulnerability top-K 是当前最强单点（mean 0.537）；
+    \item 若 $\delta$ 仅施加在桥接窗口 $\mathcal{B}_k$ 上，方差降低、平均提升——这是 v4.1 联合方法的 raw J 0.5715 的来源（注：该数值是 6 RAW + 7 A0 fallback 的混合，C2 ``joint $>$ only'' 尚未充分支持，需要做 paired A0 baseline 实验）。
+\end{enumerate}
+
+% ---------------------------------------------------------------------
+\subsection{为什么需要双层保真度}
+
+\begin{itemize}[leftmargin=2em]
+    \item 提示帧 $f_0$ 是``真值锚点''——若提示帧失真过大，SAM2 在第一步就被攻击者操纵，威胁模型变得不真实。因此 $\epsilon=2/255$ 与 SSIM 双约束。
+    \item 其余帧的 $\epsilon=4/255$ 与 LPIPS floor 约束保持视觉上``像真原帧''的强度，避免靠``高频噪声''而非``合理的对象/背景偏移''来驱动 J-drop。
+\end{itemize}
+
+% ---------------------------------------------------------------------
+\subsection{为什么用 polish/revert，而不是``更强的 joint''}
+
+Codex 多轮 review 一致指出：在 10 个片段上 joint 与 insert-only 的优势不稳定。强行宣称 ``joint $>$ only'' 是高风险 claim，AAAI 评审会要求 paired baseline 全胜（高门槛）。改成 ``adaptive wrapper''：
+\begin{itemize}[leftmargin=2em]
+    \item 头部 claim 是``包装器 $\geq$ insert-only''（容易满足）；
+    \item 机制 claim 是``在条件 $\theta$ 满足时 joint 严格超过 insert-only''（按片段 case-by-case 报告）。
+\end{itemize}
+这种``两层 claim''结构是当前 AAAI 风险的最低化设计（mock score 6/10 vs 原叙事 4/10）。
+
+% ---------------------------------------------------------------------
+\subsection{Memory Hijack 框架的来源}
+
+A3 因果切除实验是 C1.a memory hijack claim 的核心证据：
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{条件}：在插入位置 $t^*_k$ 屏蔽 \texttt{non\_cond\_frame\_outputs} 的写入；
+    \item \textbf{对照}：在非插入位置 $w_k$（控制集）做相同屏蔽；
+    \item \textbf{度量}：$d_{\text{mem}}(t)$ 在 cross-attention 读出向量上的 L2 距离差；以及 J 在桥接窗口 $(w_k, w_k+L]$ 上的塌陷率。
+\end{itemize}
+4/4 STRONG（pre-registered tier）说明``insert 位置上的 memory write 是必要的''，对应论文中``插入帧通过 cross-attention 因果性地劫持后续帧的 memory 读出''这一机制 claim。
+
+% =====================================================================
+\section{当前实验数据与攻击效果}
+\label{sec:results}
+
+\noindent\fbox{\parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule}{%
+\textbf{口径说明（重要）}：本节所有 J-drop 指标均\emph{在 v4.1 旧 framing 下生成}（max J-drop attacker-side, $\epsilon=4/255$, LPIPS$\leq$0.20）。
+2026-04-28 用户已转向 publisher-side stealth 框架，主指标将切换为 \emph{原始帧 J + Unusable-Track Rate + Sustained Failure Rate}，预算收紧到 LPIPS$\leq$0.03（见 \texttt{PIVOT\_REVIEW\_2026-04-28.md}）。
+旧数据仍能反映方法的攻击\emph{容量}（capacity），但不是 publisher-side claim 的最终主表。
+}}\medskip
+
+% ---------------------------------------------------------------------
+\subsection{主结果：13 片段 v4.1 联合方法 J-drop}
+
+完成 polish 的 13 个 DAVIS 片段中，6 个已完成 RAW joint Stage 14 v4.1 联合优化并导出指标，其余 7 个 partial-C 批次缺 metadata（仅 frames 在）。下表给出已完成 6 片段的逐片段攻击效果，配置为 \texttt{K3\_top\_R8\_b-dup\_l-dc\_o-ad\_d-post\_s-fs\_\_ot}（$K{=}3$ 插入 + bridge $\delta$ + oracle-trajectory v4 + post-insert radius $L{=}2$）。
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Clip} & $T_{\mathrm{proc}}$ & \textbf{$W^*$（插入位置）} & $J_{\mathrm{baseline}}$ & $J_{\mathrm{attacked}}$ & $\Delta J$ & \textbf{攻击成功} \\
+\midrule
+camel        & 93 & [2, 14, 30]  & 0.984 & 0.025 & \textbf{0.959} & 完全塌陷 \\
+bear         & 85 & [9, 12, 42]  & 0.969 & 0.131 & \textbf{0.838} & 强 \\
+breakdance   & 87 & [6, 12, 42]  & 0.981 & 0.239 & \textbf{0.743} & 强 \\
+dance-twirl  & 93 & [10, 26, 50] & 0.980 & 0.260 & \textbf{0.721} & 强 \\
+dog          & 63 & [1, 23, 37]  & 0.978 & 0.343 & \textbf{0.635} & 中 \\
+libby        & 52 & [1, 11, 17]  & 0.963 & 0.382 & \textbf{0.581} & 中 \\
+\midrule
+\textbf{Mean (n=6)} & --- & --- & \textbf{0.976} & \textbf{0.230} & \textbf{0.746} & --- \\
+\bottomrule
+\end{tabular}
+\caption{6 个 RAW joint 完成的片段的攻击效果（旧 framing）。$J_{\mathrm{baseline}}$ 为 clean-SAM2 在原视频上的 J 自一致，$J_{\mathrm{attacked}}$ 为 v4.1 处理后整段视频上的 J，$\Delta J = J_{\mathrm{baseline}} - J_{\mathrm{attacked}}$。所有 6 片段 $\Delta J \geq 0.58$，4 / 6 达到 $\geq 0.7$，camel 几乎完全塌陷（$J_{\mathrm{attacked}}{=}0.025$）。}
+\label{tab:main_results}
+\end{table}
+
+\textbf{解读}：
+\begin{itemize}[leftmargin=2em]
+    \item Mean $\Delta J = 0.746$（n=6）—— 在严格保真度（$\epsilon{=}4/255$, LPIPS$\leq$0.20）下，攻击在每一片段都\emph{至少把 J 砍掉一半}。
+    \item Mean RAW J 0.5715（hybrid 6 RAW + 7 A0 fallback，codex 引述的全 13 片段数）远低于这 6 片段的 mean 0.746，因为 7 个 NA 片段以 A0 polish 替代（J-drop 较低）。
+    \item 用户 publisher-side 转向后，目标缩窄为 \textbf{$\Delta J \in [0.25, 0.35]$ + LPIPS $\leq$ 0.03 + 人工 stealth $\geq$ 85\%}，当前 0.746 远超阈值，表明\emph{容量充足，但需要交易掉一部分到 stealth}。
+\end{itemize}
+
+% ---------------------------------------------------------------------
+\subsection{机制证据：A3 因果切除（4/4 STRONG）}
+
+A3 在 4 个片段上完成（dev-4 / partial-B 批次）。逐片段屏蔽 \emph{insert 位置} 的 memory write 后，整段 J 显著恢复，验证插入位置即为攻击的因果点；而屏蔽\emph{非 insert 控制位置}的相同操作几乎无效（diff 列）。
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Clip} & $J_{\mathrm{baseline}}$ & $J_{\mathrm{attacked}}^{\mathrm{block}}$ & $J_{\mathrm{control}}^{\mathrm{block}}$ & $\Delta_{\mathrm{att}}$ & $\Delta_{\mathrm{ctl}}$ & \textbf{Tier} \\
+\midrule
+dog            & 0.343 & 0.923 & 0.343 & \textbf{+0.580} & +0.000 & STRONG \\
+horsejump-high & 0.511 & 0.939 & 0.510 & \textbf{+0.429} & $-$0.001 & STRONG \\
+blackswan      & 0.583 & 0.880 & 0.586 & \textbf{+0.297} & +0.004 & STRONG \\
+judo           & 0.492 & 0.710 & 0.494 & \textbf{+0.218} & +0.002 & STRONG \\
+\midrule
+\textbf{Mean (n=4)} & 0.482 & \textbf{0.863} & 0.483 & \textbf{+0.381} & +0.001 & \textbf{4/4 STRONG} \\
+\bottomrule
+\end{tabular}
+\caption{A3 因果切除：$J_{\mathrm{baseline}}$ 是 v4.1 攻击下、不做任何屏蔽的攻击后 J（攻击成功 → 低 J）。$J_{\mathrm{attacked}}^{\mathrm{block}}$ 屏蔽 insert 位置 memory write 后 J 显著恢复（4 个片段平均提高 +0.381），证明 insert 是机制因果点。$J_{\mathrm{control}}^{\mathrm{block}}$ 屏蔽相同数量的非 insert 位置（matched random），J 几乎不动（mean diff $+0.001$）。Pre-registered tier 阈值：$\Delta_{\mathrm{att}}\geq 0.20$ 且 $\Delta_{\mathrm{att}}-\Delta_{\mathrm{ctl}}\geq 0.10$ 为 STRONG。}
+\label{tab:a3}
+\end{table}
+
+\textbf{解读}：A3 是论文的 \textbf{C1.a 主张证据}—— ``插入帧通过 cross-attention 因果性地劫持后续帧的 memory 读出''。4/4 STRONG（每个片段都通过预登记阈值，且控制组几乎不动）是非常强的因果信号。剩余 9 个片段被服务器资源阻塞，待 swap 释放后补全。
+
+% ---------------------------------------------------------------------
+\subsection{决断 10-clip 配置 ablation（决定方法形态）}
+
+2026-04-24 在 10 个 held-out 片段上对 4 个候选配置做配对比较，决定 v4.1 的最终形态：
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+\textbf{配置} & \textbf{平均 $\Delta J$} & \textbf{相对 insert-only} & \textbf{解读} \\
+\midrule
+K3\_insert\_only\_top    & \textbf{0.537} & --- & 单一最强：仅插入 + top-K 脆弱性放置 \\
+K3\_joint\_top           & 0.381 & $-0.156$ pp & 全帧 $\delta$ 是\emph{净伤害} \\
+K3\_insert\_only\_random & 0.460 & $-0.077$ pp & random 平均略低，但 8/10 片段胜 top \\
+K3\_joint\_random        & 0.412 & $-0.125$ pp & 仍劣于 insert-only \\
+\bottomrule
+\end{tabular}
+\caption{10-clip decisive ablation（旧 framing）。两条强信号：（i）全帧 $\delta$ 是净伤害——这迫使我们把 $\delta$ 限制到 bridge 窗口 $\mathcal{B}_k$；（ii）random vs top-K placement 在 8/10 片段上 random 胜出（top-K placement inversion 问题）。结论：$\delta$ 必须稀疏 + 局部，placement 需要 top-K 的鲁棒性变体（避开前 N 帧或与 random 混合）。}
+\label{tab:decisive}
+\end{table}
+
+% ---------------------------------------------------------------------
+\subsection{视觉化产物（5 段 side-by-side MP4）}
+
+为肉眼检查攻击效果，在 \texttt{viz/} 下生成了 5 段对比视频（上半 clean DAVIS / 下半 attacked，6 fps）：
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{Clip} & \textbf{文件} & \textbf{$\Delta J$} & \textbf{视觉特征} \\
+\midrule
+camel       & \texttt{camel\_clean\_vs\_attacked.mp4}       & 0.959 & 完全塌陷，bridge $\delta$ 几乎不可见 \\
+bear        & \texttt{bear\_clean\_vs\_attacked.mp4}        & 0.838 & 攻击稳定，诱饵中可见双对象残影 \\
+breakdance  & \texttt{breakdance\_clean\_vs\_attacked.mp4}  & 0.743 & 强攻击，mid-clip 恢复后再次塌陷 \\
+dance-twirl & \texttt{dance-twirl\_clean\_vs\_attacked.mp4} & 0.721 & 长 clip，3 次 insert 互相加强 \\
+dog         & \texttt{dog\_clean\_vs\_attacked.mp4}         & 0.635 & 早 insert ($t^*{=}1$) 导致 prompt 后立即偏轨 \\
+\bottomrule
+\end{tabular}
+\caption{已生成的视觉化对比视频。插入帧用红框 + ``INSERTED DECOY FRAME'' 标记。}
+\label{tab:viz}
+\end{table}
+
+\textbf{用户观察到的失效模式（触发 publisher-side 转向）}：oracle-trajectory v4 在 insert 帧上保留了原始位置的对象残影 + 新位置的 paste 对象，呈现\emph{双对象鬼影}。视觉上明显合成。这是 publisher-side 叙事下的致命问题——即使 $\Delta J$ 大，被 reviewer 直接判 ``high fidelity'' 措辞失效。codex 推荐替换为 \emph{interpolation-based interstitial}（RIFE / FILM / IFRNet），见 \texttt{PIVOT\_REVIEW\_2026-04-28.md}。
+
+% ---------------------------------------------------------------------
+\subsection{进度与阻塞}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{阶段} & \textbf{状态} & \textbf{产物} \\
+\midrule
+M0 smoke（real-SAM2 1 clip） & 完成 & parity OK + blocked-frame OK \\
+M3 polish（13 clips） & 完成 & \texttt{vadi\_runs/v5\_paper\_all\_merged/} \\
+RAW joint Stage 14 v4.1（6 / 13 clips） & 完成 & mean $\Delta J=0.746$ \\
+A3 mechanism gating（4 / 13 clips） & 完成 & 4/4 STRONG \\
+A3 mechanism gating（剩余 9 clips） & \textbf{阻塞} & systemd-oomd 杀进程（YaoXiaoxu \texttt{pt\_data\_worker} 占 swap 4 GB） \\
+RAW joint 剩余 7 片段（partial-C） & 阻塞 & 同上 \\
+publisher-side pivot 实施 & 待开始 & interpolation 诱饵 + LPIPS$\leq$0.03 + 重新评估 \\
+\bottomrule
+\end{tabular}
+\caption{2026-04-28 时刻的实验进度。}
+\end{table}
+
+\subsubsection*{现存问题与下一步}
+
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{服务器资源阻塞}：Pro 6000 swap 100\% 满（uid 1072 \texttt{2023D\_YaoXiaoxu} 占 4 GB；uid 1057 \texttt{2025D\_ShiGuangze} 占 1.8 GB）。systemd-oomd \texttt{ManagedOOMMemoryPressure=kill@50\%PSI} 在 SAM2 import 阶段就 kill 进程。\texttt{systemd-run --user --scope} opt-out 与 per-clip 子进程拆分均无效（per-clip 有概率成功，blackswan 通过、bear/bmx-trees 被杀）。需等待 Yao 训练结束或迁移 V100。
+    \item \textbf{publisher-side 转向最高杠杆实验}（codex F2）：4-6 片段 interpolation-based interstitial frame 试点 + bridge $\delta$ on $L{=}2$ at $\epsilon{=}2/255$，eval 用 \emph{原始帧 GT J only} + 人工 ghosting 检查。此实验决定整个 pivot 是否可行。
+    \item \textbf{C2 主张的不充分}：当前 hybrid mean 0.5715 (6 RAW + 7 A0 fallback) 不能支撑 ``joint $>$ insert-only''；需要 paired A0 baseline（同 13 片段，仅 polish 不做 joint search）。
+    \item \textbf{新发现的 prior art 风险}：Liu et al.\ ``Protecting Your Video Content'' (CVPR 2025) 已破坏 ``first publisher-side video cloak'' 主张。新可声称 firstness 缩窄为 ``first publisher-side cloaking method for prompt-driven VOS / SAM2-style extraction''。
+    \item \textbf{Claim 矩阵切换}（旧 → 新 framing）：
+        \begin{enumerate}[leftmargin=1.5em]
+            \item 旧（attacker-side）：mean $\Delta J \geq 0.55$（已达 0.746 in 6 / 13）；
+            \item 新（publisher-side）：原始帧 $\Delta J \in [0.25, 0.35]$ + LPIPS $\leq$ 0.03 + Unusable-Track Rate（$J<0.5$ 帧比例）+ Sustained Failure Rate（连续 5 帧 $J<0.3$ 比例）+ 人工 stealth $\geq$ 85\%。
+        \end{enumerate}
+\end{enumerate}
+
+% =====================================================================
+\section{结语}
+
+VADI v4.1 的核心思想是：\emph{利用攻击者对原视频的完整访问权识别 SAM2 自身的脆弱时刻，在那些时刻插入语义合理的诱饵帧（劫持 cross-attention 读出），并在紧邻的桥接窗口上施加少量 $\delta$ 来延展、放大诱饵的效应。}
+
+设计上严守三条硬约束（CLAUDE.md）：
+\begin{itemize}[leftmargin=2em]
+    \item ``插入 + $\delta$ 联合''是方法的不变核心（Method Design Constraints）；
+    \item 论文方向必须保持正向 decoy 攻击叙事，禁止 audit/falsification pivot（Paper Direction Constraint）；
+    \item 任何方法实现都必须先经 Codex review 再上 GPU（Code Review Protocol）。
+\end{itemize}
+
+下一步的关键实验是 paired A0 baseline，它将决定 C2 主张能否进入论文头版。
+
+\end{document}

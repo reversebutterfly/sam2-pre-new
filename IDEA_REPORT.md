@@ -1,312 +1,233 @@
-# Idea Discovery Report
+# Idea Discovery Report — ChronoCloak (publisher-side temporal state-injection cloak for SAM2-class VOS)
 
-**Direction**: 视频数据集保护 — 通过架构感知的对抗帧插入策略防御SAM2分割攻击
-**Date**: 2026-04-15
-**Pipeline**: research-lit → idea-creator (GPT-5.4 xhigh) → novelty-check → research-review → method refinement
+**Direction**: Deep-read 4 anchor papers (Liu CVPR 2025 / UAP-SAM2 NeurIPS 2025 / BB-SAM TMM 2025 / HardRegion VOS TCSVT 2024) and propose ONE feasible AAAI scheme.
+**Date**: 2026-04-28
+**Pipeline used**: research-review (codex round 2 in thread `019dd243-04d2-7111-9eb0-c4eb3fec729d`) — full /idea-discovery flow compressed because direction was already pinned by 2026-04-28 publisher-side pivot.
+**Companion docs**: `PIVOT_REVIEW_2026-04-28.md` (publisher-side direction approval), `CHRONOCLOAK_REVIEW_2026-04-28.md` (codex's compact review of this proposal).
+**Prior version**: `IDEA_REPORT_2026-04-15.md` (archived).
 
 ---
 
 ## Executive Summary
 
-We propose **MemoryShield**, a unified framework for protecting video datasets against SAM2's video object segmentation through **architecture-aware adversarial frame insertion**. The core insight is that SAM2's FIFO memory bank has no quality gating — adversarial frames enter memory unconditionally and corrupt all downstream predictions. Our approach inserts a small number of carefully timed adversarial frames (strong anchor + weak sustain) that exploit three SAM2-specific vulnerabilities: FIFO memory dynamics, conditioning frame priority, and occlusion-transition fragility. All 7 generated ideas passed deep novelty verification against 30+ papers.
+**Recommended idea**: **ChronoCloak** — A publisher-side temporal state-injection cloak for prompt-driven video segmentation, where natural interstitial frame insertion is the primary attack surface and invisible bridge perturbations only stabilize the induced state corruption.
 
-**Best idea**: Memory Resonance (记忆共振) — synchronize adversarial frame insertion with FIFO eviction schedule to create persistent memory corruption with minimal insertion budget.
+**Codex novelty score (round 2)**: 6/10 as initially drafted; ≥7/10 if the "temporal state injection" axis is elevated to the central scientific contribution and proven with a matched-budget causal ablation.
 
-**Recommended next step**: Implement the unified MemoryShield framework and run experiment block E2 (core validation) on V100 GPU.
+**Mock AAAI score**: 5/10 → 6.5/10 with the recommended changes.
 
----
-
-## Literature Landscape
-
-### Surveyed Papers: 30+ across 4 dimensions
-
-#### Dimension 1: Adversarial Attacks on SAM/SAM2 (Image-level)
-| Paper | Venue | Key Method |
-|---|---|---|
-| Attack-SAM (Zhang et al.) | arXiv 2023 | White-box FGSM on SAM encoder |
-| Black-box Targeted Attack on SAM (Zheng et al.) | arXiv 2023 | Targeted mask attack, cross-model transfer |
-| Red-Teaming SAM (Jankowski et al.) | CVPR 2024 WS | FIGA sparse attack |
-| SAM Meets UAP (Han et al.) | arXiv 2024 | Contrastive UAP generation |
-| DarkSAM (Chen et al.) | NeurIPS 2024 | Prompt-free UAP, semantic decoupling + frequency |
-| Robust SAM | AAAI 2025 | Cross-prompt attack, -40 mIoU on SAM2 |
-
-#### Dimension 2: Temporal/Video Adversarial Attacks
-| Paper | Venue | Key Method |
-|---|---|---|
-| VOS Hard Region Discovery (Li et al.) | IEEE TCSVT 2024 | First-frame attack propagates through memory |
-| DeepSAVA (Mu et al.) | Neural Networks 2023 | Single-frame perturbation, 99.5% fooling |
-| Flickering Attack (Pony et al.) | CVPR 2021 | Temporal brightness modulation |
-| Vanish into Thin Air | 2025 | Cross-prompt universal SAM2 attacks |
-| Time-Constrained Attacks | Machine Vision 2025 | Sparse temporal mask, K frames only |
-
-#### Dimension 3: Data Protection Paradigm
-| Paper | Venue | Key Method |
-|---|---|---|
-| Glaze (Shan et al.) | USENIX 2023 | Style protection in CLIP latent space |
-| PhotoGuard (Salman et al.) | ICML 2023 | Encoder-level perturbation vs. image editing |
-| I2VGuard (Gui et al.) | CVPR 2025 | First video protection against I2V diffusion |
-| Anti-I2V | arXiv 2026 | Improved I2V protection |
-| PAP | NeurIPS 2024 | Prompt-agnostic perturbation |
-
-#### Dimension 4: SAM2 Architecture Vulnerabilities
-- **FIFO memory bank** with NO quality gating → unconditional memory poisoning
-- **Memory encoder** fuses masks + frame embeddings → corrupted mask cascades
-- **No motion model** → purely appearance-based, fragile to adversarial features
-- **Error accumulation** → single bad prediction propagates indefinitely
-- **Fixed temporal window** → burst of bad frames flushes good memories
-
-### Structural Gap
-**No existing work addresses protecting video datasets from SAM2 via frame insertion.** All prior attacks perturb existing frames; none exploit the insertion attack surface. No prior work uses FIFO-synchronized scheduling, topology-targeted attack objectives, or event-triggered insertion timing.
+**Final verdict**: **GO-WITH-CHANGES** — direction is correct; framing must demote engineering to implementation detail and elevate the science.
 
 ---
 
-## Ranked Ideas (7 validated)
+## Anchor-paper landscape (codex round 2)
 
-### 🏆 Idea 1: Memory Resonance 记忆共振 — RECOMMENDED
+### A1. Liu et al. CVPR 2025 — "Protecting Your Video Content"
+- **Contribution**: proactive publisher-side video watermark; two attack families (`Rambling-F/L` for wrong captions, `Mute-S/N` for premature EOS).
+- **Threat model**: video owner protects against unauthorized video-LLM annotation (`Video-ChatGPT`, `Video-LLaMA`, `Video-Vicuna`); white-box on victim video-LLM by default.
+- **Metrics**: CLIP, BLEU, caption length, EOS rate, downstream VQAA/VQAT.
+- **Most damaging overlap**: **the publisher-side framing itself**.
+- **Our delta**: target service is prompt-driven *video segmentation*, not text-output video-LLMs; perturbation surface is *temporal state injection through inserted interstitial frames*, not additive watermarks.
 
-**Core**: Treat SAM2's FIFO memory bank as a resonant cavity. One strong frame maximally shifts memory embeddings; weak frames arrive precisely before the poison ages out, creating a standing wave of corruption.
+### A2. UAP-SAM2 / "Vanish into Thin Air" NeurIPS 2025 Spotlight
+- **Contribution**: cross-prompt UNIVERSAL adversarial perturbation for SAM2 via target-scanning + dual semantic deviation (semantic confusion + feature shift + memory misalignment).
+- **Threat model**: open-source SAM2 surrogate + public datasets; cross-prompt + cross-dataset transfer.
+- **Metrics**: mIoU on YouTube-VOS / DAVIS / MOSE under point + box prompts.
+- **Most damaging overlap**: **SAM2-specific prompt transfer + temporal/memory disruption already claimed**.
+- **Our delta**: **non-native-frame insertion as the attack surface**. UAP-SAM2 is a classical additive UAP. We claim that realistic interstitial frame *insertion* (not perturbation) plus short bridge stabilization opens a new perturbation surface.
 
-| Aspect | Design |
-|---|---|
-| Temporal Pattern | Strong at t₀; weak at t₀+(N-1), t₀+2(N-1)... synced with FIFO window N |
-| Strong Frame | Surrogate-ensemble optimized memory-embedding drift on target contours |
-| Weak Frame | Same perturbation basis at 15-25% energy |
-| Black-box | SAM/SAM2.1/HQ-SAM ensemble + random prompt EOT + codec augmentation |
-| Visual Quality | Perturbation confined to object contours, global PSNR >40dB |
-| Novelty | **CONFIRMED** — No prior work syncs adversarial scheduling with FIFO window |
-| Closest Work | Vanish into Thin Air (uniform perturbation, no FIFO awareness) |
-| Reviewer Risk | "What if SAM2 changes FIFO to tree-based?" → Test both variants |
-| Feasibility | ★★★★★ |
+### A3. Black-Box Targeted SAM (BB-SAM, IEEE TMM 2025)
+- **Contribution**: prompt-agnostic targeted attack on image SAM via encoder-space PATA / PATA++ regularizer; transfer-based black-box (NOT classical query-based — codex correction).
+- **Threat model**: image SAM, targeted (force imitation of target mask), transfer black-box from SAM-B to SAM-L/H.
+- **Metrics**: IoU/mIoU between adv mask and target mask (higher is better).
+- **Most damaging overlap**: prompt-agnostic encoder-space optimization.
+- **Our delta**: video, memory-bearing model, publisher-side, non-targeted, temporal-state corruption (not feature mimicry).
 
----
-
-### 🥈 Idea 2: Conditioning Shadow 条件影随 — RECOMMENDED
-
-**Core**: Insert a "shadow" frame immediately after the prompt frame. SAM2's memory attention preferentially attends to temporally closest conditioning frames, so the shadow hijacks the prompt's influence.
-
-| Aspect | Design |
-|---|---|
-| Temporal Pattern | Strong frame right after prompt; weak every 3-5 frames while object visible |
-| Strong Frame | Preserves click-local appearance but shifts downstream mask memory |
-| Weak Frame | Local echo around prompt neighborhood and object centroid |
-| Black-box | Randomized point/box prompting on surrogates |
-| Visual Quality | Nearly identical to prompt frame, looks like natural inter-frame variation |
-| Novelty | **CONFIRMED** — SAM2's conditioning frame privilege unexploited |
-| Reviewer Risk | "Attacker doesn't know prompt position" → Pre-insert at every K frames |
-| Feasibility | ★★★★ |
+### A4. Hard Region Discovery VOS (TCSVT 2024)
+- **Contribution**: ARA — first-frame attack that learns hardness-map from gradients and concentrates δ on hard fg/bg boundary regions.
+- **Threat model**: white-box semi-supervised VOS targeting STM / HMMN / STCN / AOT; black-box variant studied.
+- **Metrics**: J&F on DAVIS 2016/2017 + YouTube-VOS official.
+- **Most damaging overlap**: sparse-in-time attack story (early-frame perturbation hurts later).
+- **Our delta**: target SAM2 (memory-bank class); inserted-frame *memory-write hijack* (we have A3 4/4 STRONG causal evidence) vs spatial hard-region perturbation.
 
 ---
 
-### 🥉 Idea 3: Topology Split Seed 拓扑分裂种子 — RECOMMENDED
+## Gap Matrix
 
-**Core**: Don't make SAM2 fail — make it produce topologically wrong masks. Seed a bad split/hole/bridge at narrow structures, then maintain the topological error with minimal perturbation.
-
-| Aspect | Design |
-|---|---|
-| Temporal Pattern | Strong at articulated poses; weak every 2-4 frames until topology stabilizes |
-| Strong Frame | Boundary attack on necks, limbs, handles exploiting multi-mask ambiguity |
-| Weak Frame | Tiny signed-distance perturbation at genus-changing pixels only |
-| Black-box | Surrogate connected-component / topology proxy losses |
-| Visual Quality | Extremely sparse (few pixels), nearly invisible |
-| Novelty | **CONFIRMED** — Topology as attack objective is entirely novel |
-| Reviewer Risk | "Simple convex objects have no topology to exploit" → Combine with other modules |
-| Feasibility | ★★★☆ |
+| Method            | Target service              | Perturbation surface                                        | Fidelity budget                            | Primary metric                          | Mechanism evidence                              | Transferability claim                |
+|-------------------|-----------------------------|-------------------------------------------------------------|--------------------------------------------|-----------------------------------------|-------------------------------------------------|--------------------------------------|
+| Liu CVPR25        | Video-LLM annotation        | Additive watermark on native frames                         | L∞=16/255                                  | CLIP, BLEU, caption length, EOS, VQAA/T  | Caption / logit / EOS manipulation; no temporal causal proof | Across 3 video-LLMs; prompt transfer |
+| UAP-SAM2          | SAM2 image+video VOS        | Additive UAP + sample-wise variant                          | UAP 10/255; sample-wise 8/255              | mIoU (lower better)                     | Semantic confusion + feature shift + memory misalignment | Cross-prompt, cross-dataset, cross-model, → SAM2long |
+| BB-SAM            | Image SAM                    | Additive image perturbation via encoder attack              | 4/255–16/255 (8/255 highlighted)           | mIoU to target mask (higher better)     | Feature mimicry + dominance regularizer         | Cross-prompt, cross-model            |
+| HardRegion VOS    | Classic VOS (STM/HMMN/STCN/AOT) | First-frame additive δ weighted by hardness map             | small / imperceptible (default ε not verified) | J&F DAVIS, YT-VOS official              | First-frame gradient hardness learner            | White-box main; black-box variant    |
+| **ChronoCloak**   | Publisher-side prompt-driven SAM2-class VOS | **Inserted interpolation interstitials + L=2 bridge δ on real frames + accept/revert wrapper** | insert ε'=2/255, bridge ε=2/255, mean LPIPS≤0.03, SSIM≥0.99 | **original-frames-only J + UTR + SFR + re-prompt burden + human stealth** | A3 memory-write blocking 4/4 STRONG (need to extend) | Limited same-family prompt transfer (don't overclaim) |
 
 ---
 
-### Idea 4: Occlusion Ghost 遮挡幽灵
+## ChronoCloak — Final Method (codex GO-WITH-CHANGES)
 
-**Core**: Event-triggered insertion at natural occlusion/reappearance moments. Exploits SAM2's known fragility at temporal transitions.
+### One-line pitch (verbatim from codex)
+> "A publisher-side temporal state-injection cloak for prompt-driven video segmentation, where natural interstitial frame insertion is the primary attack surface and invisible bridge perturbations only stabilize the induced state corruption."
 
-| Aspect | Design |
-|---|---|
-| Temporal Pattern | Strong at occlusion onset; weak on next 3-5 visible frames |
-| Strong Frame | Suppress object evidence while preserving background continuity |
-| Weak Frame | Low-rank contour weakening + background texture borrowing |
-| Novelty | **CONFIRMED** — Event-triggered timing is novel |
-| Feasibility | ★★★★★ (optical flow detection is mature) |
+### Core scientific axis (THE thing the paper sells)
+**Temporal state injection** is a new, distinct perturbation surface for memory-bank-class video segmentation models — not additive δ on native frames (UAP-SAM2 family), not first-frame spatial concentration (HardRegion family), not text-token EOS manipulation (Liu family). It exploits a property unique to memory-bank prompt-driven segmentation: that the model writes per-frame state into a queue used by future frames, so a *single inserted frame's* memory-write can be hijacked while leaving the visible video stream perceptually clean.
 
----
+### Method components (priority-ordered)
 
-### Idea 5: Phase-Locked Echo 锁相回声
+1. **[CORE] Interpolated decoy frame** — between original I_t and I_{t+1}, generate an interstitial frame via a frozen interpolator (RIFE / FILM / IFRNet) and apply a small adversarial steering ν' (ε'=2/255) optimized to corrupt SAM2's cross-attention readout when SAM2 processes that decoy. **Replaces** oracle-trajectory composite (which produced visible double-object ghosting in the v4.1 viz).
+2. **[CORE] Sparse bridge δ** — only on the next L=2 real frames after each insert; ε=2/255, mean LPIPS ≤ 0.03, 95th-%ile ≤ 0.05, SSIM ≥ 0.99. Frames outside the bridge window untouched.
+3. **[IMPLEMENTATION DETAIL] Robust placement** — vulnerability-aware top-K with random fallback to fix the inversion problem. Demoted from flagship to implementation detail per codex.
+4. **[IMPLEMENTATION DETAIL] GT-free training** — clean-SAM2 pseudo-labels with confidence weighting; GT only for evaluation.
+5. **[IMPLEMENTATION DETAIL] Adaptive accept/revert wrapper** — accept perturbation only if (effect ≥ θ_eff AND stealth ≥ θ_stealth); else revert that clip to insert-only or no-op.
+6. **[SCIENTIFIC SUPPORT] Memory-hijack mechanism evidence** — A3 causal ablation extended from current 4 clips to all 13.
 
-**Core**: Perturb local Fourier phase (not magnitude) at object boundary harmonics. Phase carries shape information; small phase shifts are invisible but distort memory-encoded boundaries.
+### Fidelity budgets (publisher-side, tight)
+- Prompt frame: ε ≤ 1/255
+- Bridge frames: ε ≤ 2/255
+- Mean LPIPS on perturbed real frames: ≤ 0.03
+- 95th-percentile LPIPS: ≤ 0.05
+- Mean SSIM: ≥ 0.99
+- Inserted frames: not judged by ε; require human flipbook pass-rate + temporal-consistency check
 
-| Aspect | Design |
-|---|---|
-| Strong Frame | Phase-only twist at contour harmonics |
-| Weak Frame | Same-sign phase echo with exponential decay |
-| Novelty | **CONFIRMED** — Local contour-harmonic phase attack is new |
-| Risk | Codec robustness needs validation |
-| Feasibility | ★★★★ |
-
----
-
-### Idea 6: Spectral Hole Punch 频谱空洞冲击
-
-**Core**: Estimate the object's most discriminative texture frequency bands, then carve a narrow adversarial notch. A "subtractive" attack — remove spectral support rather than add noise.
-
-| Aspect | Design |
-|---|---|
-| Strong Frame | Content-adaptive notch on dominant texture PSD |
-| Weak Frame | Same notch at shallow depth (narrow-band = high quality) |
-| Novelty | **CONFIRMED** — Subtractive spectral attack is a new primitive |
-| Risk | Notch may be partially recovered by codecs |
-| Feasibility | ★★★★ |
+### Primary metrics
+- **Original-frames-only J vs DAVIS GT** (excludes inserted frames from J)
+- **Unusable-Track Rate** (UTR): fraction of clips with mean original-frame J < 0.5
+- **Sustained Failure Rate** (SFR): fraction of clips with ≥5 consecutive original frames at J < 0.3
+- **Re-prompt burden**: extra prompts user must issue to recover usable tracking
+- **Human stealth pass-rate**: fraction of inserted frames not flagged by raters in flipbook test
 
 ---
 
-### Idea 7: Bottleneck Trap 信息瓶颈陷阱
+## Defensible AAAI Claim (narrowed)
 
-**Core**: Information-theoretic optimal control — strong frame maximizes KL divergence of memory embeddings under rate budget; weak frames are minimum-energy control inputs fired adaptively when feature distance collapses.
+> *"ChronoCloak — first publisher-side temporal-state-injection cloak for prompt-driven memory-bank video object segmentation (SAM2-class)."*
 
-| Aspect | Design |
-|---|---|
-| Strong Frame | Optimize memory-embedding drift |
-| Weak Frame | Nudge along slowest-correcting principal directions, sparse and nearly invisible |
-| Novelty | **CONFIRMED** — Information-theoretic control of VOS memory is new |
-| Risk | Theory-to-implementation gap, needs accurate surrogate memory encoder |
-| Feasibility | ★★★ |
+What's NOT defensible:
+- ❌ "First publisher-side video cloak" — broken by Liu CVPR 2025
+- ❌ "First memory-based SAM2 attack" — broken by UAP-SAM2 (memory misalignment is one of their components)
+- ❌ "Joint insert + δ outperforms insert-only" — current evidence does NOT support this; bridge δ must be repositioned as a *stealth-preserving stabilizer*, not an efficacy booster.
 
----
-
-## Eliminated Ideas
-
-| Idea | Phase Eliminated | Reason |
-|---|---|---|
-| Booster Rhythm 加强针节律 | Phase 2 (not selected) | Subsumed by Memory Resonance's more principled scheduling |
-| Chameleon Drift 变色龙漂移 | Phase 2 (not selected) | Interesting but less architecturally targeted |
-| Nyquist Drift 奈奎斯特漂移 | Phase 2 (not selected) | Motion illusion is creative but hard to validate black-box |
+What IS defensible (under tight wording):
+- ✓ "Frame insertion (vs additive perturbation) as a distinct, complementary perturbation surface for memory-bank VOS"
+- ✓ "Causal evidence (memory-write blocking ablation) that the inserted-frame insertion point is the mechanism"
+- ✓ "Tight fidelity budget (LPIPS ≤ 0.03) compatible with publisher use"
 
 ---
 
-## Refined Proposal: MemoryShield Unified Framework
+## Minimum Experiment Package (codex round 2, prioritized for V100-only 3 GPU-week budget)
 
-### Problem Anchor
-Video datasets face unauthorized processing by video segmentation foundation models (SAM2). Existing protection methods (DarkSAM, Vanish into Thin Air) only perturb existing frames without exploiting frame insertion as an attack surface, and lack architecture-aware temporal scheduling.
+### MUST-RUN (in order)
 
-### Method Thesis
-Architecture-aware adversarial frame insertion using FIFO memory resonance scheduling as the backbone, combined with topology seed / conditioning shadow / occlusion ghost modules, to persistently disable SAM2's video segmentation while maintaining visual quality.
+**M1. Go/No-Go pilot on 6 clips** (~3 GPU-days)
+- Methods: clean / additive-only native-sequence baseline / old oracle composite insert / interpolation insert-only / ChronoCloak (interpolation + bridge δ)
+- Fixed simple placements (use existing W from v5_paper_all_merged); skip placement search
+- Metrics: original-frames-only J, internal stealth screen
+- **Decision gate**: if interpolation does NOT remove ghosting OR kills the attack, the pivot is dead.
 
-### Framework Architecture
+**M2. Core causal ablation on the same 6 clips** (~3 GPU-days)
+- Methods: additive-only / insert-only / insert+bridge — **matched LPIPS and matched modified-frame count**
+- Plus memory-write blocking at insert positions vs matched non-insert positions (extends current A3)
+- This is **the central scientific experiment** of the paper.
 
-```
-Input Video
-    │
-    ▼
-┌──────────────────────────────────────┐
-│        Content Analyzer              │
-│  ┌──────────┐ ┌──────────┐ ┌──────┐ │
-│  │Scene/Event│ │ Topology │ │Texture│ │
-│  │ Detection │ │ Analysis │ │Profile│ │
-│  └─────┬────┘ └────┬─────┘ └──┬───┘ │
-└────────┼───────────┼──────────┼──────┘
-         │           │          │
-         ▼           ▼          ▼
-┌──────────────────────────────────────┐
-│       Insertion Scheduler (M1)       │
-│  ┌──────────┐ ┌──────────┐ ┌──────┐ │
-│  │   FIFO   │ │  Event   │ │Adapt.│ │
-│  │Resonance │ │ Trigger  │ │ Decay│ │
-│  └─────┬────┘ └────┬─────┘ └──┬───┘ │
-└────────┼───────────┼──────────┼──────┘
-         │           │          │
-         ▼           ▼          ▼
-┌──────────────────────────────────────┐
-│     Frame Generator (M2)             │
-│  ┌──────────┐ ┌──────────┐ ┌──────┐ │
-│  │ Strong   │ │  Weak    │ │Quality│ │
-│  │Frame Gen │ │Frame Gen │ │Control│ │
-│  └─────┬────┘ └────┬─────┘ └──┬───┘ │
-└────────┼───────────┼──────────┼──────┘
-         │           │          │
-         ▼           ▼          ▼
-    Protected Video (with inserted frames)
-```
+**M3. Main 13-clip benchmark** (~5 GPU-days)
+- Methods: clean / additive-only / insert-only / ChronoCloak
+- Primary: original-frames-only J, UTR, SFR
+- Secondary: whole-processed-video J-drop
 
-### Key Design Choices
+**M4. Limited transfer / robustness on 6 clips** (~2 GPU-days)
+- Point-prompt optimize, box-prompt eval
+- SAM2-Tiny → SAM2.1-Tiny transfer
+- Wrapper ablation: with vs without accept/revert
 
-1. **Surrogate Ensemble**: SAM + SAM2.1-tiny + HQ-SAM + XMem for black-box transfer
-2. **EOT Augmentation**: Random prompt types, positions, codec compression, resize
-3. **Quality Constraint**: L∞ ≤ 8/255, SSIM ≥ 0.95, LPIPS ≤ 0.05
-4. **Insertion Ratio**: Target ≤ 15% additional frames (e.g., 3 inserted per 20 original)
-5. **Perturbation Generation**: Phase-Locked Echo as default, Spectral Hole Punch as variant
+**M5. Human stealth study** (~1 hour, no GPU)
+- 39 inserted events (3 inserts × 13 clips) flipbook + 39 clean controls
+- 3 raters each
+- Report pass-rate + obvious-fake rate
+
+### NICE-TO-HAVE (drop in this order if compute slips)
+1. Full placement-search ablations
+2. Cross-dataset transfer
+3. Large baseline reproduction of UAP-SAM2 / HardRegion
+4. Extra wrapper variants
+
+### DO NOT DROP
+- Matched-budget additive vs insert causal ablation (M2)
+- 13-clip original-frame GT table (M3)
+- Human stealth test (M5)
 
 ---
 
-## Experiment Plan
+## What survives the pivot from existing assets
 
-### Setup
-- **Datasets**: DAVIS 2017 (val), YouTube-VOS 2019 (val), MOSE (long video with occlusions)
-- **Target Models**: SAM2 (hiera_tiny/base+/large), SAM2.1, SAM2Long
-- **Surrogate Models**: SAM-ViT-H, HQ-SAM, XMem, Cutie
-- **Hardware**: Tesla V100 (per CLAUDE.md resource policy)
+### Reuse as-is
+- 13 polished DAVIS clip raw frames (`vadi_runs/v5_paper_all_merged/`)
+- Clean-SAM2 pseudo-labels for optimization
+- A3 causal mechanism code (`memshield/causal_diagnostics.py`)
+- 4-clip A3 STRONG results — moves from "main result" to "preliminary mechanism evidence" in appendix
+- viz pipeline (5 side-by-side MP4) — kept to demonstrate the *failure mode* that motivates the pivot
+- joint_placement_search code — runs as preprocessing, demoted from flagship
 
-### Metrics
-| Category | Metric | Target |
-|---|---|---|
-| Attack Success | mIoU drop | ≥ 30 points |
-| Attack Success | J&F degradation | ≥ 25 points |
-| Visual Quality | PSNR | ≥ 38 dB |
-| Visual Quality | SSIM | ≥ 0.95 |
-| Visual Quality | LPIPS | ≤ 0.05 |
-| Efficiency | Insertion ratio | ≤ 15% |
-| Persistence | Frames until recovery | ≥ 50 frames |
+### Must rerun
+- All main attack numbers (under new tight budget)
+- All visuals (with interpolation-based decoys)
+- All fidelity metrics (against the new LPIPS≤0.03 target)
+- Final results table
 
-### Experiment Blocks
-
-| Block | Experiment | Purpose | GPU-hrs |
-|---|---|---|---|
-| E1 | Baseline reproduction | DarkSAM, Vanish into Thin Air, naive frame insert | 4h |
-| E2 | Memory Resonance core | FIFO-sync vs. random/periodic insertion | 3h |
-| E3 | Module ablation | +Topology, +Shadow, +Ghost incremental | 6h |
-| E4 | Frequency variant | Phase-Locked Echo vs. Spectral Hole Punch vs. PGD | 4h |
-| E5 | Surrogate transfer | SAM→SAM2, ensemble→SAM2.1 | 4h |
-| E6 | Quality sweep | ε: 2-16/255, insertion ratio: 5-30% | 3h |
-| E7 | Codec robustness | H.264/H.265 at CRF 18-28 | 2h |
-| E8 | Cross-model | XMem, Cutie, DEVA (non-SAM VOS) | 4h |
-| E9 | Defense resistance | Correction-based defense, adversarial purification | 3h |
-
-**Total estimated**: ~33 GPU-hours on V100
-**Run order**: E1 → E2 → E3 → E4 (parallel) → E5 → E6 → E7 → E8 → E9
-**First 3 runs**: E1, E2, E4
-
-### Claims the Experiments Must Support
-
-| Claim | Required Evidence |
-|---|---|
-| C1: Frame insertion is a viable attack surface | E2: mIoU drop ≥ 20 with insertion only |
-| C2: FIFO-sync outperforms naive scheduling | E2: Resonance > random/periodic by ≥ 5 mIoU |
-| C3: Topology attack is self-reinforcing | E3: Topology module alone persists ≥ 30 frames |
-| C4: Multi-module combination is synergistic | E3: Full > sum of individual modules |
-| C5: Black-box transfer is effective | E5: Surrogate→SAM2 drop ≥ 70% of white-box |
-| C6: Visually imperceptible | E6: PSNR ≥ 38 at ε=8/255 |
-| C7: Codec-robust | E7: Attack survives H.264 CRF ≤ 23 |
+### Build new (low compute)
+- Interpolator integration (RIFE pretrained, no training)
+- LPIPS / SSIM evaluation hooks
+- UTR / SFR / re-prompt-burden metric implementations
+- Human stealth study harness (web flipbook)
 
 ---
 
-## Next Steps
+## AAAI risk analysis (codex round 2)
 
-- [ ] Implement MemoryShield framework core (Memory Resonance scheduler + surrogate ensemble)
-- [ ] Run E1 (baseline reproduction) to validate experimental setup
-- [ ] Run E2 (Memory Resonance core) to prove main thesis
-- [ ] Use `/run-experiment` to deploy on GPU server
-- [ ] Use `/auto-review-loop` after experiments for iterative paper improvement
-- [ ] Or invoke `/research-pipeline` for complete end-to-end flow
+| Risk axis                 | Where ChronoCloak is weakest                        | Mitigation                                                       |
+|---------------------------|-----------------------------------------------------|------------------------------------------------------------------|
+| Over-claimed firstness    | "First publisher-side video cloak" / "first memory-based SAM2 attack" | Use narrowed claim above; explicitly cite Liu CVPR25 and UAP-SAM2 in intro |
+| Engineering combination   | interpolator + PGD + placement + pseudo-labels + wrapper looks like assembly | Elevate "temporal state injection" as the science; demote others |
+| Weak ablations            | prior evidence says insert-only > joint            | Reposition bridge δ as *stealth-preserving stabilizer*; M2 must show δ doesn't HURT |
 
 ---
 
-## References
+## Mock AAAI Review (codex round 2)
 
-1. Ravi et al. "SAM 2: Segment Anything in Images and Videos." arXiv 2408.00714, 2024.
-2. Chen et al. "DarkSAM: Fooling Segment Anything Model to Segment Nothing." NeurIPS 2024.
-3. "Vanish into Thin Air: Cross-prompt Universal Adversarial Attacks on SAM2." arXiv 2510.24195, 2025.
-4. Gui et al. "I2VGuard: Safeguarding Images Against Misuse in I2V Models." CVPR 2025.
-5. Li et al. "Adversarial Attacks on VOS with Hard Region Discovery." IEEE TCSVT 2024.
-6. "Robust SAM: On the Adversarial Robustness of Vision Foundation Models." AAAI 2025.
-7. Shan et al. "Glaze: Protecting Artists from Style Mimicry." USENIX Security 2023.
-8. Salman et al. "Raising the Cost of Malicious AI-Powered Image Editing." ICML 2023.
-9. "SAM2Long: Enhancing SAM2 for Long Video Segmentation with a Training-Free Memory Tree." arXiv 2410.16268, 2024.
-10. Mu et al. "DeepSAVA: Sparse Adversarial Video Attacks." Neural Networks 2023.
-11. Song et al. "Correction-Based Defense Against Adversarial Video Attacks." USENIX Security 2024.
-12. Hu et al. "Topology-Preserving Deep Image Segmentation." MICCAI 2019.
+- **Score**: 5/10 as drafted; 6.5/10 with the 7 priority changes applied.
+- **Confidence**: 4/5
+- **What moves to accept**:
+  1. Matched-budget proof that temporal state injection is the true novelty
+  2. Full 13-clip original-frames-only GT benchmark
+  3. Small but credible human stealth study
+  4. Cleaner narrative that demotes placement/wrapper engineering and centers the scientific claim on inserted-frame temporal state corruption
+
+---
+
+## Next steps
+
+### Phase A (no GPU needed, do now)
+1. Implement RIFE / FILM / IFRNet interpolation hook (`memshield/interp_decoy.py`)
+2. Tighten fidelity budgets in `VADIv5Config` (task #42 — already pending)
+3. Implement UTR / SFR / re-prompt-burden metrics
+4. Build human stealth study harness (web flipbook)
+5. Position vs CVPR 2025 paper (task #43 — already pending)
+
+### Phase B (V100, when available)
+6. Run M1 (6-clip Go/No-Go pilot) — task #41 already pending
+7. Run M2 (matched-budget causal ablation) — codex says THIS IS THE CRITICAL EXPERIMENT
+8. Extend A3 from 4 clips to 13 clips (when Pro 6000 swap clears)
+
+### Phase C (writing)
+9. Draft paper around the temporal-state-injection axis
+10. /paper-writing pipeline once M2 + M3 + M5 complete
+
+---
+
+## Companion files
+
+- `PIVOT_REVIEW_2026-04-28.md` — codex's publisher-side pivot direction approval
+- `CHRONOCLOAK_REVIEW_2026-04-28.md` — codex's compact review of this proposal (round 2)
+- `paper/method_explainer_zh.tex` / `.pdf` — Chinese explainer with current experimental data (旧 framing, kept for reference)
+- `viz/{camel,bear,breakdance,dance-twirl,dog}_clean_vs_attacked.mp4` — current side-by-side visualizations
+- Memory: `feedback_publisher_side_pivot.md` (HARD directive 2026-04-28)
+- Prior idea report: `IDEA_REPORT_2026-04-15.md` (archived)

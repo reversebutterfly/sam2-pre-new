@@ -10,3 +10,23 @@ results_*/
 dist/
 build/
 .claude/
+.codex_tmp/
+
+# Visualization artifacts: raw frames + MP4s are heavy demo outputs,
+# regeneratable from results.json + processed/ via viz/make_side_by_side.py
+viz/*/
+viz/*.mp4
+
+# Vadi run dirs (may be symlinked or rsynced from remote)
+vadi_runs/
+
+# LaTeX build artifacts
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.synctex.gz
