@@ -10,7 +10,10 @@ import pathlib
 
 OUT_ROOT = pathlib.Path("vadi_runs/v5_go_nogo_profiles")
 SRC_ROOT = pathlib.Path("vadi_runs/v5_paper_all_merged")
-CLIPS = ["camel", "dog", "breakdance", "libby"]
+CLIPS = [
+    "bear", "blackswan", "bmx-trees", "breakdance", "camel", "cows",
+    "dance-twirl", "dog", "hike", "horsejump-high", "india", "judo", "libby",
+]
 CONFIG = "K3_top_R8_b-dup_l-dc_o-ad_d-post_s-fs__ot"
 
 
@@ -21,8 +24,13 @@ def attacked_to_clean(W_att):
 
 def main():
     OUT_ROOT.mkdir(parents=True, exist_ok=True)
+    missing = []
     for c in CLIPS:
         rj = SRC_ROOT / c / CONFIG / "results.json"
+        if not rj.is_file():
+            missing.append(c)
+            print(f"[skip] {c}: source results.json not found at {rj}")
+            continue
         raw = rj.read_text()
         raw = raw.replace("NaN", "null")
         d = json.loads(raw)
@@ -54,6 +62,17 @@ def main():
         )
     print()
     print("profiles ready in", OUT_ROOT)
+    if missing:
+        # Codex round 17 CRITICAL #3: a missing profile silently changes
+        # the experiment because the v5 driver falls back to
+        # args.placement instead of using the joint-optimal W. Hard-fail.
+        import sys
+        print(
+            f"FATAL: {len(missing)} clip(s) missing source results.json "
+            f"in {SRC_ROOT}: {missing}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
 
 if __name__ == "__main__":
