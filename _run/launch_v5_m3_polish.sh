@@ -22,7 +22,13 @@ LOG="${OUT_ROOT}/run.log"
   conda activate /LAI_Data/Anaconda_envs/2025Lv_Zhaoting/memshield
   echo "[${TAG}] HEAD: $(git log --oneline -1)"
 
-  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1} python -m scripts.run_vadi_v5 \
+  # Wrap in systemd-run --user --scope to opt out of systemd-oomd's
+  # ManagedOOMMemoryPressure=kill@50%PSI policy. Survives transient swap
+  # pressure spikes from other users (Yao pt_data_workers, ShiGuangze).
+  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1} systemd-run --user --scope \
+      --property=ManagedOOMMemoryPressure=auto \
+      --property=ManagedOOMSwap=auto \
+      python -m scripts.run_vadi_v5 \
       --davis-root ~/sam2-pre-new/data/davis \
       --checkpoint ~/sam2-pre-new/checkpoints/sam2.1_hiera_tiny.pt \
       --clips ${CLIPS} \

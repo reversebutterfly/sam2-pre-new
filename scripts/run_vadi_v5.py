@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -130,7 +131,11 @@ class VADIv5Config:
 
     # Ablation axes (codex R2 disciplined plan, 2026-04-24).
     # Defaults reproduce the original v5-full; flip one axis per A1/A2/A3.
-    insert_base_mode: str = "duplicate_seed"   # "midframe" | "duplicate_seed"
+    insert_base_mode: str = "duplicate_seed"   # "midframe" | "duplicate_seed" | "poisson_hifi" | "propainter"
+    # codex round 6 ghost-free strict-mode kill switch (2026-04-28).
+    # False (default) raises if all offset retries fail border-safety.
+    # True falls back to duplicate_object decoy with a warning.
+    allow_ghost_fallback: bool = False
     loss_mode: str = "dice_bce"                # "margin" | "dice_bce"
     optimizer_nu_mode: str = "adam"            # "adam" | "sign_pgd"
     schedule_preset: str = "full"              # "full" | "insert_only_100"
@@ -2673,7 +2678,9 @@ def run_v5_for_clip(
     W_attacked = sorted([c + k for k, c in enumerate(sorted(W_clean))])
     T_proc = T_clean + len(W_attacked)
 
-    # --- insert base construction (codex R2 ablation axis) ---
+    # --- insert base construction (codex R2 ablation axis;
+    #     codex round 5 ghost-fix wiring 2026-04-28 adds poisson_hifi /
+    #     propainter modes) ---
     if config.insert_base_mode == "duplicate_seed":
         decoy_seeds, decoy_offsets = build_decoy_insert_seeds(
             x_clean, clean_out.pseudo_masks, sorted(W_clean),
@@ -2690,6 +2697,15 @@ def run_v5_for_clip(
                 np.asarray(clean_out.pseudo_masks[c], dtype=np.float32))
             for c in sorted(W_clean)
         ]
+    elif config.insert_base_mode in ("poisson_hifi", "propainter"):
+        from memshield.decoy_seed import build_decoy_insert_seeds_via_strategy
+        decoy_seeds, decoy_offsets = build_decoy_insert_seeds_via_strategy(
+            config.insert_base_mode,
+            x_clean, clean_out.pseudo_masks, sorted(W_clean),
+            allow_ghost_fallback=getattr(
+                config, "allow_ghost_fallback", False),
+        )
+        decoy_seeds = decoy_seeds.to(x_clean.device)
     else:
         raise ValueError(
             f"unknown insert_base_mode {config.insert_base_mode!r}")
@@ -3939,8 +3955,32 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="Skip optimization. Export with δ=0, ν=0 "
                         "(decoy seed alone) for A/B comparison.")
     # Ablation axes (codex R2 disciplined plan, 2026-04-24).
-    p.add_argument("--insert-base", choices=["midframe", "duplicate_seed"],
-                   default="duplicate_seed")
+    p.add_argument("--insert-base",
+                   choices=["midframe", "duplicate_seed",
+                            "poisson_hifi", "propainter"],
+                   default="duplicate_seed",
+                   help="duplicate_seed (default, ghosting). poisson_hifi "
+                        "or propainter for ghost-free synthesis (codex "
+                        "round 5 ghost-fix wiring 2026-04-28).")
+    p.add_argument("--deterministic", action="store_true",
+                   help="Codex round 10 (2026-04-29): force deterministic "
+                        "PyTorch/cuDNN behavior + fp32 (no bf16 autocast). "
+                        "Required for stable carrier comparisons; observed "
+                        "6x J-drop variance across runs without this. "
+                        "Set CUBLAS_WORKSPACE_CONFIG=:4096:8 in env before "
+                        "launch for full effect.")
+    p.add_argument("--seed", type=int, default=0,
+                   help="Master random seed for python/numpy/torch. "
+                        "Combined with --deterministic for reproducible "
+                        "runs.")
+    p.add_argument("--allow-ghost-fallback", action="store_true",
+                   help="For poisson_hifi / propainter: when ALL offset "
+                        "retries fail border-safety for an insert anchor, "
+                        "fall back to duplicate_object decoy (with "
+                        "ghosting) for that anchor instead of raising. "
+                        "Logs a warning per fallback. Default False — "
+                        "raises ValueError so a 'ghost-free' run cannot "
+                        "silently contain ghosted inserts.")
     p.add_argument("--loss", choices=["margin", "dice_bce"], default="dice_bce")
     p.add_argument("--nu-optimizer", choices=["adam", "sign_pgd"],
                    default="adam")
@@ -3986,6 +4026,14 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--state-continuation-lambda-P", type=float, default=1.0)
     p.add_argument("--state-continuation-lambda-margin", type=float, default=1.0)
     p.add_argument("--state-continuation-no-off-switch", action="store_true")
+    p.add_argument("--state-continuation-min-improvement", type=float,
+                   default=0.0,
+                   help="Minimum δ-J-drop improvement over A0 to ACCEPT "
+                        "the bridge stage (no-regression threshold). "
+                        "Codex round 5 (2026-04-28) recommends a positive "
+                        "value (e.g. 0.02) to ensure bridge δ has a "
+                        "non-redundant role; default 0.0 preserves legacy "
+                        "behavior.")
     # Joint Trajectory-Consistent Decoy Attack (Loop 3 R4)
     p.add_argument("--joint-trajectory", action="store_true",
                    help="After A0, run Joint Trajectory-Consistent Decoy "
@@ -4138,6 +4186,39 @@ def build_argparser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_argparser().parse_args(argv)
+
+    # Codex round 10 (2026-04-29): determinism setup.
+    # Without this, observed 6x J-drop variance across runs of the same
+    # config (REVIEW_STATE.json:11 also notes prior A0 drift). cuDNN
+    # algorithm selection varies based on GPU memory layout / contention.
+    import random as _random
+    _random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    if args.deterministic:
+        # Hard determinism. Slower (cuDNN benchmark off) but reproducible.
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except (AttributeError, RuntimeError) as e:
+            print(f"[v5] use_deterministic_algorithms not fully available: "
+                  f"{e}", file=sys.stderr)
+        # CUBLAS_WORKSPACE_CONFIG=:4096:8 should be set in the env BEFORE
+        # python launch for full determinism; warn if missing.
+        if not os.environ.get("CUBLAS_WORKSPACE_CONFIG"):
+            print(
+                "[v5] WARNING: --deterministic given but "
+                "CUBLAS_WORKSPACE_CONFIG is not set. Set "
+                "CUBLAS_WORKSPACE_CONFIG=:4096:8 (or :16:8) in env "
+                "before launch for full cuBLAS determinism.",
+                file=sys.stderr,
+            )
+        print(f"[v5] deterministic mode ON (seed={args.seed}, "
+              "cudnn.deterministic=True, benchmark=False, fp32 forced "
+              "in adapters via autocast_dtype=None)", file=sys.stderr)
+
     try:
         from scripts.run_vadi_pilot import build_pilot_adapters
     except (ImportError, NotImplementedError) as e:
@@ -4145,8 +4226,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     device = torch.device(args.device)
+    # Codex round 11 fix: under --deterministic, force fp32 (no bf16
+    # autocast) through the SAM2 wiring. Required for stable carrier
+    # comparisons; with bf16 autocast on, cuDNN algorithm choice can
+    # vary based on GPU memory layout, contributing to A0 J-drop drift.
+    pilot_autocast = None if args.deterministic else torch.bfloat16
     clean_fac, fwd_fac, lpips_fn, ssim_fn, sam2_eval_fn = build_pilot_adapters(
         checkpoint_path=args.checkpoint, device=device,
+        autocast_dtype=pilot_autocast,
     )
 
     out_root = Path(args.out_root)
@@ -4155,6 +4242,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # b={midframe|dup}, l={margin|dice}, o={adam|pgd}, d={off|post|v4}.
     short = {
         "midframe": "mid", "duplicate_seed": "dup",
+        "poisson_hifi": "phi", "propainter": "ppt",
         "margin": "mg", "dice_bce": "dc",
         "adam": "ad", "sign_pgd": "pg",
         "off": "off", "post_insert": "post", "v4_symmetric": "v4",
@@ -4229,9 +4317,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         x_clean = x_clean.to(device)
         clean_pass_fn = clean_fac(clip_name, x_clean, prompt_mask)
         fwd_builder = fwd_fac(clip_name, x_clean, prompt_mask)
-        rng = np.random.default_rng(0)
+        rng = np.random.default_rng(args.seed)
         cfg = VADIv5Config(
+            seed=args.seed,
             insert_base_mode=args.insert_base,
+            allow_ghost_fallback=args.allow_ghost_fallback,
             loss_mode=args.loss,
             optimizer_nu_mode=args.nu_optimizer,
             schedule_preset=args.schedule,
@@ -4263,6 +4353,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 args.state_continuation_lambda_margin),
             state_continuation_off_switch=(
                 not args.state_continuation_no_off_switch),
+            state_continuation_min_improvement=(
+                args.state_continuation_min_improvement),
             joint_trajectory=args.joint_trajectory,
             joint_traj_bridge_length=args.joint_traj_bridge_length,
             joint_traj_alpha_max=args.joint_traj_alpha_max,

@@ -134,10 +134,14 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="Seed passed into VADIv5Config for ν init.")
     p.add_argument("--skip-existing", action="store_true",
                    help="Skip clips with existing profile.json.")
-    p.add_argument("--insert-base", choices=["midframe", "duplicate_seed"],
+    p.add_argument("--insert-base",
+                   choices=["midframe", "duplicate_seed",
+                            "poisson_hifi", "propainter"],
                    default="duplicate_seed",
                    help="Insert base mode for v5 PGD. Should match what "
-                        "Stage 14 will use.")
+                        "Stage 14 will use. (codex round 6 2026-04-28: "
+                        "added poisson_hifi / propainter for ghost-free "
+                        "synthesis.)")
     return p
 
 

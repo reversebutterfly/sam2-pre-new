@@ -230,9 +230,12 @@ def build_attack_state_from_W(
       config: VADIv5Config (or anything duck-typed with the same fields).
       bridge_length: per-insert bridge length L. None -> use
         config.oracle_traj_bridge_length.
-      insert_base_mode: "duplicate_seed" | "midframe". None -> use
-        config.insert_base_mode. (Joint search v1 only exercises
-        "duplicate_seed".)
+      insert_base_mode: "duplicate_seed" | "midframe" | "poisson_hifi" |
+        "propainter". None -> use config.insert_base_mode. The
+        ghost-free modes (poisson_hifi / propainter) were added in the
+        2026-04-28 codex round 5 wiring; they dispatch through
+        memshield.decoy_seed.build_decoy_insert_seeds_via_strategy.
+        (Joint search v1 only exercises "duplicate_seed".)
 
     Returns: an AttackState whose fields exactly match what
     `run_v5_for_clip` would have built for the same W_clean.
@@ -275,6 +278,16 @@ def build_attack_state_from_W(
                 np.asarray(pseudo_masks_clean[c], dtype=np.float32)))
             for c in W_clean_sorted
         ]
+    elif mode in ("poisson_hifi", "propainter"):
+        # Codex round 5 ghost-fix wiring (2026-04-28): dispatch through
+        # the strategy wrapper to get ghost-free insert bases.
+        from memshield.decoy_seed import build_decoy_insert_seeds_via_strategy
+        decoy_seeds, decoy_offsets = build_decoy_insert_seeds_via_strategy(
+            mode,
+            x_clean, pseudo_masks_clean, W_clean_sorted,
+        )
+        decoy_seeds = decoy_seeds.to(x_clean.device)
+        decoy_offsets = [(int(dy), int(dx)) for dy, dx in decoy_offsets]
     else:
         raise ValueError(f"unknown insert_base_mode {mode!r}")
 

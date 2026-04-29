@@ -298,6 +298,7 @@ def create_decoy_base_frame_hifi(
     safety_margin: int = 8,
     mask_prev: Optional[np.ndarray] = None,
     inpaint_true_region: bool = True,
+    inner_color_preserve_erode_px: int = 4,
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
     """High-fidelity decoy base: f_prev identity anchor + optional true-region inpaint.
 
@@ -375,6 +376,49 @@ def create_decoy_base_frame_hifi(
             (cx_obj, cy_obj), cv2.NORMAL_CLONE)
     except cv2.error:
         return None
+
+    # Step 2b (codex round 8 hybrid fix 2026-04-28): inner-mask color
+    # override. cv2.seamlessClone uses gradient-domain blending and adapts
+    # absolute mean colors of the source crop to the destination, which
+    # makes the pasted object look washed-out / translucent. To restore the
+    # object's body colors we replace the INNER (eroded) paste region with
+    # the source pixels directly, while keeping the boundary ring as the
+    # Poisson result (so the seam stays seamless).
+    if inner_color_preserve_erode_px > 0:
+        # Build a shifted full-frame copy of the source object's RGB, with
+        # zero elsewhere. Translation is by `decoy_offset`.
+        shift_y, shift_x = int(dy), int(dx)
+        shifted_obj_bgr = np.zeros_like(frame_after_bgr)
+        # Source slice in frame_after coordinates: (y0:y1, x0:x1)
+        # Destination slice in canvas coordinates: shifted by (dy, dx).
+        src_y0, src_y1 = y0, y1
+        src_x0, src_x1 = x0, x1
+        dst_y0 = src_y0 + shift_y
+        dst_y1 = src_y1 + shift_y
+        dst_x0 = src_x0 + shift_x
+        dst_x1 = src_x1 + shift_x
+        # Clip dst window to canvas (in case of partial overhang).
+        cy0 = max(0, dst_y0); cy1 = min(H, dst_y1)
+        cx0 = max(0, dst_x0); cx1 = min(W, dst_x1)
+        sy0 = src_y0 + (cy0 - dst_y0); sy1 = src_y1 - (dst_y1 - cy1)
+        sx0 = src_x0 + (cx0 - dst_x0); sx1 = src_x1 - (dst_x1 - cx1)
+        if cy1 > cy0 and cx1 > cx0:
+            shifted_obj_bgr[cy0:cy1, cx0:cx1] = frame_after_bgr[sy0:sy1, sx0:sx1]
+
+        # Inner paste mask: erode `paste_region` so the boundary ring
+        # (width ~ inner_color_preserve_erode_px) stays Poisson-blended.
+        paste_region_full = shift_mask(mask_ref, shift_y, shift_x)
+        ker_inner = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (2 * inner_color_preserve_erode_px + 1,
+             2 * inner_color_preserve_erode_px + 1),
+        )
+        inner_mask = cv2.erode(
+            paste_region_full.astype(np.uint8),
+            ker_inner, iterations=1)
+        # Override inner pixels with source colors (preserve object body).
+        inner_idx = inner_mask > 0
+        result_bgr[inner_idx] = shifted_obj_bgr[inner_idx]
 
     result = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
 

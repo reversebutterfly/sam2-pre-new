@@ -466,6 +466,7 @@ def run_pilot(
 
 def build_pilot_adapters(
     checkpoint_path: str, device: torch.device,
+    autocast_dtype: Optional[torch.dtype] = torch.bfloat16,
 ) -> Tuple[Callable, Callable, Callable, Callable, Callable]:
     """Build `(clean_pass_fn_factory, forward_fn_builder_factory, lpips,
     ssim, sam2_eval_fn)` for real SAM2.1 + LPIPS(alex) + SSIM on Pro 6000.
@@ -489,9 +490,12 @@ def build_pilot_adapters(
     - Predictor parameters frozen via `requires_grad_(False)` in
       `build_sam2_lpips_ssim`; gradient flows only through
       `x_processed` → Hiera → memory_attention → mask_decoder.
-    - bf16 autocast is enabled inside VADIForwardFn; outputs are cast
-      back to fp32 before returning so `vadi_loss`'s margin / LPIPS /
-      SSIM terms see stable precision.
+    - bf16 autocast is enabled inside VADIForwardFn by default; outputs
+      are cast back to fp32 before returning so `vadi_loss`'s margin /
+      LPIPS / SSIM terms see stable precision. Pass `autocast_dtype=None`
+      (e.g. via `--deterministic` in run_vadi_v5) to disable autocast and
+      run the full SAM2 forward in fp32 — required for stable carrier
+      comparisons (codex round 11, 2026-04-29).
     - `x_clean` is moved to `device` inside the clean-pass helper if
       needed; PGD leaves (`delta`, `nu`) are allocated on whatever device
       `x_clean` ends up on after `run_pilot(...)` preps it.
@@ -514,7 +518,9 @@ def build_pilot_adapters(
     )
 
     def sam2_eval_fn(video: Tensor, prompt_mask_np: np.ndarray):
-        return sam2_eval_pseudo_masks(predictor, video, prompt_mask_np, device)
+        return sam2_eval_pseudo_masks(
+            predictor, video, prompt_mask_np, device,
+            autocast_dtype=autocast_dtype)
 
     def clean_pass_fn_factory(
         clip_name: str, x_clean: Tensor, prompt_mask: np.ndarray,
@@ -525,6 +531,7 @@ def build_pilot_adapters(
             if cache["out"] is None:
                 cache["out"] = clean_pass_vadi(
                     predictor, x, prompt, device,
+                    autocast_dtype=autocast_dtype,
                 )
             return cache["out"]
 
@@ -542,6 +549,7 @@ def build_pilot_adapters(
             return VADIForwardFn(
                 predictor=predictor, prompt_mask=prompt_mask,
                 video_H=H_vid, video_W=W_vid, device=device,
+                autocast_dtype=autocast_dtype,
             )
 
         return forward_fn_builder

@@ -283,6 +283,186 @@ def compute_decoy_offset_from_mask(
     return (int(best[0]), int(best[1]))
 
 
+def compute_hybrid_safe_offset_from_mask(
+    mask: np.ndarray,
+    H: int,
+    W: int,
+    safety_margin: int = 8,
+    relax_iou: Tuple[float, ...] = (0.3, 0.4, 0.5),
+    min_shift_frac: float = 0.15,
+    min_shift_px: int = 4,
+) -> Optional[Tuple[int, int]]:
+    """Pick a feasibility-first offset for ghost-free hybrid (poisson_hifi /
+    propainter) modes.
+
+    Codex round 10 (2026-04-29): the legacy `compute_decoy_offset_from_mask`
+    is explicitly aggressive (min_fraction=0.5, prefers IoU≈0). Ghost-free
+    modes require the paste bbox to stay fully within image bounds with
+    `safety_margin`, so the legacy offsets routinely fail border-safety.
+
+    This function inverts the priority: instead of demanding maximum
+    separation, we adaptively relax the IoU target (0.3 → 0.4 → 0.5)
+    and accept the FIRST feasible IoU bucket. Within that bucket, among
+    feasible candidates (4 axis-only + 4 diagonals = up to 8), pick the
+    one with the LARGEST spatial separation (max coord magnitude, with
+    sum-of-magnitudes as tie-break). Returns None if no offset satisfies
+    even the loosest IoU target — the caller should treat this anchor
+    as hybrid-infeasible (drop it from W or pick a different anchor).
+
+    1D IoU geometry (for shift d along an axis with bbox width w):
+        IoU = (w - d) / (w + d)  for 0 <= d <= w
+        d_min(IoU=τ) = w · (1 - τ) / (1 + τ)
+            τ=0.3 → d_min = 0.538 w
+            τ=0.4 → d_min = 0.429 w
+            τ=0.5 → d_min = 0.333 w
+
+    Args:
+        mask: [H, W] float/uint8 binary mask of the object.
+        H, W: image dimensions.
+        safety_margin: same as `_is_border_safe`. Default 8.
+        relax_iou: IoU upper-bound schedule. Tries each in order; the
+            first that yields a feasible offset wins.
+        min_shift_frac: lower bound on |d| as fraction of bbox axis
+            length (avoids near-zero shifts that paste duplicate onto
+            original).
+        min_shift_px: absolute lower bound on |d| in pixels.
+
+    Returns:
+        (dy, dx) integer offset, or None if no feasible offset exists
+        even at the loosest IoU.
+    """
+    # Codex round 11 fix: align bbox convention with the renderer's
+    # `create_decoy_base_frame_hifi` (memshield/decoy.py:347-350) which
+    # uses EXCLUSIVE y1/x1 (`ys.max() + 1`). Using inclusive max would
+    # produce a 1-pixel mismatch on even-sized bboxes and could flip
+    # near-border pass/fail decisions vs `_is_border_safe`.
+    m = (np.asarray(mask) > 0.5)
+    if not m.any():
+        return None
+    ys, xs = np.where(m)
+    y0, y1 = int(ys.min()), int(ys.max()) + 1   # exclusive y1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1   # exclusive x1
+    bbox_h = y1 - y0
+    bbox_w = x1 - x0
+
+    # Match renderer: cy_obj = (y0 + y1) // 2 (using exclusive y1), then
+    # paste cy = cy_obj + dy. half_h = (y1 - y0) // 2 = bbox_h // 2.
+    cy0 = (y0 + y1) // 2
+    cx0 = (x0 + x1) // 2
+    half_h = bbox_h // 2
+    half_w = bbox_w // 2
+
+    # Feasible range for dy with safety_margin: paste y-bounds in [0, H).
+    # py0 = cy0 + dy - half_h - safety_margin >= 0
+    # py1 = cy0 + dy + half_h + safety_margin <= H - 1
+    dy_lo = -(cy0 - half_h - safety_margin)            # so py0 >= 0
+    dy_hi = (H - 1) - (cy0 + half_h + safety_margin)   # so py1 <= H-1
+    dx_lo = -(cx0 - half_w - safety_margin)
+    dx_hi = (W - 1) - (cx0 + half_w + safety_margin)
+
+    # Codex round 11 fix: do NOT short-circuit on "d=0 infeasible in both
+    # axes". A y-axis-only shift (dx=0) can still succeed even if x has
+    # no valid range, and vice-versa. Per-candidate feasibility is
+    # enforced inside the loop below.
+
+    # Effective lower bound on |d| (avoid near-zero shifts).
+    dy_min_abs = max(int(min_shift_px), int(round(min_shift_frac * bbox_h)))
+    dx_min_abs = max(int(min_shift_px), int(round(min_shift_frac * bbox_w)))
+
+    # For each IoU target τ, the d_min that achieves IoU ≤ τ on a single
+    # axis with bbox extent `w`: d = w · (1 - τ) / (1 + τ). We then ALSO
+    # honor min_shift_*_abs (the floor below which a shift is too small).
+    def _d_for_iou(tau: float, w: int) -> int:
+        return int(round(w * (1.0 - tau) / (1.0 + tau)))
+
+    # Helper: clip a signed shift to its feasible range, applying min-abs.
+    # Returns clipped int or None if no clipped value satisfies min-abs
+    # OR if the feasible interval is empty (lo > hi). Codex round 13 fix
+    # (2026-04-29): without the lo > hi guard, a positive branch could
+    # return `hi` even when no actual feasible value exists, producing a
+    # false-positive offset that the renderer would reject downstream.
+    def _clip_signed(d_signed, sign, lo, hi, min_abs):
+        if int(lo) > int(hi):
+            return None
+        if sign > 0:
+            d_clipped = min(d_signed, int(hi))
+            return d_clipped if d_clipped >= min_abs else None
+        else:
+            d_clipped = max(d_signed, int(lo))
+            return d_clipped if d_clipped <= -min_abs else None
+
+    candidates_by_axis = []  # list of (tau, candidate_offset)
+    for tau in relax_iou:
+        dy_target = max(dy_min_abs, _d_for_iou(tau, bbox_h))
+        dx_target = max(dx_min_abs, _d_for_iou(tau, bbox_w))
+
+        # Axis-only candidates (4): pure ±y / ±x. Each requires the
+        # perpendicular axis to be feasible at d=0.
+        axis_only_dirs = [
+            ("y", +1, dy_target),
+            ("y", -1, dy_target),
+            ("x", +1, dx_target),
+            ("x", -1, dx_target),
+        ]
+        for axis, sign, d_t in axis_only_dirs:
+            if axis == "y":
+                # Codex round 11 fix: y-axis-only requires dx=0 feasible.
+                if not (dx_lo <= 0 <= dx_hi):
+                    continue
+                d_clipped = _clip_signed(
+                    sign * d_t, sign, int(dy_lo), int(dy_hi), dy_min_abs)
+                if d_clipped is None:
+                    continue
+                cand = (int(d_clipped), 0)
+            else:
+                # x-axis-only requires dy=0 feasible.
+                if not (dy_lo <= 0 <= dy_hi):
+                    continue
+                d_clipped = _clip_signed(
+                    sign * d_t, sign, int(dx_lo), int(dx_hi), dx_min_abs)
+                if d_clipped is None:
+                    continue
+                cand = (0, int(d_clipped))
+            candidates_by_axis.append((tau, cand))
+
+        # Diagonal candidates (4): ±dy AND ±dx simultaneously.
+        # Codex round 11 noted: required for corner-near anchors where
+        # d=0 is infeasible in BOTH axes (object touching two borders).
+        # Both dy_clipped and dx_clipped are filtered by their own
+        # feasible range + min_abs, so the resulting (dy, dx) is
+        # guaranteed border-safe.
+        diagonal_dirs = [(+1, +1), (+1, -1), (-1, +1), (-1, -1)]
+        for sy, sx in diagonal_dirs:
+            dy_clipped = _clip_signed(
+                sy * dy_target, sy, int(dy_lo), int(dy_hi), dy_min_abs)
+            if dy_clipped is None:
+                continue
+            dx_clipped = _clip_signed(
+                sx * dx_target, sx, int(dx_lo), int(dx_hi), dx_min_abs)
+            if dx_clipped is None:
+                continue
+            cand = (int(dy_clipped), int(dx_clipped))
+            candidates_by_axis.append((tau, cand))
+
+        # If at least one feasible candidate emerged at this τ, prefer
+        # the one with the largest absolute shift (cleanest separation
+        # within IoU bound). Tie-break on long axis.
+        feas = [c for (t, c) in candidates_by_axis if t == tau]
+        if feas:
+            # Selection key: (max-coord-magnitude, sum-of-magnitudes) for
+            # deterministic tie-break when multiple candidates have equal
+            # max-coord. Codex round 14 doc-vs-code alignment fix.
+            best = max(
+                feas,
+                key=lambda c: (max(abs(c[0]), abs(c[1])),
+                               abs(c[0]) + abs(c[1])),
+            )
+            return (int(best[0]), int(best[1]))
+
+    # No feasible offset found at any IoU target.
+    return None
+
+
 def build_decoy_insert_seeds(
     x_clean: Tensor,                    # [T, H, W, 3]
     pseudo_masks: Sequence[np.ndarray],  # len T; each [H, W] float/uint8
@@ -327,6 +507,220 @@ def build_decoy_insert_seeds(
         )
         seeds.append(seed)
         offsets_used.append(offset_k)
+    return torch.stack(seeds, dim=0), offsets_used
+
+
+# =============================================================================
+# Strategy-based seed builder (codex round 5 ghost-fix wiring, 2026-04-28)
+# =============================================================================
+
+
+def build_decoy_insert_seeds_via_strategy(
+    strategy: str,
+    x_clean: Tensor,
+    pseudo_masks: Sequence[np.ndarray],
+    W_clean_positions: Sequence[int],
+    *,
+    feather_px: int = 3,
+    seam_dilate_px: int = 5,
+    safety_margin: int = 8,
+    decoy_offset: Tuple[int, int] = None,
+    propainter_config=None,
+    allow_ghost_fallback: bool = False,
+) -> Tuple[Tensor, list]:
+    """Build K decoy insert seeds via insert-base strategy dispatcher.
+
+    Drop-in alternative to `build_decoy_insert_seeds` for ghost-free
+    synthesis. Wraps `memshield.propainter_base.create_insert_base` to
+    produce K seeds using either:
+      - "poisson_hifi": Poisson-blend with explicit original-object inpaint
+        (memshield.decoy.create_decoy_base_frame_hifi).
+      - "propainter":  ProPainter 3-frame middle-slot synthesis
+        (memshield.propainter_base.create_insert_base_propainter).
+
+    Codex round 5 (JOINT_OPTIMIZATION_2026-04-28.md) recommends
+    poisson_hifi as primary ghost-fix; propainter as backup.
+
+    On per-insert border-safety failure, retries alternate offsets
+    (sign-flipped on each axis). If ALL attempts fail, raises ValueError
+    rather than silently falling back to a ghosted seed — codex round 6
+    correctness fix (2026-04-28). To allow the legacy silent fallback,
+    pass `allow_ghost_fallback=True` (logs a warning per fallback).
+
+    Args:
+        strategy: "poisson_hifi" or "propainter".
+        x_clean: [T, H, W, 3] float in [0, 1].
+        pseudo_masks: T per-frame masks (np or array-like, [H, W]).
+        W_clean_positions: K clean-space insert anchors. Must satisfy
+            `c_k >= 1` so we can use `x_clean[c_k - 1]` as `frame_prev`
+            (matches upstream contract in stage14_helpers.py:252).
+        feather_px: ProPainter feather radius (ignored by poisson_hifi).
+        seam_dilate_px: edit-mask dilation passed to both strategies.
+        safety_margin: border safety pixel margin.
+        decoy_offset: shared (dy, dx) override; None => per-insert via
+            `compute_decoy_offset_from_mask`.
+        propainter_config: optional ProPainterConfig for propainter strategy.
+        allow_ghost_fallback: if True, fall back to duplicate_object decoy
+            (which has ghosting) when all offset retries fail. Default
+            False — raises ValueError on total failure, so a run labeled
+            `poisson_hifi` cannot silently contain ghosted inserts.
+
+    Returns:
+        (seeds, offsets) — same shape contract as `build_decoy_insert_seeds`.
+
+    Raises:
+        ValueError: if `c_k < 1` for any anchor, or if all offset retries
+            fail and `allow_ghost_fallback=False`.
+        RuntimeError: if any underlying `create_insert_base` call raises
+            (including `InstallationError` from missing ProPainter when
+            strategy="propainter"). The wrapper re-raises with anchor /
+            offset context to ease debugging long jobs.
+    """
+    import warnings
+    from memshield.propainter_base import create_insert_base
+
+    K = len(W_clean_positions)
+    if K == 0:
+        return x_clean.new_zeros((0, *x_clean.shape[1:])), []
+    T = int(x_clean.shape[0])
+    seeds: list = []
+    offsets_used: list = []
+
+    for c_k in W_clean_positions:
+        c_k = int(c_k)
+        # Codex round 6: enforce same anchor contract as upstream
+        # (stage14_helpers.py:252; run_vadi_v5.py:2626).
+        if not (1 <= c_k < T):
+            raise ValueError(
+                f"insert anchor c_k={c_k} out of [1, {T}) — strategy "
+                "wrapper needs x_clean[c_k - 1] as frame_prev")
+        c_prev = c_k - 1
+        frame_prev_t = x_clean[c_prev].clamp(0, 1)
+        frame_after_t = x_clean[c_k].clamp(0, 1)
+        frame_prev_np = (frame_prev_t.detach().cpu().numpy() * 255.0).astype(
+            np.uint8)
+        frame_after_np = (frame_after_t.detach().cpu().numpy() * 255.0).astype(
+            np.uint8)
+
+        mask_prev_raw = np.asarray(pseudo_masks[c_prev])
+        mask_after_raw = np.asarray(pseudo_masks[c_k])
+        mask_prev_np = (mask_prev_raw > 0).astype(np.uint8)
+        mask_after_np = (mask_after_raw > 0).astype(np.uint8)
+
+        kwargs = dict(
+            seam_dilate_px=int(seam_dilate_px),
+            safety_margin=int(safety_margin),
+        )
+        if strategy == "propainter":
+            kwargs["feather_px"] = int(feather_px)
+            if propainter_config is not None:
+                kwargs["config"] = propainter_config
+
+        # Codex round 10 (2026-04-29): feasibility-first offset selection
+        # for ghost-free hybrid modes. The legacy aggressive heuristic
+        # (`compute_decoy_offset_from_mask`, min_fraction=0.5, IoU≈0)
+        # routinely produces offsets that fail border-safety. Replace it
+        # with `compute_hybrid_safe_offset_from_mask`, which adaptively
+        # relaxes IoU (0.3 → 0.4 → 0.5) and respects feasibility bounds
+        # so the returned offset is GUARANTEED border-safe (or None,
+        # meaning this anchor is hybrid-infeasible).
+        if decoy_offset is not None:
+            # Caller-supplied override: respect it as the only candidate.
+            unique_candidates = [(int(decoy_offset[0]),
+                                  int(decoy_offset[1]))]
+        else:
+            feasible = compute_hybrid_safe_offset_from_mask(
+                np.asarray(pseudo_masks[c_k], dtype=np.float32),
+                int(x_clean.shape[1]),
+                int(x_clean.shape[2]),
+                safety_margin=int(safety_margin),
+            )
+            if feasible is None:
+                unique_candidates = []
+            else:
+                unique_candidates = [feasible]
+
+        result = None
+        chosen_offset = None
+        for cand in unique_candidates:
+            try:
+                result = create_insert_base(
+                    strategy=strategy,
+                    frame_prev=frame_prev_np,
+                    frame_after=frame_after_np,
+                    mask_prev=mask_prev_np,
+                    mask_after=mask_after_np,
+                    decoy_offset=cand,
+                    **kwargs,
+                )
+            except Exception as exc:
+                # Codex round 6: surface InstallationError (propainter)
+                # and other strategy errors with context, do NOT silently
+                # swallow them.
+                raise RuntimeError(
+                    f"create_insert_base(strategy={strategy!r}, "
+                    f"c_k={c_k}, offset={cand}) raised {type(exc).__name__}: "
+                    f"{exc}"
+                ) from exc
+            if result is not None:
+                chosen_offset = cand
+                break
+
+        if result is None:
+            # No hybrid-feasible offset OR the only candidate's
+            # `create_insert_base` rejected (rare — feasibility check
+            # already validated border safety, but per-strategy strict
+            # checks may still fail).
+            n_cand = len(unique_candidates)
+            reason = (
+                "no hybrid-feasible offset under any IoU target — "
+                "object is too close to a frame border or too large "
+                "for safety_margin"
+                if n_cand == 0 else
+                f"the {n_cand} feasible-offset candidate(s) were "
+                "rejected by create_insert_base's strategy-internal "
+                "checks (e.g., propainter flow estimation failure)"
+            )
+            if not allow_ghost_fallback:
+                raise ValueError(
+                    f"insert anchor c_k={c_k}: {reason} for strategy "
+                    f"{strategy!r}. This anchor is hybrid-infeasible. "
+                    "Drop it from W_clean (recommended), or pass "
+                    "allow_ghost_fallback=True to fall back to "
+                    "duplicate_object decoy (ghosted, violates "
+                    "ghost-free contract)."
+                )
+            warnings.warn(
+                f"[ghost-fallback] strategy={strategy!r} c_k={c_k}: "
+                f"{reason}; falling back to duplicate_object decoy "
+                "(ghosted). This violates the ghost-free contract of "
+                "the strategy.",
+                stacklevel=2,
+            )
+            x_ref = x_clean[c_k]
+            mask_t = torch.from_numpy(
+                np.asarray(pseudo_masks[c_k], dtype=np.float32)
+            ).to(x_clean.device).to(x_clean.dtype)
+            # For fallback only, fall back to legacy aggressive offset
+            # since duplicate_object_decoy has no border-safety check.
+            legacy_offset = compute_decoy_offset_from_mask(
+                np.asarray(pseudo_masks[c_k], dtype=np.float32))
+            seed = build_duplicate_object_decoy_frame(
+                x_ref, mask_t, legacy_offset,
+                feather_radius=5,
+                feather_sigma=2.0,
+            )
+            offsets_used.append(
+                (int(legacy_offset[0]), int(legacy_offset[1])))
+        else:
+            base_frame_uint8, _edit_mask = result
+            seed = torch.from_numpy(
+                base_frame_uint8.astype(np.float32) / 255.0
+            ).to(x_clean.device).to(x_clean.dtype)
+            offsets_used.append(chosen_offset)
+
+        seeds.append(seed)
+
     return torch.stack(seeds, dim=0), offsets_used
 
 
