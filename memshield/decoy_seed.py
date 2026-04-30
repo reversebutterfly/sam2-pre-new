@@ -602,10 +602,18 @@ def build_decoy_insert_seeds_via_strategy(
         frame_after_np = (frame_after_t.detach().cpu().numpy() * 255.0).astype(
             np.uint8)
 
+        # Codex round 21 (2026-04-30): pseudo_masks are SAM2 sigmoid
+        # probabilities ∈ [0, 1] with continuous values everywhere (mean
+        # 0.10-0.20 on DAVIS, but every pixel has a tiny non-zero prob).
+        # Thresholding at `> 0` collapses to nearly all-ones → Poisson
+        # seamlessClone receives a whole-frame mask → strategy-internal
+        # check rejects → ValueError percolates up as "100% prescreen
+        # failure" (canary cows). Other thresholds in this file already
+        # use `> 0.5` (lines 194, 239, 339); these two were inconsistent.
         mask_prev_raw = np.asarray(pseudo_masks[c_prev])
         mask_after_raw = np.asarray(pseudo_masks[c_k])
-        mask_prev_np = (mask_prev_raw > 0).astype(np.uint8)
-        mask_after_np = (mask_after_raw > 0).astype(np.uint8)
+        mask_prev_np = (mask_prev_raw > 0.5).astype(np.uint8)
+        mask_after_np = (mask_after_raw > 0.5).astype(np.uint8)
 
         kwargs = dict(
             seam_dilate_px=int(seam_dilate_px),
