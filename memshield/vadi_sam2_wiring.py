@@ -349,6 +349,46 @@ def sam2_eval_pseudo_masks(
 # ---------------------------------------------------------------------------
 
 
+def _wrap_module_forward_with_checkpoint_idempotent(module: torch.nn.Module) -> None:
+    """Monkey-patch `module.forward` so it runs under
+    `torch.utils.checkpoint.checkpoint(..., use_reentrant=False)` whenever
+    any tensor arg has `requires_grad=True`.
+
+    This is the right granularity for the SAM2 memory_attention block:
+    pure tensor-in/tensor-out, no statefulness, so checkpoint recompute
+    sees identical inputs as the original forward (unlike `track_step`,
+    which captures `output_dict` and recomputes against a different
+    dict state — codex round 22 parity test caught a 28732 vs 28736
+    seq-dim mismatch).
+
+    Idempotent: a sentinel attribute (`_vadi_ckpt_wrapped`) guards
+    against double-wrapping when multiple VADIForwardFn instances share
+    the same predictor.
+    """
+    if getattr(module, "_vadi_ckpt_wrapped", False):
+        return
+    orig_forward = module.forward
+
+    def wrapped_forward(*args, **kwargs):
+        any_grad = any(
+            isinstance(a, torch.Tensor) and a.requires_grad for a in args
+        ) or any(
+            isinstance(v, torch.Tensor) and v.requires_grad
+            for v in kwargs.values()
+        )
+        if not any_grad:
+            return orig_forward(*args, **kwargs)
+        from torch.utils.checkpoint import checkpoint as _ckpt
+
+        def _runner(*tensor_args):
+            return orig_forward(*tensor_args, **kwargs)
+
+        return _ckpt(_runner, *args, use_reentrant=False)
+
+    module.forward = wrapped_forward
+    module._vadi_ckpt_wrapped = True
+
+
 class VADIForwardFn:
     """Per-clip differentiable SAM2 forward that `run_vadi_pgd` calls on
     every optimization step with a fresh `processed` tensor.
@@ -413,6 +453,7 @@ class VADIForwardFn:
         *,
         autocast_dtype: Optional[torch.dtype] = torch.bfloat16,
         use_gradient_checkpointing: bool = True,
+        use_track_step_checkpointing: bool = True,
     ) -> None:
         # Video / mask resolution must match — if `prompt_mask` and later
         # `processed` disagree on H×W we would silently bilinear-resize into
@@ -437,6 +478,20 @@ class VADIForwardFn:
         self.image_size = int(predictor.image_size)
         self.autocast_dtype = autocast_dtype
         self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
+        # Codex round 22 (2026-04-30, v2): wrap memory_attention.forward
+        # (a pure tensor-in/tensor-out module) in torch.utils.checkpoint
+        # for ~6-12 GB savings (codex round 19 estimate). v1 attempted
+        # to wrap track_step itself, which captures the mutable
+        # `output_dict` via closure — recompute saw a different dict
+        # state (all entries instead of past-only), causing seq-dim
+        # mismatch in saved-vs-recomputed memory tokens (parity test
+        # crashed with shape mismatch 28732 vs 28736). memory_attention
+        # is the right granularity: it receives explicit tensor args
+        # (curr, memory_kv) and returns a tensor — no statefulness.
+        self.use_track_step_checkpointing = bool(use_track_step_checkpointing)
+        if self.use_track_step_checkpointing:
+            _wrap_module_forward_with_checkpoint_idempotent(
+                predictor.memory_attention)
         self._img_mean = torch.tensor(
             IMAGENET_MEAN, device=device, dtype=torch.float32,
         ).view(1, 3, 1, 1)
