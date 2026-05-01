@@ -2572,6 +2572,10 @@ def run_v5_for_clip(
     placement_search_prescreen_seed: int = 0,
     placement_search_candidate_stride: int = 1,
     placement_search_cache_size: int = 64,
+    # Codex round 25 (2026-04-30): per-frame DAVIS GT for clean-ORIGINAL
+    # eval; None disables that path (results.json keeps existing
+    # processed-space metrics only).
+    gt_original_per_frame: Optional[List[np.ndarray]] = None,
 ) -> V5ClipOutput:
     """Top-level single-clip v5 orchestrator.
 
@@ -2859,6 +2863,9 @@ def run_v5_for_clip(
                 m_hat_true_by_t=m_true_by_t,
                 m_hat_decoy_by_t=m_decoy_by_t,
                 decoy_offsets=decoy_offsets,
+                lpips_fn=lpips_fn,
+                ssim_fn=ssim_fn,
+                gt_original_per_frame=gt_original_per_frame,
             )
             exported_j_drop_val = float(
                 exported_j_drop_details["J_drop_mean"])
@@ -2996,6 +3003,9 @@ def run_v5_for_clip(
                     m_hat_true_by_t=m_true_by_t,
                     m_hat_decoy_by_t=m_decoy_by_t,
                     decoy_offsets=decoy_offsets,
+                    lpips_fn=lpips_fn,
+                    ssim_fn=ssim_fn,
+                    gt_original_per_frame=gt_original_per_frame,
                 )
                 polish_j_drop = float(polish_eval["J_drop_mean"])
                 # Codex R3 high-fix: `exported_j_drop_val or 0.0` would
@@ -3184,6 +3194,9 @@ def run_v5_for_clip(
                     m_hat_true_by_t=m_true_by_t,
                     m_hat_decoy_by_t=m_decoy_by_t,
                     decoy_offsets=decoy_offsets,
+                    lpips_fn=lpips_fn,
+                    ssim_fn=ssim_fn,
+                    gt_original_per_frame=gt_original_per_frame,
                 )
                 hiera_j_drop = float(polish_eval["J_drop_mean"])
                 a0_j_drop = (exported_j_drop_val
@@ -3411,6 +3424,9 @@ def run_v5_for_clip(
                         m_hat_true_by_t=m_true_by_t,
                         m_hat_decoy_by_t=m_decoy_by_t,
                         decoy_offsets=decoy_offsets,
+                        lpips_fn=lpips_fn,
+                        ssim_fn=ssim_fn,
+                        gt_original_per_frame=gt_original_per_frame,
                     )
                     sc_j_drop = float(polish_eval["J_drop_mean"])
                     a0_j_drop = (exported_j_drop_val
@@ -3963,12 +3979,21 @@ def build_argparser() -> argparse.ArgumentParser:
                         "or propainter for ghost-free synthesis (codex "
                         "round 5 ghost-fix wiring 2026-04-28).")
     p.add_argument("--deterministic", action="store_true",
-                   help="Codex round 10 (2026-04-29): force deterministic "
-                        "PyTorch/cuDNN behavior + fp32 (no bf16 autocast). "
-                        "Required for stable carrier comparisons; observed "
-                        "6x J-drop variance across runs without this. "
-                        "Set CUBLAS_WORKSPACE_CONFIG=:4096:8 in env before "
-                        "launch for full effect.")
+                   help="Codex round 10 (2026-04-29): set cuDNN "
+                        "deterministic + benchmark=False + "
+                        "use_deterministic_algorithms (warn_only) + "
+                        "seed all RNGs. KEEPS bf16 autocast by default "
+                        "for memory headroom. Pair with --force-fp32 for "
+                        "the strictest determinism (memory-heavy). Set "
+                        "CUBLAS_WORKSPACE_CONFIG=:4096:8 in env before "
+                        "launch for cuBLAS determinism.")
+    p.add_argument("--force-fp32", action="store_true",
+                   help="Disable bf16 autocast in SAM2 forward (passes "
+                        "autocast_dtype=None to all wiring). +50%% GPU "
+                        "memory. Use with --deterministic for the full "
+                        "strict-determinism guarantee; without it, "
+                        "bf16 autocast contributes some run-to-run "
+                        "variance even with deterministic flags.")
     p.add_argument("--seed", type=int, default=0,
                    help="Master random seed for python/numpy/torch. "
                         "Combined with --deterministic for reproducible "
@@ -4215,9 +4240,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "before launch for full cuBLAS determinism.",
                 file=sys.stderr,
             )
+        autocast_str = ("fp32 (autocast_dtype=None)" if args.force_fp32
+                        else "bf16 (default; pass --force-fp32 for fp32)")
         print(f"[v5] deterministic mode ON (seed={args.seed}, "
-              "cudnn.deterministic=True, benchmark=False, fp32 forced "
-              "in adapters via autocast_dtype=None)", file=sys.stderr)
+              "cudnn.deterministic=True, benchmark=False, "
+              f"autocast={autocast_str})", file=sys.stderr)
 
     try:
         from scripts.run_vadi_pilot import build_pilot_adapters
@@ -4226,11 +4253,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     device = torch.device(args.device)
-    # Codex round 11 fix: under --deterministic, force fp32 (no bf16
-    # autocast) through the SAM2 wiring. Required for stable carrier
-    # comparisons; with bf16 autocast on, cuDNN algorithm choice can
-    # vary based on GPU memory layout, contributing to A0 J-drop drift.
-    pilot_autocast = None if args.deterministic else torch.bfloat16
+    # Codex round 11 fix + 2026-04-29 OOM workaround: --force-fp32 (paired
+    # with --deterministic) disables bf16 autocast for the strictest
+    # determinism. Without --force-fp32, --deterministic still seeds RNGs
+    # + sets cuDNN deterministic flags but keeps bf16 autocast for GPU
+    # memory headroom (fp32 SAM2 forward + ν gradients ≈ +50% memory,
+    # OOMs on contended GPUs).
+    pilot_autocast = None if args.force_fp32 else torch.bfloat16
     clean_fac, fwd_fac, lpips_fn, ssim_fn, sam2_eval_fn = build_pilot_adapters(
         checkpoint_path=args.checkpoint, device=device,
         autocast_dtype=pilot_autocast,
@@ -4315,6 +4344,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for clip_name in args.clips:
         x_clean, prompt_mask = load_davis_clip(Path(args.davis_root), clip_name)
         x_clean = x_clean.to(device)
+        # Codex round 25 (2026-04-30): load DAVIS GT per-frame for the
+        # clean-ORIGINAL evaluator (paper headline metric).
+        try:
+            from memshield.eval_metrics_extended import (
+                load_davis_gt_per_frame as _load_davis_gt,
+            )
+            gt_original_per_frame = _load_davis_gt(
+                Path(args.davis_root), clip_name)
+            if len(gt_original_per_frame) != int(x_clean.shape[0]):
+                print(f"[v5] WARNING: DAVIS GT length "
+                      f"{len(gt_original_per_frame)} != T_clean "
+                      f"{int(x_clean.shape[0])} for clip {clip_name}; "
+                      f"skipping clean-ORIGINAL eval",
+                      file=sys.stderr)
+                gt_original_per_frame = None
+        except (FileNotFoundError, ImportError) as _gt_exc:
+            print(f"[v5] WARNING: DAVIS GT not loadable for {clip_name}: "
+                  f"{type(_gt_exc).__name__}: {_gt_exc}; skipping "
+                  f"clean-ORIGINAL eval",
+                  file=sys.stderr)
+            gt_original_per_frame = None
         clean_pass_fn = clean_fac(clip_name, x_clean, prompt_mask)
         fwd_builder = fwd_fac(clip_name, x_clean, prompt_mask)
         rng = np.random.default_rng(args.seed)
@@ -4462,6 +4512,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 args.placement_search_candidate_stride),
             placement_search_cache_size=(
                 args.placement_search_cache_size),
+            gt_original_per_frame=gt_original_per_frame,
         )
         all_results.append(out)
         print(f"[v5] {clip_name}: exported_j_drop="

@@ -269,6 +269,18 @@ def eval_exported_j_drop(
     m_hat_true_by_t: Dict[int, Tensor],  # processed-space float soft masks
     m_hat_decoy_by_t: Optional[Dict[int, Tensor]] = None,
     decoy_offsets: Optional[Sequence[Tuple[int, int]]] = None,
+    # Phase B (codex round 24, 2026-04-30): extended metrics required for
+    # AAAI main table. F-boundary always added (cheap np-only). LPIPS / SSIM
+    # added only when fn callables are passed in.
+    lpips_fn: Optional[Callable] = None,
+    ssim_fn: Optional[Callable] = None,
+    # Codex round 25 (2026-04-30): clean-ORIGINAL evaluator. When
+    # `gt_original_per_frame` (T_clean) is provided, additionally runs SAM2 on
+    # x_clean (no inserts), maps each original frame c to attacked-space
+    # position via W, and emits `..._orig_mean` headline metrics in the
+    # result dict. The processed-space metric is preserved as the appendix-
+    # level "marginal contribution of ν+δ" diagnostic.
+    gt_original_per_frame: Optional[List[np.ndarray]] = None,
 ) -> Dict[str, Any]:
     """Re-evaluate attack effectiveness on the EXPORTED uint8 artifact.
 
@@ -344,9 +356,17 @@ def eval_exported_j_drop(
             f"clean={len(masks_clean)}, attacked={len(masks_attacked)}, "
             f"expected {T_proc}")
 
+    # Phase B (codex round 24): import extended-metrics helpers locally to
+    # avoid pulling scipy at import time on stub paths.
+    from memshield.eval_metrics_extended import (
+        f_boundary, per_frame_lpips_ssim,
+    )
+
     per_frame: Dict[int, Dict[str, Any]] = {}
     Js_baseline: List[float] = []
     Js_attacked: List[float] = []
+    Fs_baseline: List[float] = []
+    Fs_attacked: List[float] = []
     for t in range(T_proc):
         # pseudo-GT at t (soft → hard).
         if t not in m_hat_true_by_t:
@@ -362,10 +382,31 @@ def eval_exported_j_drop(
 
         j_b = _jaccard_binary(masks_clean[t], gt_hard)
         j_a = _jaccard_binary(masks_attacked[t], gt_hard)
+        # Phase B: DAVIS F-boundary on both runs vs same pseudo-GT.
+        f_b = f_boundary(masks_clean[t], gt_hard)
+        f_a = f_boundary(masks_attacked[t], gt_hard)
         Js_baseline.append(j_b)
         Js_attacked.append(j_a)
+        Fs_baseline.append(f_b)
+        Fs_attacked.append(f_a)
+        # Per-frame fidelity (LPIPS + SSIM): exported[t] vs processed_clean[t].
+        # Both indices are processed-space; processed_clean_u8rt is the
+        # clean baseline that already went through the same uint8 round-trip.
+        lp_val: Optional[float] = None
+        ss_val: Optional[float] = None
+        if lpips_fn is not None or ssim_fn is not None:
+            lp_val, ss_val = per_frame_lpips_ssim(
+                exported[t], processed_clean_u8rt[t],
+                lpips_fn, ssim_fn,
+            )
         per_frame[t] = {
             "J_baseline": j_b, "J_attacked": j_a, "J_drop": j_b - j_a,
+            "F_baseline": f_b, "F_attacked": f_a, "F_drop": f_b - f_a,
+            "JF_baseline": 0.5 * (j_b + f_b),
+            "JF_attacked": 0.5 * (j_a + f_a),
+            "JF_drop": 0.5 * (j_b + f_b) - 0.5 * (j_a + f_a),
+            "lpips": lp_val,
+            "ssim": ss_val,
             "is_insert": (t in W_set),
         }
 
@@ -373,12 +414,36 @@ def eval_exported_j_drop(
     J_attacked_mean = float(np.mean(Js_attacked))
     J_drop_mean = J_baseline_mean - J_attacked_mean
 
+    # Phase B: F-boundary aggregates + JF combined.
+    F_baseline_mean = float(np.mean(Fs_baseline))
+    F_attacked_mean = float(np.mean(Fs_attacked))
+    F_drop_mean = F_baseline_mean - F_attacked_mean
+    JF_baseline_mean = 0.5 * (J_baseline_mean + F_baseline_mean)
+    JF_attacked_mean = 0.5 * (J_attacked_mean + F_attacked_mean)
+    JF_drop_mean = JF_baseline_mean - JF_attacked_mean
+
     J_orig_drops = [per_frame[t]["J_drop"] for t in range(T_proc)
                     if t not in W_set]
     J_ins_drops = [per_frame[t]["J_drop"] for t in range(T_proc)
                    if t in W_set]
 
+    # Phase B (codex r24): UTR / SFR from per-frame J_attacked.
+    from memshield.eval_metrics_extended import (
+        aggregate_by_insert, sfr_at, utr_at,
+    )
+    utr_03 = utr_at(Js_attacked, tau=0.3)
+    sfr_07 = sfr_at(Js_attacked, tau=0.7)
+
+    # Phase B (codex r24): per-frame fidelity aggregates split by
+    # is_insert (inserted decoy frames vs untouched-or-state-cont-modified
+    # original frames).
+    lpips_agg = (aggregate_by_insert(per_frame, "lpips")
+                 if lpips_fn is not None else None)
+    ssim_agg = (aggregate_by_insert(per_frame, "ssim")
+                if ssim_fn is not None else None)
+
     result: Dict[str, Any] = {
+        # ---- Existing fields (backward-compat) ----
         "J_baseline_mean": J_baseline_mean,
         "J_attacked_mean": J_attacked_mean,
         "J_drop_mean": J_drop_mean,
@@ -389,7 +454,53 @@ def eval_exported_j_drop(
             float(np.mean(J_ins_drops)) if J_ins_drops else float("nan")),
         "n_originals": len(J_orig_drops),
         "n_inserts": len(J_ins_drops),
+        # ---- Phase B (codex r24) — F / JF / fidelity / failure-band ----
+        "F_baseline_mean": F_baseline_mean,
+        "F_attacked_mean": F_attacked_mean,
+        "F_drop_mean": F_drop_mean,
+        "JF_baseline_mean": JF_baseline_mean,
+        "JF_attacked_mean": JF_attacked_mean,
+        "JF_drop_mean": JF_drop_mean,
+        "UTR_at_03": utr_03,
+        "SFR_at_07": sfr_07,
+        "lpips_aggregate": lpips_agg,
+        "ssim_aggregate": ssim_agg,
     }
+
+    # Codex round 25 (2026-04-30): clean-ORIGINAL evaluator for the AAAI
+    # main-table headline metric. Runs a separate SAM2 pass on x_clean
+    # (no inserts), maps each original-clip frame c → attacked position
+    # via W, and emits `_orig` aggregates against `gt_original_per_frame`
+    # (typically DAVIS-17 GT). Reuses `masks_attacked` from above to
+    # avoid a duplicate SAM2 forward.
+    if gt_original_per_frame is not None:
+        from memshield.eval_metrics_extended import (  # noqa: WPS433
+            eval_original_timeline_metrics,
+        )
+        try:
+            orig_metrics = eval_original_timeline_metrics(
+                sam2_eval_fn=sam2_eval_fn,
+                prompt_mask=prompt_mask,
+                x_clean=x_clean,
+                exported=exported,
+                W_attacked=W,
+                gt_original=gt_original_per_frame,
+                masks_attacked=masks_attacked,
+                lpips_fn=lpips_fn,
+                ssim_fn=ssim_fn,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Don't break the existing processed-space output if the new
+            # path errors out — surface as a string field for visibility.
+            result["original_timeline_error"] = (
+                f"{type(exc).__name__}: {exc}")
+        else:
+            # Strip the heavy mask lists out before storing into result —
+            # they were exposed only for in-process reuse, not for JSON
+            # serialization.
+            orig_metrics.pop("masks_clean_original", None)
+            orig_metrics.pop("masks_attacked", None)
+            result["original_timeline"] = orig_metrics
 
     # Decoy-semantic metrics (2026-04-24 Round 3 codex requirement). When
     # the caller supplies m_hat_decoy_by_t + the per-insert decoy_offsets,
