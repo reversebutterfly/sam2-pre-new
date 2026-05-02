@@ -2627,6 +2627,78 @@ def run_v5_for_clip(
             candidate_stride=int(placement_search_candidate_stride),
             cache_max_size=int(placement_search_cache_size),
         )
+        # codex R29 D-fix (2026-05-02): if joint search reports the
+        # clip is infeasible under the current insert_base_mode +
+        # safety_margin contract (no feasible W found at any stage),
+        # surface a clean V5ClipOutput(infeasible=True) instead of
+        # crashing on `sorted(int(c) for c in chosen_W_clean=[])`. This
+        # mirrors the existing motocross-jump path (search completes
+        # but exported_j_drop is None) and lets the launcher continue
+        # with the next clip.
+        if getattr(joint_search_result, "infeasible", False):
+            # codex R30 Q5 fix (2026-05-02): create the launcher-
+            # compatible per-clip output dir + write a minimal
+            # marker so the launcher's Phase 2 prep does NOT FATAL
+            # on missing search dir for clips that the new D-fix
+            # path now exits cleanly (instead of crashing). Mirrors
+            # what motocross-jump's existing infeasible path produced
+            # (a search dir + results.json), without faking any
+            # Stage-14 artifacts (no processed/ frames written).
+            export_dir_str: Optional[str] = None
+            if out_root is not None:
+                infeasible_marker_dir = (
+                    Path(out_root) / clip_name / config_name)
+                infeasible_marker_dir.mkdir(parents=True, exist_ok=True)
+                # Write a sibling search_infeasible.json (alongside
+                # where results.json would go) with full diagnostics.
+                marker = infeasible_marker_dir / "search_infeasible.json"
+                with open(marker, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "clip_name": clip_name,
+                        "config_name": config_name,
+                        "infeasible": True,
+                        "infeasible_reason": getattr(
+                            joint_search_result, "infeasible_reason",
+                            None),
+                        "infeasible_stage": getattr(
+                            joint_search_result, "infeasible_stage",
+                            None),
+                        "infeasible_anchors": list(getattr(
+                            joint_search_result, "infeasible_anchors",
+                            []) or []),
+                        "prescreen_init_tau": list(
+                            joint_search_result.prescreen_init_tau),
+                    }, f, indent=2)
+                # export_dir points at the (non-existent) processed
+                # subdir; main()'s `if out.export_dir:` gating writes
+                # results.json in the parent dir, mirroring feasible
+                # clips' artifact layout.
+                export_dir_str = str(
+                    infeasible_marker_dir / "processed")
+            return V5ClipOutput(
+                clip_name=clip_name,
+                config_name=config_name,
+                W=[],
+                decoy_offsets=[],
+                infeasible=True,
+                best_surrogate_loss=float("nan"),
+                exported_j_drop=None,
+                exported_j_drop_details={
+                    "search_infeasible": True,
+                    "infeasible_reason": getattr(
+                        joint_search_result, "infeasible_reason", None),
+                    "infeasible_stage": getattr(
+                        joint_search_result, "infeasible_stage", None),
+                    "infeasible_anchors": list(getattr(
+                        joint_search_result, "infeasible_anchors", []) or []),
+                    "prescreen_init_tau": list(
+                        joint_search_result.prescreen_init_tau),
+                },
+                export_dir=export_dir_str,
+                step_log_summary=[],
+                placement_source="joint_curriculum_infeasible",
+                post_insert_radius=int(post_insert_radius),
+            )
         W_clean = sorted(int(c) for c in joint_search_result.chosen_W_clean)
         if len(W_clean) != K_ins:
             raise RuntimeError(

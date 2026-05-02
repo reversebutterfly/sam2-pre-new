@@ -54,12 +54,47 @@ small-image decoy construction. No SAM2 dependency.
 """
 from __future__ import annotations
 
-from typing import Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+
+
+# =============================================================================
+# Typed errors (codex round 29 D-fix, 2026-05-02)
+# =============================================================================
+
+
+class HybridInfeasibleError(ValueError):
+    """No hybrid-feasible offset exists at a given anchor under the
+    requested strategy + safety_margin contract.
+
+    Subclass of ValueError so existing `except ValueError` paths in
+    callers (e.g. prescreen_tau_init) still catch it — but search-side
+    code that wants to distinguish "this anchor is geometrically
+    infeasible" from "any other ValueError" can catch this specifically
+    via `except HybridInfeasibleError`.
+
+    Attributes:
+        c_k: the clean-space insert anchor that failed.
+        strategy: insert_base_mode that was tried (e.g. 'poisson_hifi').
+        reason: human-readable explanation (border-too-close vs strategy
+            internal-check rejection).
+    """
+
+    def __init__(self, c_k: int, strategy: str, reason: str) -> None:
+        self.c_k = int(c_k)
+        self.strategy = str(strategy)
+        self.reason = str(reason)
+        super().__init__(
+            f"insert anchor c_k={c_k}: {reason} for strategy "
+            f"{strategy!r}. This anchor is hybrid-infeasible. "
+            "Drop it from W_clean (recommended), or pass "
+            "allow_ghost_fallback=True to fall back to "
+            "duplicate_object decoy (ghosted, violates "
+            "ghost-free contract).")
 
 
 # =============================================================================
@@ -690,14 +725,13 @@ def build_decoy_insert_seeds_via_strategy(
                 "checks (e.g., propainter flow estimation failure)"
             )
             if not allow_ghost_fallback:
-                raise ValueError(
-                    f"insert anchor c_k={c_k}: {reason} for strategy "
-                    f"{strategy!r}. This anchor is hybrid-infeasible. "
-                    "Drop it from W_clean (recommended), or pass "
-                    "allow_ghost_fallback=True to fall back to "
-                    "duplicate_object decoy (ghosted, violates "
-                    "ghost-free contract)."
-                )
+                # codex round 29 D-fix (2026-05-02): typed exception
+                # so search-side callers can soft-fail this anchor and
+                # try alternative W combinations instead of crashing.
+                # Subclass of ValueError → existing except-ValueError
+                # paths (prescreen_tau_init line 754) still catch it.
+                raise HybridInfeasibleError(
+                    c_k=c_k, strategy=strategy, reason=reason)
             warnings.warn(
                 f"[ghost-fallback] strategy={strategy!r} c_k={c_k}: "
                 f"{reason}; falling back to duplicate_object decoy "
@@ -730,6 +764,60 @@ def build_decoy_insert_seeds_via_strategy(
         seeds.append(seed)
 
     return torch.stack(seeds, dim=0), offsets_used
+
+
+# =============================================================================
+# Try-variant: soft-fail on hybrid-infeasibility (codex round 29 D-fix)
+# =============================================================================
+
+
+def try_build_decoy_insert_seeds_via_strategy(
+    strategy: str,
+    x_clean: Tensor,
+    pseudo_masks: Sequence[np.ndarray],
+    W_clean_positions: Sequence[int],
+    *,
+    feather_px: int = 3,
+    seam_dilate_px: int = 5,
+    safety_margin: int = 8,
+    decoy_offset: Tuple[int, int] = None,
+    propainter_config=None,
+) -> Tuple[Optional[Tensor], Optional[list], List[int]]:
+    """Soft-fail variant of build_decoy_insert_seeds_via_strategy.
+
+    On HybridInfeasibleError at any anchor, returns
+    `(None, None, [c_k_failed, ...])` instead of raising. Otherwise
+    returns `(seeds, offsets, [])` — same shape contract as the
+    raise-version's success path, with an empty failure list.
+
+    Used by joint placement search to try alternative W combinations
+    when a particular W tuple has an infeasible anchor, instead of
+    crashing the whole search.
+
+    Note: `allow_ghost_fallback` is intentionally NOT exposed — search-
+    side code must respect the no-ghost contract; falling back to
+    ghosted decoys silently from inside the search would re-introduce
+    the same correctness violation the contract is meant to prevent.
+    Other (non-hybrid) errors (RuntimeError from create_insert_base,
+    ValueError from c_k bounds check) are NOT caught — they indicate
+    real bugs and should propagate normally.
+    """
+    try:
+        seeds, offsets = build_decoy_insert_seeds_via_strategy(
+            strategy=strategy,
+            x_clean=x_clean,
+            pseudo_masks=pseudo_masks,
+            W_clean_positions=W_clean_positions,
+            feather_px=feather_px,
+            seam_dilate_px=seam_dilate_px,
+            safety_margin=safety_margin,
+            decoy_offset=decoy_offset,
+            propainter_config=propainter_config,
+            allow_ghost_fallback=False,
+        )
+    except HybridInfeasibleError as exc:
+        return None, None, [int(exc.c_k)]
+    return seeds, offsets, []
 
 
 # =============================================================================

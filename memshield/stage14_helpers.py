@@ -40,6 +40,7 @@ from memshield.decoy_continuation import (
     warp_regularizer,
 )
 from memshield.decoy_seed import (
+    HybridInfeasibleError,
     build_decoy_insert_seeds,
     build_duplicate_object_decoy_frame,
     compute_decoy_offset_from_mask,
@@ -352,6 +353,47 @@ def build_attack_state_from_W(
         m_true_by_t=m_true_by_t,
         m_decoy_by_t=m_decoy_by_t,
     )
+
+
+# ---------------------------------------------------------------------------
+# Try-variant: soft-fail on hybrid-infeasibility (codex round 29 D-fix)
+# ---------------------------------------------------------------------------
+
+
+def try_build_attack_state_from_W(
+    W_clean: Sequence[int],
+    x_clean: Tensor,
+    pseudo_masks_clean: Sequence[Any],
+    config: Any,
+    *,
+    bridge_length: Optional[int] = None,
+    insert_base_mode: Optional[str] = None,
+) -> Tuple[Optional[AttackState], List[int]]:
+    """Soft-fail variant of build_attack_state_from_W.
+
+    Returns (state, []) on success.
+    Returns (None, [c_k_list]) when any anchor is hybrid-infeasible
+    under the requested insert_base_mode (poisson_hifi/propainter).
+
+    Other errors (W out of range, duplicate W, unknown insert_base_mode,
+    propainter InstallationError, etc.) propagate normally — they
+    indicate caller bugs or environment issues, not method-level
+    feasibility.
+
+    Used by joint placement search to skip individual W tuples whose
+    anchors are geometrically infeasible without crashing the whole
+    search; the search can then explore alternative W combinations
+    that route around the infeasible anchor.
+    """
+    try:
+        state = build_attack_state_from_W(
+            W_clean, x_clean, pseudo_masks_clean, config,
+            bridge_length=bridge_length,
+            insert_base_mode=insert_base_mode,
+        )
+    except HybridInfeasibleError as exc:
+        return None, [int(exc.c_k)]
+    return state, []
 
 
 # ---------------------------------------------------------------------------

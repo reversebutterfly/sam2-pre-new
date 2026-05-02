@@ -91,8 +91,10 @@ from memshield.decoy_continuation import init_bridge_edit_params
 from memshield.oracle_trajectory import (
     init_false_trajectory, project_trajectory_to_budget,
 )
+from memshield.decoy_seed import HybridInfeasibleError
 from memshield.stage14_helpers import (
     AttackState, build_attack_state_from_W, stage14_forward_loss,
+    try_build_attack_state_from_W,
 )
 
 
@@ -547,6 +549,42 @@ def enumerate_neighbor_schedules(
 # ===========================================================================
 
 
+# codex round 29 D-fix typed errors (2026-05-02): distinguish "this
+# specific W tuple is geometrically infeasible — search should try
+# others" from "the entire clip has no feasible W under the current
+# carrier contract — search must give up and propagate".
+
+
+class SchedulesAllInfeasibleError(RuntimeError):
+    """All schedule corners enumerated by curriculum_joint_step were
+    hybrid-infeasible. Caller should reduce K, re-prescreen, or treat
+    as clip-level infeasible."""
+
+
+class ClipInfeasibleError(RuntimeError):
+    """The entire clip has no feasible W under the current
+    insert_base_mode + safety_margin contract. Surfaced from
+    joint_curriculum_search with a structured reason field so the
+    driver can return V5Result(infeasible=True) cleanly."""
+
+    def __init__(self, reason: str,
+                 infeasible_anchors: Optional[Sequence[int]] = None,
+                 stage: str = "unknown") -> None:
+        self.reason = str(reason)
+        self.infeasible_anchors: List[int] = (
+            [int(c) for c in infeasible_anchors]
+            if infeasible_anchors is not None else [])
+        self.stage = str(stage)
+        super().__init__(
+            f"clip-infeasible at stage={stage!r}: {reason} "
+            f"(anchors flagged: {self.infeasible_anchors})")
+
+
+# Sentinel cached by AttackStateCache.try_get to mark a W tuple as
+# permanently infeasible without rebuilding on every retry.
+_INFEASIBLE_SENTINEL = object()
+
+
 class AttackStateCache:
     """LRU-bounded cache from W_clean tuple → AttackState.
 
@@ -566,14 +604,39 @@ class AttackStateCache:
         self._max_size = int(max_size)
         self._bridge_length = bridge_length
         self._insert_base_mode = insert_base_mode
-        self._cache: Dict[Tuple[int, ...], AttackState] = {}
+        # codex R29 D-fix: cache stores either AttackState (success) or
+        # _INFEASIBLE_SENTINEL (hybrid-infeasible W tuple). Prevents
+        # repeat-rebuilds on schedule sets that re-enumerate the same
+        # bad W across joint steps.
+        self._cache: Dict[Tuple[int, ...], Any] = {}
+        # codex R30 Q8 LOW fix: keep witness anchors alongside the
+        # sentinel so repeated try_get hits return the original
+        # `infeasible_anchors` list instead of an empty []. Useful for
+        # diagnostics surfaced via curriculum logs and final
+        # JointSearchResult.
+        self._infeasible_meta: Dict[Tuple[int, ...], List[int]] = {}
         # Stats.
         self.hits = 0
         self.misses = 0
+        self.infeasible_hits = 0          # try_get hit on sentinel
+        self.infeasible_misses = 0        # try_get fresh failure
 
     def get(self, W_clean: Sequence[int]) -> AttackState:
+        """Raise-on-failure variant. Preserves original contract for
+        callers that should crash on infeasibility (legacy fixed-W
+        path, search initialization where W came from prescreen and
+        is assumed feasible)."""
         key = tuple(int(c) for c in W_clean)
         cached = self._cache.get(key)
+        if cached is _INFEASIBLE_SENTINEL:
+            # Caller asked for raise-on-failure on a known-bad W;
+            # rebuild to surface the original HybridInfeasibleError
+            # with full context (don't fabricate a fake exception).
+            return build_attack_state_from_W(
+                list(key), self._x_clean, self._pseudo_masks, self._config,
+                bridge_length=self._bridge_length,
+                insert_base_mode=self._insert_base_mode,
+            )
         if cached is not None:
             self.hits += 1
             # Refresh LRU position (Python 3.7+ dicts preserve order).
@@ -591,6 +654,50 @@ class AttackStateCache:
         )
         self._cache[key] = state
         return state
+
+    def try_get(self, W_clean: Sequence[int]) -> Tuple[
+            Optional[AttackState], List[int]]:
+        """Soft-fail variant (codex R29 D-fix, 2026-05-02).
+
+        Returns (state, []) on success, (None, [c_k_failed]) on
+        hybrid-infeasibility. Other errors propagate normally.
+
+        Caches the infeasibility sentinel so re-querying the same
+        bad W is O(1) — neighbor schedule enumeration across joint
+        steps revisits the same W tuples frequently.
+        """
+        key = tuple(int(c) for c in W_clean)
+        cached = self._cache.get(key)
+        if cached is _INFEASIBLE_SENTINEL:
+            self.infeasible_hits += 1
+            # codex R30 Q8 LOW fix: surface cached witness anchors
+            # instead of an empty list so diagnostics aren't lost on
+            # repeated try_get hits for the same bad W tuple.
+            return None, list(self._infeasible_meta.get(key, []))
+        if cached is not None:
+            self.hits += 1
+            del self._cache[key]
+            self._cache[key] = cached
+            return cached, []
+        # Fresh miss: try to build, catching only HybridInfeasibleError.
+        if len(self._cache) >= self._max_size:
+            evicted = next(iter(self._cache))
+            self._cache.pop(evicted)
+            # Drop matching meta if the evicted key was a sentinel.
+            self._infeasible_meta.pop(evicted, None)
+        state, infeasible_anchors = try_build_attack_state_from_W(
+            list(key), self._x_clean, self._pseudo_masks, self._config,
+            bridge_length=self._bridge_length,
+            insert_base_mode=self._insert_base_mode,
+        )
+        if state is None:
+            self.infeasible_misses += 1
+            self._cache[key] = _INFEASIBLE_SENTINEL
+            self._infeasible_meta[key] = list(infeasible_anchors)
+            return None, list(infeasible_anchors)
+        self.misses += 1
+        self._cache[key] = state
+        return state, []
 
 
 # ===========================================================================
@@ -745,13 +852,22 @@ def prescreen_tau_init(
          if config.oracle_traj_use_residual else None)
 
     raw_scores: List[Tuple[int, float]] = []
+    # codex R30 Q4 fix (2026-05-02): track which anchors raised which
+    # error type so a structured ClipInfeasibleError can be raised
+    # instead of relying on string-matched RuntimeError downstream.
+    hybrid_infeasible_witnesses: List[int] = []
+    other_failure_witnesses: List[int] = []
     for c in candidates:
         try:
             state = build_attack_state_from_W(
                 [int(c)], x_clean, pseudo_masks_clean, config,
                 bridge_length=H_pre,
             )
+        except HybridInfeasibleError:
+            hybrid_infeasible_witnesses.append(int(c))
+            continue
         except ValueError:
+            other_failure_witnesses.append(int(c))
             continue
         traj = init_false_trajectory(
             K=1, L=state.L_max,
@@ -777,14 +893,29 @@ def prescreen_tau_init(
                     R_active=False,
                 )
             except RuntimeError:
+                other_failure_witnesses.append(int(c))
                 continue
         v_raw = -float(diag.L_margin.detach().item())
         raw_scores.append((int(c), v_raw))
 
     if not raw_scores:
-        raise RuntimeError(
-            "prescreen: every candidate failed to build attack_state or "
-            "Stage-14 forward")
+        # codex R30 Q4 fix: typed ClipInfeasibleError replaces the
+        # previous RuntimeError + string-matching at the caller. The
+        # outer joint_curriculum_search catches this type and converts
+        # to JointSearchResult(infeasible=True, infeasible_stage=
+        # 'prescreen').
+        raise ClipInfeasibleError(
+            reason=(
+                f"prescreen: every K=1 candidate failed at Stage-14 "
+                f"forward or attack_state build "
+                f"(n_hybrid_infeasible={len(hybrid_infeasible_witnesses)}, "
+                f"n_other={len(other_failure_witnesses)}). Clip has no "
+                "feasible W under the current insert_base_mode + "
+                "safety_margin contract."),
+            infeasible_anchors=sorted(set(
+                hybrid_infeasible_witnesses + other_failure_witnesses)),
+            stage="prescreen",
+        )
 
     # Convert v_raw -> v_rank ∈ [0, 1] (rank percentile). Use simple
     # rank/(n-1) so the worst maps to 0 and the best maps to 1.
@@ -850,6 +981,21 @@ class CurriculumStepDiagnostics:
     trust_region_active: bool = False   # v3: True when phase passed W0 +
                                         # trust ratios for schedule
                                         # filtering. Phase 3 only.
+    # codex R29 D-fix (2026-05-02), corrected codex R30: hybrid-
+    # infeasibility soft-fail diagnostics.
+    n_infeasible_schedules: int = 0     # schedules dropped by try_get
+                                        # because at least one anchor was
+                                        # hybrid-infeasible.
+    infeasible_schedule_anchors: List[int] = field(default_factory=list)
+    # Union of c_k anchors across all infeasible schedules this step;
+    # useful for diagnosing which anchors caused the drops.
+    drop_ratio: float = 0.0             # n_infeasible / n_schedules.
+                                        # Codex R30: surface high values
+                                        # (≥0.5) so caller / curriculum
+                                        # logs can flag steps where the
+                                        # surviving subset shrunk a lot
+                                        # (=> τ gradient signal is weak
+                                        # this step).
 
 
 def _R_active_slice_mask(R: Optional[Tensor], active_k: Sequence[int]
@@ -1054,8 +1200,61 @@ def curriculum_joint_step(
     L_suffix_step = 0.0       # diagnostic: avg suffix loss across schedules
     schedule_logs: List[Dict[str, Any]] = []
     n_schedules = len(schedules)
-    for sched_idx, (W_tuple, weight, corner_id) in enumerate(schedules):
-        state = state_cache.get(W_tuple)
+    # codex R29 D-fix (2026-05-02), corrected by codex R30 Q1 audit:
+    # pre-filter hybrid-infeasible W tuples via try_get so the joint
+    # step skips them instead of crashing the entire search.
+    #
+    # Weight-handling contract: surviving schedules keep their
+    # ORIGINAL weights (which were normalized over the FULL schedule
+    # set inside enumerate_neighbor_schedules). We do NOT renormalize.
+    #
+    # Gradient semantics (corrected): the loss this step is
+    #   F(τ) = Σ_{i ∈ surviving} w_i(τ) * L_i(τ)
+    # where each w_i is normalized over the full set, so
+    #   Σ_{all i} w_i = 1 but Σ_{surviving} w_i = α(τ) ≤ 1.
+    # ∇F therefore includes ∂w_i/∂τ contributions from BOTH surviving
+    # and dropped schedules (via the shared softmax-style
+    # normalization), so this is NOT mathematically equivalent to a
+    # rescaled feasible-only convex combination. In practice this
+    # means τ's gradient gets a natural "steer away from infeasible
+    # corners" component (dropped corners pull weight mass when τ
+    # moves toward them), which is desirable for our use case.
+    #
+    # The alternative "renormalize with detached α" (Σ (w_i/α.detach())
+    # L_i) would zero this steering signal. We deliberately keep the
+    # current form. n_infeasible_schedules + drop_ratio diagnostics
+    # surface the hidden state for downstream analysis.
+    surviving: List[Tuple[Any, Any, Any, Any]] = []   # (W_tuple, weight, corner_id, state)
+    infeasible_anchors_union: List[int] = []
+    for W_tuple, weight, corner_id in schedules:
+        state, infeasible_anchors_w = state_cache.try_get(W_tuple)
+        if state is None:
+            schedule_logs.append({
+                "W": list(W_tuple),
+                "weight": 0.0,
+                "corner_id": int(corner_id),
+                "infeasible": True,
+                "infeasible_anchors": list(infeasible_anchors_w),
+            })
+            for c in infeasible_anchors_w:
+                if c not in infeasible_anchors_union:
+                    infeasible_anchors_union.append(int(c))
+            continue
+        surviving.append((W_tuple, weight, corner_id, state))
+
+    n_infeasible_schedules = n_schedules - len(surviving)
+    if not surviving:
+        # All schedules infeasible at this step. Caller (joint_curriculum
+        # _search) should treat this as clip-level infeasible and either
+        # re-prescreen with the bad anchors blacklisted or surface
+        # ClipInfeasibleError to the driver.
+        raise SchedulesAllInfeasibleError(
+            f"all {n_schedules} schedule corners are hybrid-infeasible "
+            f"under {state_cache._insert_base_mode!r} (anchors flagged: "
+            f"{infeasible_anchors_union})")
+
+    n_surviving = len(surviving)
+    for sched_idx, (W_tuple, weight, corner_id, state) in enumerate(surviving):
         L_sched, diag_sched, _ = stage14_forward_loss(
             state, x_clean=x_clean,
             traj=traj_params, edit_params=edit_params,
@@ -1067,10 +1266,10 @@ def curriculum_joint_step(
             lambda_suffix=lambda_suffix,
         )
         weighted = weight * L_sched
-        # Last schedule frees the shared tau→weight graph; earlier
-        # schedules retain it so subsequent backward calls can still
-        # reach tau through their own weight terms.
-        weighted.backward(retain_graph=(sched_idx < n_schedules - 1))
+        # Last surviving schedule frees the shared tau→weight graph;
+        # earlier surviving schedules retain it so subsequent backward
+        # calls can still reach tau through their own weight terms.
+        weighted.backward(retain_graph=(sched_idx < n_surviving - 1))
         L_step_value += float(weighted.detach().item())
         L_suffix_step += float(weight.detach().item()) * float(
             diag_sched.L_suffix.detach().item())
@@ -1155,6 +1354,10 @@ def curriculum_joint_step(
             trust_radius is not None
             or span_ratio is not None
             or gap_ratio is not None)),
+        n_infeasible_schedules=int(n_infeasible_schedules),
+        infeasible_schedule_anchors=list(infeasible_anchors_union),
+        drop_ratio=(float(n_infeasible_schedules) / float(n_schedules)
+                    if n_schedules > 0 else 0.0),
     )
 
 
@@ -1247,12 +1450,47 @@ def local_refine_27(
     device = x_clean.device
     H, W = int(x_clean.shape[1]), int(x_clean.shape[2])
 
+    # codex R30 Q8 fix (2026-05-02): guard W_round itself BEFORE
+    # using it as default best_W. If W_round is hybrid-infeasible
+    # (can happen if curriculum drove τ to a corner that survived only
+    # because its schedules dropped the bad anchor — round(τ) might
+    # then land on the bad anchor), surface ClipInfeasibleError so
+    # the outer search returns infeasible cleanly. Without this guard,
+    # an all-skipped neighborhood + infeasible W_round would silently
+    # return an infeasible center as the chosen W and crash later in
+    # the v5 driver.
+    state_round, anchors_round = state_cache.try_get(W_round)
+    if state_round is None:
+        raise ClipInfeasibleError(
+            reason=(
+                f"local_refine_27: W_round={list(W_round)} is hybrid-"
+                f"infeasible at anchors {anchors_round}; curriculum "
+                "rounded τ landed on a bad anchor whose schedules had "
+                "been dropped during search."),
+            infeasible_anchors=list(anchors_round),
+            stage="local_refine",
+        )
+
     diags: List[Dict[str, Any]] = []
     best_score = -float("inf")
-    best_W: Tuple[int, ...] = tuple(int(w) for w in candidates[0])
+    # codex R29 D-fix (2026-05-02): default best_W is W_round (now
+    # verified feasible above per codex R30 Q8 guard). If every
+    # neighbor is infeasible, refine returns W_round unchanged.
+    best_W: Tuple[int, ...] = tuple(int(w) for w in W_round)
 
     for cand in candidates:
-        state = state_cache.get(cand)
+        # codex R29 D-fix: try_get instead of get — skip neighbors
+        # whose anchors are hybrid-infeasible rather than crashing
+        # the whole refine.
+        state, infeasible_anchors_n = state_cache.try_get(cand)
+        if state is None:
+            diags.append({
+                "W": list(cand),
+                "infeasible": True,
+                "infeasible_anchors": list(infeasible_anchors_n),
+                "score": -float("inf"),
+            })
+            continue
         # Init fresh traj + edit_params + nu + R for this neighbor (cheap).
         anchors = traj_init_offsets if traj_init_offsets is not None else \
             [(float(dy), float(dx)) for dy, dx in state.decoy_offsets_init]
@@ -1336,7 +1574,15 @@ def local_refine_27(
 
 @dataclass
 class JointSearchResult:
-    """Result returned by joint_curriculum_search."""
+    """Result returned by joint_curriculum_search.
+
+    codex R29 D-fix (2026-05-02): when the clip has no feasible W under
+    the current insert_base_mode + safety_margin contract, fields
+    `infeasible=True` + `infeasible_reason` + `infeasible_anchors` are
+    populated and `chosen_W_clean / refine_W_clean` may be `[]`
+    (caller must check `infeasible` before using W). Existing callers
+    that assume non-empty W must add an `if result.infeasible:` guard.
+    """
     chosen_W_clean: List[int]
     prescreen_init_tau: List[float]
     curriculum_logs: List[Dict[str, Any]]
@@ -1345,6 +1591,12 @@ class JointSearchResult:
     cache_hits: int
     cache_misses: int
     wall_clock_seconds: Dict[str, float]
+    # codex R29 D-fix
+    infeasible: bool = False
+    infeasible_reason: Optional[str] = None
+    infeasible_anchors: List[int] = field(default_factory=list)
+    infeasible_stage: Optional[str] = None    # 'prescreen' | 'init' |
+                                              # 'curriculum' | 'refine'
 
 
 def joint_curriculum_search(
@@ -1407,15 +1659,33 @@ def joint_curriculum_search(
 
     # ---- 1. Coverage-aware prescreen ----
     t0 = time.time()
-    pre = prescreen_tau_init(
-        x_clean, pseudo_masks_clean, config,
-        forward_fn=forward_fn, lpips_fn=lpips_fn,
-        K=K, d_min=int(d_min), bridge_length=bridge_len,
-        seed_index=int(prescreen_seed_index),
-        candidate_stride=int(candidate_stride),
-        prescreen_horizon=int(getattr(
-            config, "oracle_traj_prescreen_horizon", 12)),
-    )
+    # codex R30 Q4 fix (2026-05-02): prescreen now raises typed
+    # ClipInfeasibleError directly (replaces the brittle
+    # string-matched RuntimeError catch). The outer catch identifies
+    # the type, not the text, so unrelated RuntimeErrors propagate as
+    # bugs instead of being silently classified as clip-infeasible.
+    try:
+        pre = prescreen_tau_init(
+            x_clean, pseudo_masks_clean, config,
+            forward_fn=forward_fn, lpips_fn=lpips_fn,
+            K=K, d_min=int(d_min), bridge_length=bridge_len,
+            seed_index=int(prescreen_seed_index),
+            candidate_stride=int(candidate_stride),
+            prescreen_horizon=int(getattr(
+                config, "oracle_traj_prescreen_horizon", 12)),
+        )
+    except ClipInfeasibleError as exc:
+        return JointSearchResult(
+            chosen_W_clean=[], prescreen_init_tau=[],
+            curriculum_logs=[], refine_diagnostics=[],
+            refine_W_clean=[],
+            cache_hits=0, cache_misses=0,
+            wall_clock_seconds={"prescreen": time.time() - t0},
+            infeasible=True,
+            infeasible_reason=exc.reason,
+            infeasible_anchors=list(exc.infeasible_anchors),
+            infeasible_stage=exc.stage,
+        )
     timings["prescreen"] = time.time() - t0
 
     # ---- 2. Initialize state cache + traj/edit/ν/R from prescreen W ----
@@ -1431,8 +1701,29 @@ def joint_curriculum_search(
 
     # Pre-build the K-insert attack state at the prescreen-rounded W so
     # traj init_anchors come from the right offsets.
+    # codex R29 D-fix: try_get + raise structured error if init W is
+    # infeasible. Should be rare since prescreen tested each anchor at
+    # K=1 individually, but bridge_length differences could in theory
+    # surface a fresh geometry failure here.
     W_init = tuple(int(round(v)) for v in tau_full_state)
-    init_state = state_cache.get(W_init)
+    init_state, init_infeasible_anchors = state_cache.try_get(W_init)
+    if init_state is None:
+        return JointSearchResult(
+            chosen_W_clean=[], prescreen_init_tau=list(pre.init_tau_values),
+            curriculum_logs=[], refine_diagnostics=[],
+            refine_W_clean=[],
+            cache_hits=0, cache_misses=0,
+            wall_clock_seconds=dict(timings),
+            infeasible=True,
+            infeasible_reason=(
+                f"prescreen-rounded W_init={list(W_init)} is hybrid-"
+                f"infeasible at anchors {init_infeasible_anchors}; "
+                "init bridge_length differs from prescreen horizon and "
+                "exposes geometry failure not seen during candidate "
+                "screening."),
+            infeasible_anchors=list(init_infeasible_anchors),
+            infeasible_stage="init",
+        )
     traj = init_false_trajectory(
         K=K, L=init_state.L_max,
         init_anchor_offsets=[
@@ -1500,6 +1791,13 @@ def joint_curriculum_search(
         if hasattr(config, "oracle_traj_tau_lr")
         and getattr(config, "oracle_traj_tau_lr_force_legacy", False)
         else None)
+
+    # codex R29 D-fix (2026-05-02): if mid-curriculum we exhaust all
+    # surviving schedules at some phase, surface a clean infeasible
+    # JointSearchResult (caller can then return V5Result(infeasible=
+    # True) without crashing). Tracked via this sentinel so the catch
+    # below has access to phase context.
+    curriculum_infeasible: Optional[Dict[str, Any]] = None
 
     for phase_idx in range(K):
         t_phase = time.time()
@@ -1610,26 +1908,38 @@ def joint_curriculum_search(
             v3_gap_ratio_this = float(v3_gap_ratio)
 
         for step in range(int(phase_steps[phase_idx])):
-            diag = curriculum_joint_step(
-                x_clean=x_clean,
-                pseudo_masks_clean=pseudo_masks_clean,
-                config=config,
-                forward_fn=forward_fn, lpips_fn=lpips_fn,
-                state_cache=state_cache,
-                tau_params=tau_params, traj_params=traj,
-                edit_params=edit_params, R=R, nu=nu,
-                optimizer=optimizer, active_inserts=active_inserts,
-                lambda_fid_val=lambda_fid_val,
-                bridge_length=bridge_len,
-                R_active_in_phase=R_active_in_phase,
-                R_lr=R_lr, R_eps=R_eps,
-                W0_for_trust=v3_W0_for_trust,
-                trust_radius=v3_trust_radius_this,
-                span_ratio=v3_span_ratio_this,
-                gap_ratio=v3_gap_ratio_this,
-                suffix_probe_frames=v3_suffix_probe_frames,
-                lambda_suffix=v3_lambda_suffix_this,
-            )
+            try:
+                diag = curriculum_joint_step(
+                    x_clean=x_clean,
+                    pseudo_masks_clean=pseudo_masks_clean,
+                    config=config,
+                    forward_fn=forward_fn, lpips_fn=lpips_fn,
+                    state_cache=state_cache,
+                    tau_params=tau_params, traj_params=traj,
+                    edit_params=edit_params, R=R, nu=nu,
+                    optimizer=optimizer, active_inserts=active_inserts,
+                    lambda_fid_val=lambda_fid_val,
+                    bridge_length=bridge_len,
+                    R_active_in_phase=R_active_in_phase,
+                    R_lr=R_lr, R_eps=R_eps,
+                    W0_for_trust=v3_W0_for_trust,
+                    trust_radius=v3_trust_radius_this,
+                    span_ratio=v3_span_ratio_this,
+                    gap_ratio=v3_gap_ratio_this,
+                    suffix_probe_frames=v3_suffix_probe_frames,
+                    lambda_suffix=v3_lambda_suffix_this,
+                )
+            except SchedulesAllInfeasibleError as exc:
+                # codex R29 D-fix: every schedule corner enumerated
+                # this step is hybrid-infeasible. Record context and
+                # break out — return JointSearchResult(infeasible=True)
+                # at the bottom of the function.
+                curriculum_infeasible = {
+                    "phase": int(phase_idx + 1),
+                    "step": int(step + 1),
+                    "reason": str(exc),
+                }
+                break
             curriculum_logs.append({
                 "phase": phase_idx + 1, "step": step + 1,
                 "L_step": diag.L_step,
@@ -1641,11 +1951,32 @@ def joint_curriculum_search(
                 "schedules": diag.schedules,
                 "suffix_loss_weighted": diag.suffix_loss_weighted,
                 "trust_region_active": diag.trust_region_active,
+                "n_infeasible_schedules": diag.n_infeasible_schedules,
+                "infeasible_schedule_anchors": diag.infeasible_schedule_anchors,
             })
             # Update full τ state with the active prefix produced this
             # step; the tail stays at its stored constants.
             tau_full_state = list(diag.tau_values)
         timings[f"phase_{phase_idx + 1}"] = time.time() - t_phase
+        if curriculum_infeasible is not None:
+            break
+
+    if curriculum_infeasible is not None:
+        return JointSearchResult(
+            chosen_W_clean=[], prescreen_init_tau=list(pre.init_tau_values),
+            curriculum_logs=list(curriculum_logs),
+            refine_diagnostics=[], refine_W_clean=[],
+            cache_hits=int(state_cache.hits),
+            cache_misses=int(state_cache.misses),
+            wall_clock_seconds=dict(timings),
+            infeasible=True,
+            infeasible_reason=(
+                f"all schedule corners hybrid-infeasible at "
+                f"phase={curriculum_infeasible['phase']} "
+                f"step={curriculum_infeasible['step']}: "
+                f"{curriculum_infeasible['reason']}"),
+            infeasible_stage="curriculum",
+        )
 
     # ---- 6. Round + 27-triple local refine ----
     # v3: apply same trust region in local refine to prevent it from
@@ -1690,18 +2021,37 @@ def joint_curriculum_search(
         refine_suffix_probes = refine_probes[:v3_n_probes]
         refine_lambda_suffix = float(v3_lambda_suffix)
 
-    refine_W, refine_diags = local_refine_27(
-        x_clean=x_clean, pseudo_masks_clean=pseudo_masks_clean,
-        config=config, forward_fn=forward_fn, lpips_fn=lpips_fn,
-        state_cache=state_cache, W_round=W_round,
-        bridge_length=bridge_len, d_min=int(d_min),
-        W0_for_trust=refine_W0,
-        trust_radius=(int(v3_trust_radius) if v3_enable else None),
-        span_ratio=(float(v3_span_ratio) if v3_enable else None),
-        gap_ratio=(float(v3_gap_ratio) if v3_enable else None),
-        lambda_suffix_for_score=refine_lambda_suffix,
-        suffix_probe_frames_for_score=refine_suffix_probes,
-    )
+    # codex R30 Q8 fix (2026-05-02): catch ClipInfeasibleError from
+    # local_refine_27's W_round guard so curriculum-survived but
+    # rounding-infeasible cases surface cleanly as
+    # JointSearchResult(infeasible=True, infeasible_stage='refine').
+    try:
+        refine_W, refine_diags = local_refine_27(
+            x_clean=x_clean, pseudo_masks_clean=pseudo_masks_clean,
+            config=config, forward_fn=forward_fn, lpips_fn=lpips_fn,
+            state_cache=state_cache, W_round=W_round,
+            bridge_length=bridge_len, d_min=int(d_min),
+            W0_for_trust=refine_W0,
+            trust_radius=(int(v3_trust_radius) if v3_enable else None),
+            span_ratio=(float(v3_span_ratio) if v3_enable else None),
+            gap_ratio=(float(v3_gap_ratio) if v3_enable else None),
+            lambda_suffix_for_score=refine_lambda_suffix,
+            suffix_probe_frames_for_score=refine_suffix_probes,
+        )
+    except ClipInfeasibleError as exc:
+        timings["local_refine"] = time.time() - t_refine
+        return JointSearchResult(
+            chosen_W_clean=[], prescreen_init_tau=list(pre.init_tau_values),
+            curriculum_logs=list(curriculum_logs),
+            refine_diagnostics=[], refine_W_clean=[],
+            cache_hits=int(state_cache.hits),
+            cache_misses=int(state_cache.misses),
+            wall_clock_seconds=dict(timings),
+            infeasible=True,
+            infeasible_reason=exc.reason,
+            infeasible_anchors=list(exc.infeasible_anchors),
+            infeasible_stage=exc.stage,
+        )
     timings["local_refine"] = time.time() - t_refine
 
     return JointSearchResult(
@@ -2538,6 +2888,350 @@ def _test_v3_27_neighbor_with_trust() -> None:
           f"{len(cands_B_no_trust)} (filter rate {filter_ratio:.0%})")
 
 
+def _test_dfix_hybrid_infeasible_error_type() -> None:
+    """codex R29 D-fix Test 1: HybridInfeasibleError is a ValueError
+    subclass with structured fields, so existing `except ValueError`
+    paths still catch it and search-side code can specialize."""
+    err = HybridInfeasibleError(
+        c_k=7, strategy="poisson_hifi", reason="border-too-close")
+    assert isinstance(err, ValueError), \
+        "HybridInfeasibleError must subclass ValueError"
+    assert err.c_k == 7
+    assert err.strategy == "poisson_hifi"
+    assert "c_k=7" in str(err) and "border-too-close" in str(err)
+    # Caught by both specific and generic handlers.
+    try:
+        raise err
+    except HybridInfeasibleError:
+        pass
+    try:
+        raise HybridInfeasibleError(
+            c_k=2, strategy="propainter", reason="strategy reject")
+    except ValueError:
+        pass
+    print("  D-fix #1: HybridInfeasibleError typed + ValueError-subclass OK")
+
+
+def _test_dfix_cache_try_get_sentinel() -> None:
+    """codex R29 D-fix Test 2: AttackStateCache.try_get caches an
+    infeasibility sentinel for known-bad W tuples so re-querying is
+    O(1) (no rebuild attempt). Non-HybridInfeasibleError exceptions
+    still propagate up and are NOT cached."""
+    import sys
+    jps = sys.modules[__name__]   # works whether module is loaded as
+                                  # 'memshield.joint_placement_search'
+                                  # (normal import) or as '__main__'
+                                  # (python -m). A separate
+                                  # `import memshield.joint_placement
+                                  # _search` would create a SECOND
+                                  # module object whose globals are
+                                  # different from the one whose
+                                  # AttackStateCache class we are
+                                  # testing.
+    torch.manual_seed(0)
+    np.random.seed(0)
+    T_clean, H, W = 25, 16, 16
+    x_clean = torch.rand(T_clean, H, W, 3)
+    pseudo_masks = []
+    for t in range(T_clean):
+        m = np.zeros((H, W), dtype=np.float32)
+        c = min(W - 4, max(0, t // 3))
+        m[6:10, c:c + 4] = 1.0
+        pseudo_masks.append(m)
+    cfg = _DummyConfig()
+
+    # Monkey-patch build_attack_state_from_W to raise
+    # HybridInfeasibleError when W contains anchor 11.
+    real_builder = jps.build_attack_state_from_W
+    real_try_builder = jps.try_build_attack_state_from_W
+    call_log: List[str] = []
+
+    def fake_try_builder(W_clean, *args, **kwargs):
+        call_log.append("try:" + ",".join(str(c) for c in W_clean))
+        if 11 in [int(c) for c in W_clean]:
+            return None, [11]
+        return real_try_builder(W_clean, *args, **kwargs)
+
+    def fake_builder(W_clean, *args, **kwargs):
+        call_log.append("get:" + ",".join(str(c) for c in W_clean))
+        if 11 in [int(c) for c in W_clean]:
+            raise HybridInfeasibleError(
+                c_k=11, strategy="poisson_hifi", reason="test-fixture")
+        return real_builder(W_clean, *args, **kwargs)
+
+    jps.try_build_attack_state_from_W = fake_try_builder
+    jps.build_attack_state_from_W = fake_builder
+    try:
+        cache = AttackStateCache(x_clean, pseudo_masks, cfg, max_size=4)
+        # First try_get on infeasible W: returns (None, [11]), caches
+        # sentinel, increments infeasible_misses.
+        s1, anchors1 = cache.try_get([3, 11, 18])
+        assert s1 is None and anchors1 == [11], (s1, anchors1)
+        assert cache.infeasible_misses == 1 and cache.infeasible_hits == 0
+        # Second try_get same W: O(1) sentinel hit, NO rebuild.
+        # codex R30 Q8 LOW: sentinel hit returns the CACHED witness
+        # anchors so diagnostics aren't lost on repeat queries.
+        n_calls_before = len(call_log)
+        s2, anchors2 = cache.try_get([3, 11, 18])
+        assert s2 is None and anchors2 == [11], (s2, anchors2)
+        assert cache.infeasible_hits == 1
+        assert len(call_log) == n_calls_before, \
+            "sentinel hit must not rebuild"
+        # Feasible W: builds normally.
+        s3, anchors3 = cache.try_get([3, 8, 18])
+        assert s3 is not None and anchors3 == [], (s3, anchors3)
+        # cache.get on a known-infeasible W still raises (preserves the
+        # raise-on-failure contract for legacy callers).
+        try:
+            cache.get([3, 11, 18])
+            raise AssertionError("expected HybridInfeasibleError")
+        except HybridInfeasibleError as e:
+            assert e.c_k == 11
+    finally:
+        jps.try_build_attack_state_from_W = real_try_builder
+        jps.build_attack_state_from_W = real_builder
+    print("  D-fix #2: try_get sentinel caching + raise-path preserved OK")
+
+
+def _test_dfix_curriculum_skips_infeasible_schedules() -> None:
+    """codex R29 D-fix Test 3: curriculum_joint_step skips schedules
+    whose W tuple has a hybrid-infeasible anchor and continues with
+    surviving schedules; diag.n_infeasible_schedules tracks the drop
+    count. Mirrors the breakdance/dance-twirl/loading failure mode
+    where a particular c_k is geometrically infeasible but other W
+    tuples in the schedule set are fine."""
+    import sys
+    jps = sys.modules[__name__]   # works whether module is loaded as
+                                  # 'memshield.joint_placement_search'
+                                  # (normal import) or as '__main__'
+                                  # (python -m). A separate
+                                  # `import memshield.joint_placement
+                                  # _search` would create a SECOND
+                                  # module object whose globals are
+                                  # different from the one whose
+                                  # AttackStateCache class we are
+                                  # testing.
+    torch.manual_seed(0)
+    np.random.seed(0)
+    T_clean, H, W = 25, 16, 16
+    x_clean = torch.rand(T_clean, H, W, 3)
+    pseudo_masks = []
+    for t in range(T_clean):
+        m = np.zeros((H, W), dtype=np.float32)
+        c = min(W - 4, max(0, 4 + t // 3))
+        m[6:10, c:c + 4] = 1.0
+        pseudo_masks.append(m)
+    cfg = _DummyConfig()
+    forward = _StubForwardFn(H, W, obj_value=-2.0)
+
+    # Make any W tuple containing anchor 9 infeasible.
+    real_try_builder = jps.try_build_attack_state_from_W
+
+    def fake_try_builder(W_clean, *args, **kwargs):
+        if 9 in [int(c) for c in W_clean]:
+            return None, [9]
+        return real_try_builder(W_clean, *args, **kwargs)
+
+    jps.try_build_attack_state_from_W = fake_try_builder
+    try:
+        # K=2 curriculum, prescreen-init at W=[5, 12]. Schedule
+        # enumeration around tau will sometimes include 9 — those
+        # schedules should be soft-failed.
+        result = joint_curriculum_search(
+            x_clean, pseudo_masks, cfg,
+            forward_fn=forward, lpips_fn=_stub_lpips,
+            K=2, d_min=2, bridge_length=3,
+            phase_steps=(2, 2),
+            cache_max_size=8,
+            candidate_stride=1,
+        )
+    finally:
+        jps.try_build_attack_state_from_W = real_try_builder
+    # Search should not crash and should return a feasible W
+    # (chosen_W_clean must satisfy d_min and avoid anchor 9 if it
+    # appeared anywhere in schedule enumeration). Whether anchor 9
+    # is actually enumerated depends on where prescreen lands tau —
+    # for this stub-mask setup it may not, so we check the structural
+    # property (search succeeded) and that the chosen W is consistent.
+    assert not result.infeasible, (
+        f"expected feasible result; got infeasible_reason="
+        f"{result.infeasible_reason}")
+    assert len(result.chosen_W_clean) == 2, result.chosen_W_clean
+    assert 9 not in result.chosen_W_clean, (
+        f"chosen W={result.chosen_W_clean} should not include "
+        "blocked anchor 9")
+    n_inf_total = sum(
+        int(log.get("n_infeasible_schedules", 0))
+        for log in result.curriculum_logs)
+    print(f"  D-fix #3: curriculum chosen W={result.chosen_W_clean} "
+          f"avoided blocked anchor 9; saw n_inf_schedules={n_inf_total} "
+          "across steps OK")
+
+
+def _test_dfix_curriculum_step_drops_specific_schedule() -> None:
+    """codex R30 Q7 follow-up Test 3b: directly exercise
+    curriculum_joint_step at a tau where exactly one of its enumerated
+    schedule corners is hybrid-infeasible. Verifies:
+      - n_infeasible_schedules > 0 (the dropped one is counted)
+      - infeasible_schedule_anchors contains the blocked anchor
+      - drop_ratio matches arithmetic
+      - step still backwards through surviving schedules (no crash)
+      - returned diag.tau_values is finite (gradient applied)
+    """
+    import sys
+    jps = sys.modules[__name__]
+    torch.manual_seed(0)
+    np.random.seed(0)
+    T_clean, H, W = 25, 16, 16
+    x_clean = torch.rand(T_clean, H, W, 3)
+    pseudo_masks = []
+    for t in range(T_clean):
+        m = np.zeros((H, W), dtype=np.float32)
+        c = min(W - 4, max(0, 4 + t // 3))
+        m[6:10, c:c + 4] = 1.0
+        pseudo_masks.append(m)
+    cfg = _DummyConfig()
+    forward = _StubForwardFn(H, W, obj_value=-2.0)
+    bridge_len = int(cfg.oracle_traj_bridge_length)
+    bridge_budget = bridge_len + 1
+
+    # Pick a tau where round(τ) = (5, 12). enumerate_neighbor_schedules
+    # ±1 produces 4 corners: (4,11), (4,13), (6,11), (6,13). Block any
+    # W tuple containing anchor 6 → schedules (6,11) and (6,13) drop;
+    # (4,11) and (4,13) survive.
+    real_try_builder = jps.try_build_attack_state_from_W
+
+    def fake_try_builder(W_clean, *args, **kwargs):
+        if 6 in [int(c) for c in W_clean]:
+            return None, [6]
+        return real_try_builder(W_clean, *args, **kwargs)
+
+    jps.try_build_attack_state_from_W = fake_try_builder
+    try:
+        K = 2
+        d_min_local = 2
+        # Build state cache + tau params manually at fixed tau.
+        state_cache = AttackStateCache(
+            x_clean, pseudo_masks, cfg, max_size=8,
+            bridge_length=bridge_len)
+        tau_params = init_tau_phase_params(
+            active_K=K, full_K=K, T_clean=T_clean,
+            init_tau_values_full=[5.0, 12.0],
+            clamp_left=1.0, bridge_budget=bridge_budget,
+            d_min=d_min_local,
+            device=x_clean.device, dtype=x_clean.dtype,
+        )
+        # Use feasible init W so init_state succeeds.
+        init_state, _ = state_cache.try_get((5, 12))
+        assert init_state is not None
+        traj = init_false_trajectory(
+            K=K, L=init_state.L_max,
+            init_anchor_offsets=[
+                (float(dy), float(dx))
+                for dy, dx in init_state.decoy_offsets_init],
+            device=x_clean.device, dtype=x_clean.dtype,
+        )
+        edit_p = init_bridge_edit_params(
+            K, init_state.L_max,
+            alpha_max=cfg.oracle_traj_alpha_max,
+            s_init_px=1.0, r_init_px=0.0,
+            device=x_clean.device, dtype=x_clean.dtype,
+        )
+        nu = torch.zeros(K, H, W, 3, device=x_clean.device,
+                         dtype=x_clean.dtype, requires_grad=True)
+        params = [traj.anchor_offset, traj.delta_offset,
+                  edit_p.alpha_logits, edit_p.warp_s,
+                  edit_p.warp_r, nu]
+        if tau_params.p_raw.requires_grad:
+            params = [tau_params.p_raw] + params
+        opt = torch.optim.Adam(
+            [{"params": [p], "lr": 0.01} for p in params])
+        diag = curriculum_joint_step(
+            x_clean=x_clean,
+            pseudo_masks_clean=pseudo_masks,
+            config=cfg, forward_fn=forward, lpips_fn=_stub_lpips,
+            state_cache=state_cache, tau_params=tau_params,
+            traj_params=traj, edit_params=edit_p, R=None, nu=nu,
+            optimizer=opt, active_inserts=[0, 1],
+            lambda_fid_val=float(cfg.joint_traj_lambda_fid),
+            bridge_length=bridge_len,
+            R_active_in_phase=False, R_lr=0.0, R_eps=0.0,
+        )
+    finally:
+        jps.try_build_attack_state_from_W = real_try_builder
+
+    # Expected: at least one infeasible schedule observed, anchor 6 in
+    # union, drop_ratio > 0, surviving schedule(s) executed without
+    # crash, tau_values finite.
+    assert diag.n_infeasible_schedules >= 1, (
+        f"expected ≥1 infeasible; got {diag.n_infeasible_schedules}")
+    assert 6 in diag.infeasible_schedule_anchors, (
+        f"expected anchor 6 in {diag.infeasible_schedule_anchors}")
+    assert 0.0 < diag.drop_ratio <= 1.0, diag.drop_ratio
+    assert all(np.isfinite(t) for t in diag.tau_values), diag.tau_values
+    print(f"  D-fix #3b: curriculum_step dropped {diag.n_infeasible_schedules}/"
+          f"{diag.n_infeasible_schedules + diag.valid_corner_count} "
+          f"(drop_ratio={diag.drop_ratio:.2f}); "
+          f"infeasible_anchors={diag.infeasible_schedule_anchors} OK")
+
+
+def _test_dfix_clip_infeasible_propagates_to_result() -> None:
+    """codex R29 D-fix Test 4: when EVERY anchor is hybrid-infeasible
+    (shooting-clip case = prescreen 100% failure), search returns a
+    structured `JointSearchResult(infeasible=True)` instead of raising.
+    Caller (run_vadi_v5.run_v5_for_clip) checks `.infeasible` and
+    surfaces V5ClipOutput(infeasible=True) without crashing on
+    `sorted(int(c) for c in [])`."""
+    import sys
+    jps = sys.modules[__name__]   # works whether module is loaded as
+                                  # 'memshield.joint_placement_search'
+                                  # (normal import) or as '__main__'
+                                  # (python -m). A separate
+                                  # `import memshield.joint_placement
+                                  # _search` would create a SECOND
+                                  # module object whose globals are
+                                  # different from the one whose
+                                  # AttackStateCache class we are
+                                  # testing.
+    torch.manual_seed(0)
+    np.random.seed(0)
+    T_clean, H, W = 25, 16, 16
+    x_clean = torch.rand(T_clean, H, W, 3)
+    pseudo_masks = [np.zeros((H, W), dtype=np.float32)
+                    for _ in range(T_clean)]
+    cfg = _DummyConfig()
+    forward = _StubForwardFn(H, W, obj_value=-2.0)
+
+    # Force ALL anchors infeasible.
+    real_try_builder = jps.try_build_attack_state_from_W
+
+    def fake_try_builder_always_infeasible(W_clean, *args, **kwargs):
+        bad = [int(c) for c in W_clean]
+        return None, bad
+
+    jps.try_build_attack_state_from_W = fake_try_builder_always_infeasible
+    try:
+        result = joint_curriculum_search(
+            x_clean, pseudo_masks, cfg,
+            forward_fn=forward, lpips_fn=_stub_lpips,
+            K=2, d_min=2, bridge_length=3,
+            phase_steps=(2, 2),
+            cache_max_size=4,
+            candidate_stride=1,
+        )
+    finally:
+        jps.try_build_attack_state_from_W = real_try_builder
+    assert result.infeasible, "expected infeasible=True"
+    assert result.chosen_W_clean == [], result.chosen_W_clean
+    assert result.refine_W_clean == [], result.refine_W_clean
+    assert result.infeasible_stage in {"prescreen", "init", "curriculum"}, \
+        result.infeasible_stage
+    assert result.infeasible_reason and isinstance(
+        result.infeasible_reason, str), result.infeasible_reason
+    print(f"  D-fix #4: clip-level infeasible surfaced cleanly "
+          f"(stage={result.infeasible_stage!r}) OK")
+
+
 def _self_test() -> None:
     print("memshield.joint_placement_search self-tests:")
     _test_simplex_projection_basic()
@@ -2558,7 +3252,13 @@ def _self_test() -> None:
     _test_v3_27_neighbor_with_trust()
     _test_curriculum_smoke_K1_K2_K3()
     _test_attack_state_cache_warmup_in_search()
-    print("memshield.joint_placement_search: all v3 self-tests PASSED")
+    # codex R29 D-fix tests (2026-05-02) + R30 follow-ups
+    _test_dfix_hybrid_infeasible_error_type()
+    _test_dfix_cache_try_get_sentinel()
+    _test_dfix_curriculum_skips_infeasible_schedules()
+    _test_dfix_curriculum_step_drops_specific_schedule()  # R30 Q7
+    _test_dfix_clip_infeasible_propagates_to_result()
+    print("memshield.joint_placement_search: all v3 + D-fix self-tests PASSED")
 
 
 if __name__ == "__main__":
